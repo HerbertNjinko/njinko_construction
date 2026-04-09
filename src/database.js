@@ -1,35 +1,8 @@
 import { randomBytes, randomUUID, scryptSync } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import pg from "pg";
 
 import { seedData } from "./data.js";
-
-const { Pool } = pg;
-const SCHEMA_PATH = join(process.cwd(), "data", "schema.sql");
-const DEFAULT_PORT = 5432;
-
-const pool = new Pool(buildConnectionConfig());
-
-await ensureDatabaseReady();
-
-function buildConnectionConfig() {
-  if (process.env.DATABASE_URL) {
-    return {
-      connectionString: process.env.DATABASE_URL,
-      ssl: process.env.PGSSLMODE === "require" ? { rejectUnauthorized: false } : undefined
-    };
-  }
-
-  return {
-    host: process.env.PGHOST ?? "127.0.0.1",
-    port: Number(process.env.PGPORT ?? DEFAULT_PORT),
-    user: process.env.PGUSER ?? "postgres",
-    password: process.env.PGPASSWORD,
-    database: process.env.PGDATABASE ?? "investors",
-    ssl: process.env.PGSSLMODE === "require" ? { rejectUnauthorized: false } : undefined
-  };
-}
+import { assertDatabaseReady } from "./migrations.js";
+import { pool, queryAll, queryOne, withTransaction } from "./postgres.js";
 
 function nowTimestamp() {
   return new Date().toISOString();
@@ -79,272 +52,6 @@ function mapUserRow(row) {
   };
 }
 
-async function queryAll(sql, params = [], executor = pool) {
-  const result = await executor.query(sql, params);
-  return result.rows;
-}
-
-async function queryOne(sql, params = [], executor = pool) {
-  const rows = await queryAll(sql, params, executor);
-  return rows[0] ?? null;
-}
-
-async function withTransaction(callback) {
-  const client = await pool.connect();
-
-  try {
-    await client.query("BEGIN");
-    const result = await callback(client);
-    await client.query("COMMIT");
-    return result;
-  } catch (error) {
-    try {
-      await client.query("ROLLBACK");
-    } catch {}
-
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
-async function ensureDatabaseReady() {
-  await pool.query(readFileSync(SCHEMA_PATH, "utf8"));
-
-  const existingParticipantCount = await queryOne(
-    `
-      SELECT COUNT(*)::int AS count
-      FROM participants
-    `
-  );
-
-  if ((existingParticipantCount?.count ?? 0) > 0) {
-    return;
-  }
-
-  await seedDatabase();
-}
-
-async function seedDatabase() {
-  const timestamp = nowTimestamp();
-
-  await withTransaction(async (client) => {
-    for (const participant of seedData.participants) {
-      await client.query(
-        `
-          INSERT INTO participants (id, name, category, created_at, updated_at)
-          VALUES ($1, $2, $3, $4, $5)
-        `,
-        [participant.id, participant.name, participant.category, timestamp, timestamp]
-      );
-    }
-
-    for (const user of seedData.users) {
-      await client.query(
-        `
-          INSERT INTO users (
-            id,
-            participant_id,
-            role,
-            email,
-            password_salt,
-            password_hash,
-            is_active,
-            created_at,
-            updated_at
-          )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        `,
-        [
-          user.id,
-          user.participantId,
-          user.role,
-          normalizeEmail(user.email),
-          user.passwordSalt,
-          user.passwordHash,
-          1,
-          timestamp,
-          timestamp
-        ]
-      );
-    }
-
-    for (const deal of seedData.deals) {
-      await client.query(
-        `
-          INSERT INTO deals (
-            id,
-            name,
-            location,
-            total_equity,
-            debt,
-            total_project_cost,
-            sale_price,
-            hold_months,
-            pref_rate,
-            status,
-            current_phase,
-            funded_on,
-            projected_exit_on,
-            actual_exit_on,
-            timeline_progress,
-            created_at,
-            updated_at
-          )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-        `,
-        [
-          deal.id,
-          deal.name,
-          deal.location,
-          deal.totalEquity,
-          deal.debt,
-          deal.totalProjectCost,
-          deal.salePrice,
-          deal.holdMonths,
-          deal.prefRate,
-          deal.status,
-          deal.currentPhase,
-          deal.fundedOn,
-          deal.projectedExitOn ?? null,
-          deal.actualExitOn ?? null,
-          deal.timelineProgress,
-          timestamp,
-          timestamp
-        ]
-      );
-
-      for (const [index, tier] of deal.promoteTiers.entries()) {
-        await client.query(
-          `
-            INSERT INTO promote_tiers (
-              id,
-              deal_id,
-              label,
-              hurdle,
-              investor_share,
-              sponsor_share,
-              sort_order,
-              created_at,
-              updated_at
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-          `,
-          [
-            createId("tier"),
-            deal.id,
-            tier.label,
-            tier.hurdle,
-            tier.investorShare,
-            tier.sponsorShare,
-            index + 1,
-            timestamp,
-            timestamp
-          ]
-        );
-      }
-
-      for (const [index, milestone] of deal.timeline.entries()) {
-        await client.query(
-          `
-            INSERT INTO deal_timeline_items (
-              id,
-              deal_id,
-              label,
-              milestone_date,
-              status,
-              sort_order,
-              created_at,
-              updated_at
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-          `,
-          [
-            createId("timeline"),
-            deal.id,
-            milestone.label,
-            milestone.date,
-            milestone.status,
-            index + 1,
-            timestamp,
-            timestamp
-          ]
-        );
-      }
-    }
-
-    for (const position of seedData.positions) {
-      await client.query(
-        `
-          INSERT INTO positions (
-            id,
-            deal_id,
-            participant_id,
-            class_type,
-            contribution_type,
-            contribution_amount,
-            distributions_to_date,
-            created_at,
-            updated_at
-          )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        `,
-        [
-          position.id,
-          position.dealId,
-          position.participantId,
-          position.classType,
-          position.contributionType,
-          position.contributionAmount,
-          position.distributionsToDate ?? 0,
-          timestamp,
-          timestamp
-        ]
-      );
-    }
-
-    for (const contractor of seedData.contractors) {
-      await client.query(
-        `
-          INSERT INTO contractor_participation (
-            id,
-            deal_id,
-            participant_id,
-            trade,
-            total_contract_value,
-            cash_paid,
-            deferred_amount,
-            contribution_type,
-            hybrid,
-            status,
-            created_at,
-            updated_at
-          )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-        `,
-        [
-          contractor.id,
-          contractor.dealId,
-          contractor.participantId,
-          contractor.trade,
-          contractor.totalContractValue,
-          contractor.cashPaid,
-          contractor.deferredAmount,
-          contractor.contributionType,
-          contractor.hybrid ? 1 : 0,
-          contractor.status,
-          timestamp,
-          timestamp
-        ]
-      );
-    }
-
-    for (const deal of seedData.deals) {
-      await syncDealEquity(deal.id, client);
-    }
-  });
-}
-
 async function syncDealEquity(dealId, executor = pool) {
   const result = await queryOne(
     `
@@ -364,6 +71,267 @@ async function syncDealEquity(dealId, executor = pool) {
     `,
     [roundNumber(result?.totalEquity ?? 0), nowTimestamp(), dealId]
   );
+}
+
+async function insertSeedData(executor) {
+  const timestamp = nowTimestamp();
+
+  for (const participant of seedData.participants) {
+    await executor.query(
+      `
+        INSERT INTO participants (id, name, category, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5)
+      `,
+      [participant.id, participant.name, participant.category, timestamp, timestamp]
+    );
+  }
+
+  for (const user of seedData.users) {
+    await executor.query(
+      `
+        INSERT INTO users (
+          id,
+          participant_id,
+          role,
+          email,
+          password_salt,
+          password_hash,
+          is_active,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `,
+      [
+        user.id,
+        user.participantId,
+        user.role,
+        normalizeEmail(user.email),
+        user.passwordSalt,
+        user.passwordHash,
+        1,
+        timestamp,
+        timestamp
+      ]
+    );
+  }
+
+  for (const deal of seedData.deals) {
+    await executor.query(
+      `
+        INSERT INTO deals (
+          id,
+          name,
+          location,
+          total_equity,
+          debt,
+          total_project_cost,
+          sale_price,
+          hold_months,
+          pref_rate,
+          status,
+          current_phase,
+          funded_on,
+          projected_exit_on,
+          actual_exit_on,
+          timeline_progress,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+      `,
+      [
+        deal.id,
+        deal.name,
+        deal.location,
+        deal.totalEquity,
+        deal.debt,
+        deal.totalProjectCost,
+        deal.salePrice,
+        deal.holdMonths,
+        deal.prefRate,
+        deal.status,
+        deal.currentPhase,
+        deal.fundedOn,
+        deal.projectedExitOn ?? null,
+        deal.actualExitOn ?? null,
+        deal.timelineProgress,
+        timestamp,
+        timestamp
+      ]
+    );
+
+    for (const [index, tier] of deal.promoteTiers.entries()) {
+      await executor.query(
+        `
+          INSERT INTO promote_tiers (
+            id,
+            deal_id,
+            label,
+            hurdle,
+            investor_share,
+            sponsor_share,
+            sort_order,
+            created_at,
+            updated_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        `,
+        [
+          createId("tier"),
+          deal.id,
+          tier.label,
+          tier.hurdle,
+          tier.investorShare,
+          tier.sponsorShare,
+          index + 1,
+          timestamp,
+          timestamp
+        ]
+      );
+    }
+
+    for (const [index, milestone] of deal.timeline.entries()) {
+      await executor.query(
+        `
+          INSERT INTO deal_timeline_items (
+            id,
+            deal_id,
+            label,
+            milestone_date,
+            status,
+            sort_order,
+            created_at,
+            updated_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        `,
+        [
+          createId("timeline"),
+          deal.id,
+          milestone.label,
+          milestone.date,
+          milestone.status,
+          index + 1,
+          timestamp,
+          timestamp
+        ]
+      );
+    }
+  }
+
+  for (const position of seedData.positions) {
+    await executor.query(
+      `
+        INSERT INTO positions (
+          id,
+          deal_id,
+          participant_id,
+          class_type,
+          contribution_type,
+          contribution_amount,
+          distributions_to_date,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `,
+      [
+        position.id,
+        position.dealId,
+        position.participantId,
+        position.classType,
+        position.contributionType,
+        position.contributionAmount,
+        position.distributionsToDate ?? 0,
+        timestamp,
+        timestamp
+      ]
+    );
+  }
+
+  for (const contractor of seedData.contractors) {
+    await executor.query(
+      `
+        INSERT INTO contractor_participation (
+          id,
+          deal_id,
+          participant_id,
+          trade,
+          total_contract_value,
+          cash_paid,
+          deferred_amount,
+          contribution_type,
+          hybrid,
+          status,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      `,
+      [
+        contractor.id,
+        contractor.dealId,
+        contractor.participantId,
+        contractor.trade,
+        contractor.totalContractValue,
+        contractor.cashPaid,
+        contractor.deferredAmount,
+        contractor.contributionType,
+        contractor.hybrid ? 1 : 0,
+        contractor.status,
+        timestamp,
+        timestamp
+      ]
+    );
+  }
+
+  for (const deal of seedData.deals) {
+    await syncDealEquity(deal.id, executor);
+  }
+}
+
+export async function seedDatabase({ force = false } = {}) {
+  await assertDatabaseReady();
+
+  const counts = await queryOne(`
+    SELECT
+      (SELECT COUNT(*)::int FROM participants) AS participants,
+      (SELECT COUNT(*)::int FROM users) AS users,
+      (SELECT COUNT(*)::int FROM deals) AS deals
+  `);
+  const hasExistingData =
+    (counts?.participants ?? 0) > 0 || (counts?.users ?? 0) > 0 || (counts?.deals ?? 0) > 0;
+
+  if (hasExistingData && !force) {
+    throw new Error(
+      "Database already contains data. Run `npm run seed -- --force` if you want to replace it."
+    );
+  }
+
+  await withTransaction(async (client) => {
+    if (force) {
+      await client.query(`
+        TRUNCATE TABLE
+          contractor_participation,
+          positions,
+          deal_timeline_items,
+          promote_tiers,
+          users,
+          deals,
+          participants
+      `);
+    }
+
+    await insertSeedData(client);
+  });
+
+  return {
+    participants: seedData.participants.length,
+    users: seedData.users.length,
+    deals: seedData.deals.length,
+    positions: seedData.positions.length
+  };
 }
 
 export async function getUserByEmail(email) {
@@ -924,8 +892,4 @@ export async function updateDeal(dealId, input) {
       id
     ]
   );
-}
-
-export async function closeDatabasePool() {
-  await pool.end();
 }

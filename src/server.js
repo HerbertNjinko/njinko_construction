@@ -4,6 +4,8 @@ import { extname, join, normalize } from "node:path";
 import { readFile } from "node:fs/promises";
 
 import { buildDashboardForUser, calculateScenarioForDeal } from "./calculations.js";
+import { assertDatabaseReady } from "./migrations.js";
+import { closeDatabasePool } from "./postgres.js";
 import {
   createDealAllocation,
   createManagedUser,
@@ -356,6 +358,29 @@ const server = createServer(async (request, response) => {
   }
 });
 
-server.listen(PORT, HOST, () => {
-  process.stdout.write(`Deal app running at http://${HOST}:${PORT}\n`);
+async function shutdown(exitCode = 0) {
+  if (server.listening) {
+    await new Promise((resolve) => server.close(resolve));
+  }
+  await closeDatabasePool();
+  process.exit(exitCode);
+}
+
+process.on("SIGINT", () => {
+  void shutdown(0);
 });
+
+process.on("SIGTERM", () => {
+  void shutdown(0);
+});
+
+try {
+  await assertDatabaseReady();
+  server.listen(PORT, HOST, () => {
+    process.stdout.write(`Deal app running at http://${HOST}:${PORT}\n`);
+  });
+} catch (error) {
+  process.stderr.write(`${error.message}\n`);
+  await closeDatabasePool();
+  process.exit(1);
+}

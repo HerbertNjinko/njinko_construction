@@ -15,12 +15,19 @@ export PGPORT=5432
 export PGUSER=postgres
 export PGPASSWORD='your-password'
 export PGDATABASE=investors
+npm run migrate
+npm run seed
 npm start
 ```
 
 The app runs on `http://localhost:3000`.
 
+If the database already contains data, `npm run seed` will stop instead of overwriting it. Use `npm run seed -- --force` only when you intentionally want to replace the current contents with the demo dataset.
+If you see `Missing Postgres setting: PGPASSWORD`, start the app from the same shell where you exported the Postgres variables, or use `DATABASE_URL`.
+
 ## Demo logins
+
+These accounts exist only after running `npm run seed`.
 
 - Manager: `manager@njinko.dev` / `njinko-admin`
 - Investor: `sarah@bluecrest.dev` / `investor-sarah`
@@ -42,9 +49,11 @@ The app runs on `http://localhost:3000`.
 
 ## Database
 
-- Schema file: [`data/schema.sql`](/home/herbertabingwa/njinko_construction/data/schema.sql)
+- Migration files: [`migrations/001_initial_schema.sql`](/home/herbertabingwa/njinko_construction/migrations/001_initial_schema.sql)
+- Reference schema snapshot: [`data/schema.sql`](/home/herbertabingwa/njinko_construction/data/schema.sql)
 - Runtime connection uses `DATABASE_URL` or the standard `PGHOST` / `PGPORT` / `PGUSER` / `PGPASSWORD` / `PGDATABASE` variables
 - Default local assumptions if env vars are omitted: host `127.0.0.1`, port `5432`, user `postgres`, database `investors`
+- The app will not auto-create tables or seed demo data on startup. Run `npm run migrate` first, then `npm run seed` only if you want the sample dataset.
 
 ### Core tables
 
@@ -58,7 +67,8 @@ The app runs on `http://localhost:3000`.
 
 ## Notes
 
-- Seed data lives in [`src/data.js`](/home/herbertabingwa/njinko_construction/src/data.js) and loads on first database initialization.
+- Seed data lives in [`src/data.js`](/home/herbertabingwa/njinko_construction/src/data.js) and is loaded only by [`npm run seed`](#run-locally).
+- Migration execution is implemented in [`src/migrations.js`](/home/herbertabingwa/njinko_construction/src/migrations.js).
 - Database access is implemented in [`src/database.js`](/home/herbertabingwa/njinko_construction/src/database.js).
 - The app uses Node's built-in HTTP server plus the [`pg`](https://www.npmjs.com/package/pg) driver for Postgres.
 - This is still a prototype, not production-grade auth, authorization, or accounting infrastructure.
