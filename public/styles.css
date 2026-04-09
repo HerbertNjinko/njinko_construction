@@ -76,7 +76,8 @@ body {
 .deal-card,
 .metric-card,
 .calculator-layout,
-.credential-card {
+.credential-card,
+.admin-card {
   background: var(--panel);
   backdrop-filter: blur(14px);
   border: 1px solid var(--line);
@@ -253,6 +254,22 @@ button:hover {
   color: #7c1a10;
 }
 
+.status-message {
+  margin-top: 1rem;
+  padding: 0.9rem 1rem;
+  border-radius: 16px;
+}
+
+.status-success {
+  background: rgba(24, 133, 85, 0.12);
+  color: #15553a;
+}
+
+.status-error {
+  background: rgba(175, 41, 28, 0.1);
+  color: #7c1a10;
+}
+
 .credentials-grid,
 .metrics-grid,
 .deal-grid,
@@ -261,7 +278,9 @@ button:hover {
 .project-grid,
 .tier-grid,
 .breakdown-grid,
-.class-grid {
+.class-grid,
+.admin-grid,
+.form-grid-2 {
   display: grid;
   gap: 1rem;
 }
@@ -270,8 +289,26 @@ button:hover {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
+.admin-grid {
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  align-items: start;
+}
+
+.form-grid-2 {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
 .credential-card {
   padding: 1.15rem;
+}
+
+.admin-card {
+  padding: 1.2rem;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.admin-card-wide {
+  grid-column: 1 / -1;
 }
 
 .credential-card h3 {
@@ -293,6 +330,11 @@ button:hover {
 
 .panel {
   padding: 1.45rem;
+}
+
+.panel-inline {
+  margin-top: 1rem;
+  padding: 1rem;
 }
 
 .app-header {
@@ -466,6 +508,11 @@ button:hover {
   border-color: rgba(13, 110, 99, 0.2);
 }
 
+.timeline-step.in_progress {
+  background: rgba(13, 110, 99, 0.1);
+  border-color: rgba(13, 110, 99, 0.2);
+}
+
 .timeline-step.complete {
   background: rgba(24, 133, 85, 0.1);
   border-color: rgba(24, 133, 85, 0.18);
@@ -523,6 +570,10 @@ button:hover {
   background: rgba(255, 255, 255, 0.66);
 }
 
+.table-top-gap {
+  margin-top: 1rem;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
@@ -553,6 +604,12 @@ td {
   background: rgba(255, 255, 255, 0.6);
   border: 1px solid var(--line);
   color: var(--muted);
+}
+
+.helper-copy {
+  margin: 0.25rem 0 -0.2rem;
+  color: var(--muted);
+  line-height: 1.5;
 }
 
 @media (max-width: 900px) {

@@ -18,3 +18,5 @@ _site/
 Gemfile.lock
 node_modules/
 npm-debug.log*
+data/*.db
+data/*.db-*

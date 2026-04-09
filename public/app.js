@@ -2,8 +2,15 @@ const state = {
   session: null,
   dashboard: null,
   calculator: null,
+  calculatorSelectionId: null,
+  adminDealId: null,
   loginError: "",
-  loading: true
+  loading: true,
+  messages: {
+    user: null,
+    allocation: null,
+    deal: null
+  }
 };
 
 const app = document.querySelector("#app");
@@ -12,12 +19,6 @@ const currency = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",
   maximumFractionDigits: 0
-});
-
-const preciseCurrency = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-  maximumFractionDigits: 2
 });
 
 const percent = new Intl.NumberFormat("en-US", {
@@ -37,10 +38,6 @@ function escapeHtml(value) {
 
 function formatCurrency(value) {
   return currency.format(value ?? 0);
-}
-
-function formatPreciseCurrency(value) {
-  return preciseCurrency.format(value ?? 0);
 }
 
 function formatPercent(value) {
@@ -72,9 +69,36 @@ async function api(path, options = {}) {
   return payload;
 }
 
-function metricCard(label, value, tone = "") {
+function clearMessages() {
+  state.messages = {
+    user: null,
+    allocation: null,
+    deal: null
+  };
+}
+
+function setMessage(section, type, text) {
+  state.messages[section] = {
+    type,
+    text
+  };
+}
+
+function renderMessage(message) {
+  if (!message) {
+    return "";
+  }
+
   return `
-    <article class="metric-card ${tone}">
+    <div class="status-message status-${escapeHtml(message.type)}">
+      ${escapeHtml(message.text)}
+    </div>
+  `;
+}
+
+function metricCard(label, value) {
+  return `
+    <article class="metric-card">
       <p class="metric-label">${escapeHtml(label)}</p>
       <p class="metric-value">${escapeHtml(value)}</p>
     </article>
@@ -99,6 +123,74 @@ function breakdownItem(label, value) {
   `;
 }
 
+function getManagerEditableDeal() {
+  if (!state.dashboard?.deals?.length) {
+    return null;
+  }
+
+  return (
+    state.dashboard.deals.find((deal) => deal.id === state.adminDealId) ??
+    state.dashboard.deals[0]
+  );
+}
+
+function getCalculatorPreset(dealId) {
+  return state.dashboard?.calculator?.deals?.find((deal) => deal.id === dealId) ?? null;
+}
+
+async function loadCalculator(dealId, overrides = null) {
+  const preset = getCalculatorPreset(dealId);
+
+  if (!preset) {
+    state.calculator = null;
+    state.calculatorSelectionId = null;
+    return;
+  }
+
+  state.calculatorSelectionId = preset.id;
+  state.calculator = await api("/api/calculator", {
+    method: "POST",
+    body: JSON.stringify(
+      overrides ?? {
+        dealId: preset.id,
+        salePrice: preset.salePrice,
+        holdMonths: preset.holdMonths,
+        prefRate: preset.prefRate
+      }
+    )
+  });
+}
+
+async function refreshDashboard() {
+  state.dashboard = await api("/api/dashboard", { method: "GET" });
+
+  if (state.dashboard.role === "manager") {
+    if (
+      !state.adminDealId ||
+      !state.dashboard.deals.some((deal) => deal.id === state.adminDealId)
+    ) {
+      state.adminDealId = state.dashboard.deals[0]?.id ?? null;
+    }
+
+    const nextCalculatorDealId =
+      state.calculatorSelectionId &&
+      state.dashboard.calculator.deals.some((deal) => deal.id === state.calculatorSelectionId)
+        ? state.calculatorSelectionId
+        : state.dashboard.calculator.deals[0]?.id ?? null;
+
+    if (nextCalculatorDealId) {
+      await loadCalculator(nextCalculatorDealId);
+    } else {
+      state.calculator = null;
+      state.calculatorSelectionId = null;
+    }
+  } else {
+    state.calculator = null;
+    state.calculatorSelectionId = null;
+    state.adminDealId = null;
+  }
+}
+
 function renderLogin() {
   return `
     <div class="shell">
@@ -108,14 +200,13 @@ function renderLogin() {
           <h1>Deal visibility without exposing the whole cap table.</h1>
           <p>
             Investors and contractor participants get a clean read-only dashboard:
-            their capital, their preferred return, their projected payout, and the
-            project-level signals that matter. Sponsor view includes the promote trigger
-            calculator and Class C contractor tracking.
+            their capital, preferred return, projected payout, and the project-level
+            signals that matter. Sponsor access includes manager controls backed by SQLite.
           </p>
           <ul class="feature-list">
             <li>Personal portfolio totals with active deal count and current pref accrual.</li>
             <li>Per-project ownership, payout breakdown, status, and timeline progress.</li>
-            <li>Contractor deferred compensation tracked as Class C in the same waterfall.</li>
+            <li>Manager-side user creation, deal allocations, and project updates saved to the database.</li>
           </ul>
         </div>
         <aside class="login-panel">
@@ -147,7 +238,7 @@ function renderLogin() {
             <h3>Demo Accounts</h3>
             <p class="section-copy">
               Use these seeded accounts to inspect the investor view, a contractor-as-investor view,
-              and the sponsor calculator.
+              and the sponsor management console.
             </p>
           </div>
         </div>
@@ -259,8 +350,8 @@ function renderInvestorProject(project) {
               project.projectSummary.salePriceLabel,
               formatCurrency(project.projectSummary.salePrice)
             )}
+            ${summaryItem("Tracked equity", formatCurrency(project.projectSummary.totalEquity))}
             ${summaryItem("Hold period", `${project.projectSummary.holdMonths} months`)}
-            ${summaryItem("Gross project IRR", formatPercent(project.projectSummary.projectIrr))}
           </div>
         </div>
         <div>
@@ -394,7 +485,7 @@ function renderManagerDeal(deal) {
 
 function renderCalculator() {
   const { deals } = state.dashboard.calculator;
-  const selectedDealId = state.calculator?.deal?.id ?? deals[0]?.id;
+  const selectedDealId = state.calculatorSelectionId ?? deals[0]?.id ?? "";
   const selectedPreset =
     deals.find((deal) => deal.id === selectedDealId) ??
     deals[0] ?? {
@@ -404,7 +495,7 @@ function renderCalculator() {
       prefRate: 0
     };
 
-  const result = state.calculator;
+  const result = state.calculator?.deal?.id === selectedDealId ? state.calculator : null;
 
   return `
     <section class="calculator-layout">
@@ -418,7 +509,7 @@ function renderCalculator() {
         <form id="calculator-form">
           <label>
             Deal
-            <select name="dealId">
+            <select name="dealId" id="calculator-deal-select">
               ${deals
                 .map(
                   (deal) => `
@@ -498,7 +589,7 @@ function renderCalculator() {
                   formatCurrency(result.outputs.sponsorPromote)
                 )}
               </div>
-              <div class="panel" style="margin-top: 1rem; padding: 1rem;">
+              <div class="panel panel-inline">
                 <div class="section-head">
                   <div>
                     <h4>Promote tiers</h4>
@@ -523,7 +614,7 @@ function renderCalculator() {
                     .join("")}
                 </div>
               </div>
-              <div class="panel" style="margin-top: 1rem; padding: 1rem;">
+              <div class="panel panel-inline">
                 <div class="section-head">
                   <div>
                     <h4>Waterfall outputs</h4>
@@ -545,7 +636,7 @@ function renderCalculator() {
                     .join("")}
                 </div>
               </div>
-              <div class="table-wrap" style="margin-top: 1rem;">
+              <div class="table-wrap table-top-gap">
                 <table>
                   <thead>
                     <tr>
@@ -582,8 +673,7 @@ function renderCalculator() {
             `
             : `
               <div class="empty-state">
-                Submit a scenario to see distribute-able equity, tier selection, investor payouts,
-                and sponsor promote.
+                Select a deal and run a scenario to see the promote hurdle, investor payouts, and sponsor share.
               </div>
             `
         }
@@ -654,6 +744,422 @@ function renderContractorTable() {
   `;
 }
 
+function renderCreateUserPanel() {
+  return `
+    <article class="admin-card">
+      <p class="eyebrow">Manager Control</p>
+      <h3>Add Investor Or Contractor User</h3>
+      <p class="section-copy">
+        Creates both the participant profile and login. New users are stored in SQLite immediately.
+      </p>
+      ${renderMessage(state.messages.user)}
+      <form id="user-form">
+        <label>
+          Category
+          <select name="category" required>
+            <option value="investor">Investor</option>
+            <option value="contractor">Contractor participant</option>
+          </select>
+        </label>
+        <label>
+          Full name
+          <input type="text" name="name" placeholder="Jane Doe" minlength="2" required />
+        </label>
+        <label>
+          Email
+          <input type="email" name="email" placeholder="jane@example.com" required />
+        </label>
+        <label>
+          Temporary password
+          <input type="password" name="password" minlength="8" required />
+        </label>
+        <button class="button-primary" type="submit">Create user</button>
+      </form>
+    </article>
+  `;
+}
+
+function renderAllocationPanel() {
+  const participants = state.dashboard.admin.participants;
+  const deals = state.dashboard.deals;
+
+  return `
+    <article class="admin-card">
+      <p class="eyebrow">Manager Control</p>
+      <h3>Add Deal Allocation</h3>
+      <p class="section-copy">
+        Link a participant to a deal. Contractor fields are only required for contractor participants.
+      </p>
+      ${renderMessage(state.messages.allocation)}
+      <form id="allocation-form">
+        <label>
+          Participant
+          <select name="participantId" required>
+            <option value="">Select participant</option>
+            ${participants
+              .map(
+                (participant) => `
+                  <option value="${escapeHtml(participant.id)}">
+                    ${escapeHtml(participant.name)} · ${escapeHtml(titleCase(participant.category))}
+                  </option>
+                `
+              )
+              .join("")}
+          </select>
+        </label>
+        <label>
+          Deal
+          <select name="dealId" required>
+            <option value="">Select deal</option>
+            ${deals
+              .map(
+                (deal) => `
+                  <option value="${escapeHtml(deal.id)}">${escapeHtml(deal.name)}</option>
+                `
+              )
+              .join("")}
+          </select>
+        </label>
+        <div class="form-grid-2">
+          <label>
+            Class type
+            <select name="classType" required>
+              <option value="Class A">Class A</option>
+              <option value="Class C">Class C</option>
+            </select>
+          </label>
+          <label>
+            Contribution amount
+            <input type="number" name="contributionAmount" min="0" step="1000" required />
+          </label>
+        </div>
+        <label>
+          Contribution type
+          <input type="text" name="contributionType" placeholder="Cash equity or Deferred compensation" />
+        </label>
+        <p class="helper-copy">
+          Contractor-only inputs:
+        </p>
+        <div class="form-grid-2">
+          <label>
+            Trade
+            <input type="text" name="trade" placeholder="Foundation" />
+          </label>
+          <label>
+            Total contract value
+            <input type="number" name="totalContractValue" min="0" step="1000" />
+          </label>
+        </div>
+        <div class="form-grid-2">
+          <label>
+            Cash paid
+            <input type="number" name="cashPaid" min="0" step="1000" />
+          </label>
+          <label>
+            Contractor status
+            <select name="contractorStatus">
+              <option value="Active">Active</option>
+              <option value="Completed">Completed</option>
+              <option value="Paid">Paid</option>
+            </select>
+          </label>
+        </div>
+        <button class="button-primary" type="submit">Save allocation</button>
+      </form>
+    </article>
+  `;
+}
+
+function renderDealEditorPanel() {
+  const deal = getManagerEditableDeal();
+
+  if (!deal) {
+    return `
+      <article class="admin-card">
+        <h3>Update Project</h3>
+        <div class="empty-state">No deals are available to edit.</div>
+      </article>
+    `;
+  }
+
+  return `
+    <article class="admin-card admin-card-wide">
+      <p class="eyebrow">Manager Control</p>
+      <h3>Update Project</h3>
+      <p class="section-copy">
+        Save project status, phase, financial assumptions, and timeline progress to the database.
+      </p>
+      ${renderMessage(state.messages.deal)}
+      <form id="deal-form" data-deal-id="${escapeHtml(deal.id)}">
+        <label>
+          Deal
+          <select name="dealId" id="deal-editor-select">
+            ${state.dashboard.deals
+              .map(
+                (item) => `
+                  <option value="${escapeHtml(item.id)}" ${
+                    item.id === deal.id ? "selected" : ""
+                  }>
+                    ${escapeHtml(item.name)}
+                  </option>
+                `
+              )
+              .join("")}
+          </select>
+        </label>
+        <div class="summary-grid">
+          ${summaryItem("Tracked equity", formatCurrency(deal.totalEquity))}
+          ${summaryItem("Gross project IRR", formatPercent(deal.projectIrr))}
+          ${summaryItem("Sponsor promote", formatCurrency(deal.sponsorPromote))}
+          ${summaryItem("Timeline progress", `${deal.timelineProgress}%`)}
+        </div>
+        <div class="form-grid-2">
+          <label>
+            Deal name
+            <input type="text" name="name" value="${escapeHtml(deal.name)}" required />
+          </label>
+          <label>
+            Location
+            <input type="text" name="location" value="${escapeHtml(deal.location)}" required />
+          </label>
+        </div>
+        <div class="form-grid-2">
+          <label>
+            Current phase
+            <input
+              type="text"
+              name="currentPhase"
+              value="${escapeHtml(deal.currentPhase)}"
+              required
+            />
+          </label>
+          <label>
+            Status
+            <select name="status" required>
+              <option value="under_construction" ${
+                deal.status === "under_construction" ? "selected" : ""
+              }>Under construction</option>
+              <option value="listed" ${deal.status === "listed" ? "selected" : ""}>Listed</option>
+              <option value="sold" ${deal.status === "sold" ? "selected" : ""}>Sold</option>
+            </select>
+          </label>
+        </div>
+        <div class="form-grid-2">
+          <label>
+            Total project cost
+            <input
+              type="number"
+              name="totalProjectCost"
+              min="0"
+              step="1000"
+              value="${escapeHtml(String(deal.totalProjectCost))}"
+              required
+            />
+          </label>
+          <label>
+            Debt
+            <input
+              type="number"
+              name="debt"
+              min="0"
+              step="1000"
+              value="${escapeHtml(String(deal.debt))}"
+              required
+            />
+          </label>
+        </div>
+        <div class="form-grid-2">
+          <label>
+            Sale price
+            <input
+              type="number"
+              name="salePrice"
+              min="0"
+              step="1000"
+              value="${escapeHtml(String(deal.salePrice))}"
+              required
+            />
+          </label>
+          <label>
+            Hold months
+            <input
+              type="number"
+              name="holdMonths"
+              min="1"
+              step="1"
+              value="${escapeHtml(String(deal.holdMonths))}"
+              required
+            />
+          </label>
+        </div>
+        <div class="form-grid-2">
+          <label>
+            Pref rate
+            <input
+              type="number"
+              name="prefRate"
+              min="0"
+              max="0.3"
+              step="0.005"
+              value="${escapeHtml(String(deal.prefRate))}"
+              required
+            />
+          </label>
+          <label>
+            Timeline progress
+            <input
+              type="number"
+              name="timelineProgress"
+              min="0"
+              max="100"
+              step="1"
+              value="${escapeHtml(String(deal.timelineProgress))}"
+              required
+            />
+          </label>
+        </div>
+        <div class="form-grid-2">
+          <label>
+            Funded on
+            <input type="date" name="fundedOn" value="${escapeHtml(deal.fundedOn)}" required />
+          </label>
+          <label>
+            Projected exit
+            <input
+              type="date"
+              name="projectedExitOn"
+              value="${escapeHtml(deal.projectedExitOn ?? "")}"
+            />
+          </label>
+        </div>
+        <label>
+          Actual exit
+          <input type="date" name="actualExitOn" value="${escapeHtml(deal.actualExitOn ?? "")}" />
+        </label>
+        <button class="button-primary" type="submit">Save project changes</button>
+      </form>
+    </article>
+  `;
+}
+
+function renderUserDirectory() {
+  const rows = state.dashboard.admin.users;
+
+  return `
+    <section class="panel">
+      <div class="section-head">
+        <div>
+          <h3>User Directory</h3>
+          <p class="section-copy">
+            Current login-enabled users. New manager-added accounts appear here after save.
+          </p>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Category</th>
+              <th>Email</th>
+              <th>Role</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows
+              .map(
+                (row) => `
+                  <tr>
+                    <td>${escapeHtml(row.name)}</td>
+                    <td>${escapeHtml(titleCase(row.category))}</td>
+                    <td>${escapeHtml(row.email)}</td>
+                    <td>${escapeHtml(titleCase(row.role))}</td>
+                  </tr>
+                `
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
+function renderAllocationTable() {
+  const rows = state.dashboard.admin.allocations;
+
+  return `
+    <section class="panel">
+      <div class="section-head">
+        <div>
+          <h3>Current Deal Allocations</h3>
+          <p class="section-copy">
+            Stored capital and deferred-comp participation records across all projects.
+          </p>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Deal</th>
+              <th>Participant</th>
+              <th>Category</th>
+              <th>Class</th>
+              <th>Contribution</th>
+              <th>Type</th>
+              <th>Trade</th>
+              <th>Cash Paid</th>
+              <th>Deferred</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows
+              .map(
+                (row) => `
+                  <tr>
+                    <td>${escapeHtml(row.dealName)}</td>
+                    <td>${escapeHtml(row.participantName)}</td>
+                    <td>${escapeHtml(titleCase(row.category))}</td>
+                    <td>${escapeHtml(row.classType)}</td>
+                    <td>${escapeHtml(formatCurrency(row.contributionAmount))}</td>
+                    <td>${escapeHtml(row.contributionType)}</td>
+                    <td>${escapeHtml(row.trade ?? "—")}</td>
+                    <td>${escapeHtml(row.category === "contractor" ? formatCurrency(row.cashPaid) : "—")}</td>
+                    <td>${escapeHtml(formatCurrency(row.deferredAmount))}</td>
+                    <td>${escapeHtml(row.status ?? "—")}</td>
+                  </tr>
+                `
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  `;
+}
+
+function renderManagerAdmin() {
+  return `
+    <section class="panel">
+      <div class="section-head">
+        <div>
+          <h3>Admin Console</h3>
+          <p class="section-copy">
+            Manager-only controls for platform users, deal allocations, and project updates. Changes are persisted to SQLite.
+          </p>
+        </div>
+      </div>
+      <div class="admin-grid">
+        ${renderCreateUserPanel()}
+        ${renderAllocationPanel()}
+        ${renderDealEditorPanel()}
+      </div>
+    </section>
+  `;
+}
+
 function renderManagerDashboard() {
   const { viewer, overview, deals } = state.dashboard;
 
@@ -690,6 +1196,10 @@ function renderManagerDashboard() {
           )}
         </div>
       </section>
+
+      ${renderManagerAdmin()}
+      ${renderUserDirectory()}
+      ${renderAllocationTable()}
 
       <section class="panel">
         <div class="section-head">
@@ -746,28 +1256,20 @@ async function loadSession() {
     state.session = session.user;
 
     if (state.session) {
-      state.dashboard = await api("/api/dashboard", { method: "GET" });
-
-      if (state.dashboard.role === "manager" && state.dashboard.calculator.deals.length) {
-        state.calculator = await api("/api/calculator", {
-          method: "POST",
-          body: JSON.stringify({
-            dealId: state.dashboard.calculator.deals[0].id,
-            salePrice: state.dashboard.calculator.deals[0].salePrice,
-            holdMonths: state.dashboard.calculator.deals[0].holdMonths,
-            prefRate: state.dashboard.calculator.deals[0].prefRate
-          })
-        });
-      }
+      await refreshDashboard();
     } else {
       state.dashboard = null;
       state.calculator = null;
+      state.calculatorSelectionId = null;
+      state.adminDealId = null;
     }
   } catch (error) {
     state.loginError = error.message;
     state.session = null;
     state.dashboard = null;
     state.calculator = null;
+    state.calculatorSelectionId = null;
+    state.adminDealId = null;
   } finally {
     state.loading = false;
     render();
@@ -790,26 +1292,141 @@ document.addEventListener("submit", async (event) => {
           password: formData.get("password")
         })
       });
+      clearMessages();
       await loadSession();
     } catch (error) {
       state.loading = false;
       state.loginError = error.message;
       render();
     }
+
+    return;
   }
 
   if (event.target.id === "calculator-form") {
     event.preventDefault();
     const formData = new FormData(event.target);
-    state.calculator = await api("/api/calculator", {
-      method: "POST",
-      body: JSON.stringify({
+
+    try {
+      await loadCalculator(String(formData.get("dealId")), {
         dealId: formData.get("dealId"),
         salePrice: Number(formData.get("salePrice")),
         holdMonths: Number(formData.get("holdMonths")),
         prefRate: Number(formData.get("prefRate"))
-      })
-    });
+      });
+      render();
+    } catch (error) {
+      setMessage("deal", "error", error.message);
+      render();
+    }
+
+    return;
+  }
+
+  if (event.target.id === "user-form") {
+    event.preventDefault();
+    const formData = new FormData(event.target);
+
+    try {
+      await api("/api/admin/users", {
+        method: "POST",
+        body: JSON.stringify({
+          category: formData.get("category"),
+          name: formData.get("name"),
+          email: formData.get("email"),
+          password: formData.get("password")
+        })
+      });
+      await refreshDashboard();
+      setMessage("user", "success", "User created and saved to the database.");
+      event.target.reset();
+    } catch (error) {
+      setMessage("user", "error", error.message);
+    }
+
+    render();
+    return;
+  }
+
+  if (event.target.id === "allocation-form") {
+    event.preventDefault();
+    const formData = new FormData(event.target);
+
+    try {
+      await api("/api/admin/allocations", {
+        method: "POST",
+        body: JSON.stringify({
+          participantId: formData.get("participantId"),
+          dealId: formData.get("dealId"),
+          classType: formData.get("classType"),
+          contributionAmount: Number(formData.get("contributionAmount")),
+          contributionType: formData.get("contributionType"),
+          trade: formData.get("trade"),
+          totalContractValue: formData.get("totalContractValue")
+            ? Number(formData.get("totalContractValue"))
+            : 0,
+          cashPaid: formData.get("cashPaid") ? Number(formData.get("cashPaid")) : 0,
+          contractorStatus: formData.get("contractorStatus")
+        })
+      });
+      await refreshDashboard();
+      setMessage("allocation", "success", "Deal allocation saved to the database.");
+      event.target.reset();
+    } catch (error) {
+      setMessage("allocation", "error", error.message);
+    }
+
+    render();
+    return;
+  }
+
+  if (event.target.id === "deal-form") {
+    event.preventDefault();
+    const formData = new FormData(event.target);
+    const dealId = String(formData.get("dealId"));
+
+    try {
+      await api(`/api/admin/deals/${encodeURIComponent(dealId)}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          name: formData.get("name"),
+          location: formData.get("location"),
+          currentPhase: formData.get("currentPhase"),
+          status: formData.get("status"),
+          totalProjectCost: Number(formData.get("totalProjectCost")),
+          debt: Number(formData.get("debt")),
+          salePrice: Number(formData.get("salePrice")),
+          holdMonths: Number(formData.get("holdMonths")),
+          prefRate: Number(formData.get("prefRate")),
+          timelineProgress: Number(formData.get("timelineProgress")),
+          fundedOn: formData.get("fundedOn"),
+          projectedExitOn: formData.get("projectedExitOn"),
+          actualExitOn: formData.get("actualExitOn")
+        })
+      });
+      state.adminDealId = dealId;
+      await refreshDashboard();
+      setMessage("deal", "success", "Project changes saved to the database.");
+    } catch (error) {
+      setMessage("deal", "error", error.message);
+    }
+
+    render();
+  }
+});
+
+document.addEventListener("change", async (event) => {
+  if (event.target.id === "deal-editor-select") {
+    state.adminDealId = event.target.value;
+    state.messages.deal = null;
+    render();
+    return;
+  }
+
+  if (event.target.id === "calculator-deal-select") {
+    try {
+      await loadCalculator(event.target.value);
+    } catch {}
     render();
   }
 });
@@ -820,7 +1437,10 @@ document.addEventListener("click", async (event) => {
     state.session = null;
     state.dashboard = null;
     state.calculator = null;
+    state.calculatorSelectionId = null;
+    state.adminDealId = null;
     state.loginError = "";
+    clearMessages();
     render();
   }
 });

@@ -226,7 +226,7 @@ export function buildInvestorDashboard(user, data = seedData) {
         totalProjectCost: deal.totalProjectCost,
         salePrice: waterfall.salePrice,
         salePriceLabel: exitLabel,
-        totalEquity: deal.totalEquity,
+        totalEquity: waterfall.totalEquity,
         debt: deal.debt,
         holdMonths: deal.holdMonths,
         projectIrr: waterfall.projectIrr,
@@ -271,6 +271,10 @@ export function buildInvestorDashboard(user, data = seedData) {
 
 export function buildManagerDashboard(user, data = seedData) {
   const participantMap = getParticipantMap(data);
+  const userMap = new Map(data.users.map((item) => [item.participantId, item]));
+  const contractorMap = new Map(
+    data.contractors.map((item) => [`${item.dealId}:${item.participantId}`, item])
+  );
 
   const deals = data.deals.map((deal) => {
     const dealPositions = data.positions.filter((position) => position.dealId === deal.id);
@@ -282,7 +286,7 @@ export function buildManagerDashboard(user, data = seedData) {
       location: deal.location,
       status: deal.status,
       statusLabel: statusLabel(deal.status),
-      totalEquity: deal.totalEquity,
+      totalEquity: waterfall.totalEquity,
       debt: deal.debt,
       totalProjectCost: deal.totalProjectCost,
       salePrice: deal.salePrice,
@@ -290,6 +294,10 @@ export function buildManagerDashboard(user, data = seedData) {
       prefRate: deal.prefRate,
       currentPhase: deal.currentPhase,
       timelineProgress: deal.timelineProgress,
+      timeline: deal.timeline,
+      fundedOn: deal.fundedOn,
+      projectedExitOn: deal.projectedExitOn,
+      actualExitOn: deal.actualExitOn,
       projectIrr: waterfall.projectIrr,
       sponsorPromote: waterfall.sponsorPromote,
       activeTier: waterfall.activeTier,
@@ -323,6 +331,8 @@ export function buildManagerDashboard(user, data = seedData) {
 
     return {
       id: contractor.id,
+      dealId: contractor.dealId,
+      participantId: contractor.participantId,
       dealName: deal.name,
       contractorName: contractor.contractorName,
       trade: contractor.trade,
@@ -330,7 +340,7 @@ export function buildManagerDashboard(user, data = seedData) {
       cashPaid: contractor.cashPaid,
       deferredAmount: contractor.deferredAmount,
       contributionType: contractor.contributionType,
-      ownershipPct: contractor.deferredAmount / deal.totalEquity,
+      ownershipPct: waterfall.totalEquity > 0 ? contractor.deferredAmount / waterfall.totalEquity : 0,
       prefEarned:
         deal.status === "sold"
           ? positionResult?.prefEarned ?? 0
@@ -345,6 +355,59 @@ export function buildManagerDashboard(user, data = seedData) {
       hybrid: contractor.hybrid
     };
   });
+
+  const adminUsers = data.users
+    .map((account) => ({
+      id: account.id,
+      participantId: account.participantId,
+      name: account.name,
+      email: account.email,
+      role: account.role,
+      category: participantMap.get(account.participantId)?.category ?? "investor"
+    }))
+    .sort((left, right) => left.name.localeCompare(right.name));
+
+  const adminParticipants = data.participants
+    .filter((participant) => participant.category !== "sponsor")
+    .map((participant) => {
+      const linkedUser = userMap.get(participant.id);
+
+      return {
+        id: participant.id,
+        name: participant.name,
+        category: participant.category,
+        hasUser: Boolean(linkedUser),
+        email: linkedUser?.email ?? null
+      };
+    })
+    .sort((left, right) => left.name.localeCompare(right.name));
+
+  const adminAllocations = data.positions
+    .map((position) => {
+      const deal = data.deals.find((item) => item.id === position.dealId);
+      const participant = participantMap.get(position.participantId);
+      const contractorRecord = contractorMap.get(`${position.dealId}:${position.participantId}`);
+
+      return {
+        id: position.id,
+        dealId: position.dealId,
+        dealName: deal?.name ?? "Deal",
+        participantId: position.participantId,
+        participantName: participant?.name ?? "Participant",
+        category: participant?.category ?? "investor",
+        classType: position.classType,
+        contributionType: position.contributionType,
+        contributionAmount: position.contributionAmount,
+        trade: contractorRecord?.trade ?? null,
+        cashPaid: contractorRecord?.cashPaid ?? 0,
+        deferredAmount: contractorRecord?.deferredAmount ?? position.contributionAmount,
+        status: contractorRecord?.status ?? null
+      };
+    })
+    .sort((left, right) => {
+      const dealCompare = left.dealName.localeCompare(right.dealName);
+      return dealCompare !== 0 ? dealCompare : left.participantName.localeCompare(right.participantName);
+    });
 
   return {
     role: user.role,
@@ -361,6 +424,11 @@ export function buildManagerDashboard(user, data = seedData) {
     },
     deals,
     contractorLedger,
+    admin: {
+      users: adminUsers,
+      participants: adminParticipants,
+      allocations: adminAllocations
+    },
     calculator: {
       deals: deals.map((deal) => ({
         id: deal.id,

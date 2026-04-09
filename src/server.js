@@ -3,8 +3,15 @@ import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { extname, join, normalize } from "node:path";
 import { readFile } from "node:fs/promises";
 
-import { seedData } from "./data.js";
 import { buildDashboardForUser, calculateScenarioForDeal } from "./calculations.js";
+import {
+  createDealAllocation,
+  createManagedUser,
+  getAppDataSnapshot,
+  getUserByEmail,
+  getUserById,
+  updateDeal
+} from "./database.js";
 
 const HOST = "0.0.0.0";
 const PORT = Number(process.env.PORT ?? 3000);
@@ -66,6 +73,7 @@ function sendJson(response, statusCode, payload, headers = {}) {
 
 function sanitizePath(pathname) {
   const safePath = pathname === "/" ? "/index.html" : pathname;
+
   return normalize(safePath)
     .replace(/^(\.\.[/\\])+/, "")
     .replace(/^[/\\]+/, "");
@@ -102,17 +110,14 @@ function createSession(userId) {
   return sessionId;
 }
 
-function clearSession(request, response) {
+function destroySession(request) {
   const cookies = parseCookies(request);
 
   if (cookies.sessionId) {
     sessions.delete(cookies.sessionId);
   }
 
-  response.setHeader(
-    "Set-Cookie",
-    "sessionId=; HttpOnly; Max-Age=0; Path=/; SameSite=Lax"
-  );
+  return "sessionId=; HttpOnly; Max-Age=0; Path=/; SameSite=Lax";
 }
 
 function getCurrentUser(request) {
@@ -129,7 +134,7 @@ function getCurrentUser(request) {
     return null;
   }
 
-  return seedData.users.find((user) => user.id === session.userId) ?? null;
+  return getUserById(session.userId);
 }
 
 function requireUser(request, response) {
@@ -137,6 +142,21 @@ function requireUser(request, response) {
 
   if (!user) {
     sendJson(response, 401, { error: "Authentication required." });
+    return null;
+  }
+
+  return user;
+}
+
+function requireManager(request, response) {
+  const user = requireUser(request, response);
+
+  if (!user) {
+    return null;
+  }
+
+  if (user.role !== "manager") {
+    sendJson(response, 403, { error: "Manager access is required." });
     return null;
   }
 
@@ -155,6 +175,7 @@ function stripUserSecrets(user) {
 const server = createServer(async (request, response) => {
   const method = request.method ?? "GET";
   const url = new URL(request.url, `http://${request.headers.host}`);
+  const dealUpdateMatch = url.pathname.match(/^\/api\/admin\/deals\/([^/]+)$/);
 
   if (method === "POST" && url.pathname === "/api/login") {
     const body = await readJsonBody(request);
@@ -164,9 +185,7 @@ const server = createServer(async (request, response) => {
       return;
     }
 
-    const user = seedData.users.find(
-      (item) => item.email.toLowerCase() === body.email.trim().toLowerCase()
-    );
+    const user = getUserByEmail(body.email);
 
     if (!user || !verifyPassword(user, body.password)) {
       sendJson(response, 401, { error: "Invalid credentials." });
@@ -188,8 +207,7 @@ const server = createServer(async (request, response) => {
   }
 
   if (method === "POST" && url.pathname === "/api/logout") {
-    clearSession(request, response);
-    sendJson(response, 200, { ok: true });
+    sendJson(response, 200, { ok: true }, { "Set-Cookie": destroySession(request) });
     return;
   }
 
@@ -206,7 +224,8 @@ const server = createServer(async (request, response) => {
       return;
     }
 
-    sendJson(response, 200, buildDashboardForUser(user));
+    const snapshot = getAppDataSnapshot();
+    sendJson(response, 200, buildDashboardForUser(user, snapshot));
     return;
   }
 
@@ -229,11 +248,16 @@ const server = createServer(async (request, response) => {
       return;
     }
 
-    const scenario = calculateScenarioForDeal(body.dealId, {
-      salePrice: Number(body.salePrice),
-      holdMonths: Number(body.holdMonths),
-      prefRate: Number(body.prefRate)
-    });
+    const snapshot = getAppDataSnapshot();
+    const scenario = calculateScenarioForDeal(
+      body.dealId,
+      {
+        salePrice: body.salePrice,
+        holdMonths: body.holdMonths,
+        prefRate: body.prefRate
+      },
+      snapshot
+    );
 
     if (!scenario) {
       sendJson(response, 404, { error: "Deal not found." });
@@ -241,6 +265,78 @@ const server = createServer(async (request, response) => {
     }
 
     sendJson(response, 200, scenario);
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/api/admin/users") {
+    const manager = requireManager(request, response);
+
+    if (!manager) {
+      return;
+    }
+
+    const body = await readJsonBody(request);
+
+    if (!body) {
+      sendJson(response, 400, { error: "A valid request body is required." });
+      return;
+    }
+
+    try {
+      const createdUser = createManagedUser(body);
+      sendJson(response, 201, { user: stripUserSecrets(createdUser) });
+    } catch (error) {
+      sendJson(response, 400, { error: error.message });
+    }
+
+    return;
+  }
+
+  if (method === "POST" && url.pathname === "/api/admin/allocations") {
+    const manager = requireManager(request, response);
+
+    if (!manager) {
+      return;
+    }
+
+    const body = await readJsonBody(request);
+
+    if (!body) {
+      sendJson(response, 400, { error: "A valid request body is required." });
+      return;
+    }
+
+    try {
+      createDealAllocation(body);
+      sendJson(response, 201, { ok: true });
+    } catch (error) {
+      sendJson(response, 400, { error: error.message });
+    }
+
+    return;
+  }
+
+  if (method === "PATCH" && dealUpdateMatch) {
+    const manager = requireManager(request, response);
+
+    if (!manager) {
+      return;
+    }
+
+    const body = await readJsonBody(request);
+
+    if (!body) {
+      sendJson(response, 400, { error: "A valid request body is required." });
+      return;
+    }
+
+    try {
+      updateDeal(decodeURIComponent(dealUpdateMatch[1]), body);
+      sendJson(response, 200, { ok: true });
+    } catch (error) {
+      sendJson(response, 400, { error: error.message });
+    }
+
     return;
   }
 
