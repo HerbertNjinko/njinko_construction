@@ -1,21 +1,35 @@
 import { randomBytes, randomUUID, scryptSync } from "node:crypto";
-import { mkdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import pg from "pg";
 
 import { seedData } from "./data.js";
 
-const DATA_DIR = join(process.cwd(), "data");
-const DATABASE_PATH = join(DATA_DIR, "deal_app.db");
-const SCHEMA_PATH = join(DATA_DIR, "schema.sql");
+const { Pool } = pg;
+const SCHEMA_PATH = join(process.cwd(), "data", "schema.sql");
+const DEFAULT_PORT = 5432;
 
-mkdirSync(DATA_DIR, { recursive: true });
+const pool = new Pool(buildConnectionConfig());
 
-export const db = new DatabaseSync(DATABASE_PATH);
-db.exec("PRAGMA foreign_keys = ON;");
-db.exec(readFileSync(SCHEMA_PATH, "utf8"));
+await ensureDatabaseReady();
 
-initializeDatabase();
+function buildConnectionConfig() {
+  if (process.env.DATABASE_URL) {
+    return {
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.PGSSLMODE === "require" ? { rejectUnauthorized: false } : undefined
+    };
+  }
+
+  return {
+    host: process.env.PGHOST ?? "127.0.0.1",
+    port: Number(process.env.PGPORT ?? DEFAULT_PORT),
+    user: process.env.PGUSER ?? "postgres",
+    password: process.env.PGPASSWORD,
+    database: process.env.PGDATABASE ?? "investors",
+    ssl: process.env.PGSSLMODE === "require" ? { rejectUnauthorized: false } : undefined
+  };
+}
 
 function nowTimestamp() {
   return new Date().toISOString();
@@ -35,26 +49,6 @@ function roundNumber(value) {
 
 function createId(prefix) {
   return `${prefix}-${randomUUID()}`;
-}
-
-function runInTransaction(callback) {
-  db.exec("BEGIN");
-
-  try {
-    const result = callback();
-    db.exec("COMMIT");
-    return result;
-  } catch (error) {
-    try {
-      db.exec("ROLLBACK");
-    } catch {}
-
-    throw error;
-  }
-}
-
-function getTableCount(tableName) {
-  return db.prepare(`SELECT COUNT(*) AS count FROM ${tableName}`).get().count;
 }
 
 function hashPassword(password) {
@@ -85,400 +79,422 @@ function mapUserRow(row) {
   };
 }
 
-function syncDealEquity(dealId) {
-  const totalEquity =
-    db
-      .prepare(
-        `
-          SELECT COALESCE(SUM(contribution_amount), 0) AS totalEquity
-          FROM positions
-          WHERE deal_id = ?
-        `
-      )
-      .get(dealId).totalEquity ?? 0;
-
-  db.prepare(
-    `
-      UPDATE deals
-      SET total_equity = ?, updated_at = ?
-      WHERE id = ?
-    `
-  ).run(roundNumber(totalEquity), nowTimestamp(), dealId);
+async function queryAll(sql, params = [], executor = pool) {
+  const result = await executor.query(sql, params);
+  return result.rows;
 }
 
-function initializeDatabase() {
-  if (getTableCount("participants") > 0) {
+async function queryOne(sql, params = [], executor = pool) {
+  const rows = await queryAll(sql, params, executor);
+  return rows[0] ?? null;
+}
+
+async function withTransaction(callback) {
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+    const result = await callback(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {}
+
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function ensureDatabaseReady() {
+  await pool.query(readFileSync(SCHEMA_PATH, "utf8"));
+
+  const existingParticipantCount = await queryOne(
+    `
+      SELECT COUNT(*)::int AS count
+      FROM participants
+    `
+  );
+
+  if ((existingParticipantCount?.count ?? 0) > 0) {
     return;
   }
 
+  await seedDatabase();
+}
+
+async function seedDatabase() {
   const timestamp = nowTimestamp();
 
-  const insertParticipant = db.prepare(
-    `
-      INSERT INTO participants (id, name, category, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?)
-    `
-  );
-  const insertUser = db.prepare(
-    `
-      INSERT INTO users (
-        id,
-        participant_id,
-        role,
-        email,
-        password_salt,
-        password_hash,
-        is_active,
-        created_at,
-        updated_at
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `
-  );
-  const insertDeal = db.prepare(
-    `
-      INSERT INTO deals (
-        id,
-        name,
-        location,
-        total_equity,
-        debt,
-        total_project_cost,
-        sale_price,
-        hold_months,
-        pref_rate,
-        status,
-        current_phase,
-        funded_on,
-        projected_exit_on,
-        actual_exit_on,
-        timeline_progress,
-        created_at,
-        updated_at
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `
-  );
-  const insertPromoteTier = db.prepare(
-    `
-      INSERT INTO promote_tiers (
-        id,
-        deal_id,
-        label,
-        hurdle,
-        investor_share,
-        sponsor_share,
-        sort_order,
-        created_at,
-        updated_at
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `
-  );
-  const insertTimelineItem = db.prepare(
-    `
-      INSERT INTO deal_timeline_items (
-        id,
-        deal_id,
-        label,
-        milestone_date,
-        status,
-        sort_order,
-        created_at,
-        updated_at
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `
-  );
-  const insertPosition = db.prepare(
-    `
-      INSERT INTO positions (
-        id,
-        deal_id,
-        participant_id,
-        class_type,
-        contribution_type,
-        contribution_amount,
-        distributions_to_date,
-        created_at,
-        updated_at
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `
-  );
-  const insertContractor = db.prepare(
-    `
-      INSERT INTO contractor_participation (
-        id,
-        deal_id,
-        participant_id,
-        trade,
-        total_contract_value,
-        cash_paid,
-        deferred_amount,
-        contribution_type,
-        hybrid,
-        status,
-        created_at,
-        updated_at
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `
-  );
-
-  runInTransaction(() => {
+  await withTransaction(async (client) => {
     for (const participant of seedData.participants) {
-      insertParticipant.run(
-        participant.id,
-        participant.name,
-        participant.category,
-        timestamp,
-        timestamp
+      await client.query(
+        `
+          INSERT INTO participants (id, name, category, created_at, updated_at)
+          VALUES ($1, $2, $3, $4, $5)
+        `,
+        [participant.id, participant.name, participant.category, timestamp, timestamp]
       );
     }
 
     for (const user of seedData.users) {
-      insertUser.run(
-        user.id,
-        user.participantId,
-        user.role,
-        normalizeEmail(user.email),
-        user.passwordSalt,
-        user.passwordHash,
-        1,
-        timestamp,
-        timestamp
+      await client.query(
+        `
+          INSERT INTO users (
+            id,
+            participant_id,
+            role,
+            email,
+            password_salt,
+            password_hash,
+            is_active,
+            created_at,
+            updated_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        `,
+        [
+          user.id,
+          user.participantId,
+          user.role,
+          normalizeEmail(user.email),
+          user.passwordSalt,
+          user.passwordHash,
+          1,
+          timestamp,
+          timestamp
+        ]
       );
     }
 
     for (const deal of seedData.deals) {
-      insertDeal.run(
-        deal.id,
-        deal.name,
-        deal.location,
-        deal.totalEquity,
-        deal.debt,
-        deal.totalProjectCost,
-        deal.salePrice,
-        deal.holdMonths,
-        deal.prefRate,
-        deal.status,
-        deal.currentPhase,
-        deal.fundedOn,
-        deal.projectedExitOn ?? null,
-        deal.actualExitOn ?? null,
-        deal.timelineProgress,
-        timestamp,
-        timestamp
+      await client.query(
+        `
+          INSERT INTO deals (
+            id,
+            name,
+            location,
+            total_equity,
+            debt,
+            total_project_cost,
+            sale_price,
+            hold_months,
+            pref_rate,
+            status,
+            current_phase,
+            funded_on,
+            projected_exit_on,
+            actual_exit_on,
+            timeline_progress,
+            created_at,
+            updated_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+        `,
+        [
+          deal.id,
+          deal.name,
+          deal.location,
+          deal.totalEquity,
+          deal.debt,
+          deal.totalProjectCost,
+          deal.salePrice,
+          deal.holdMonths,
+          deal.prefRate,
+          deal.status,
+          deal.currentPhase,
+          deal.fundedOn,
+          deal.projectedExitOn ?? null,
+          deal.actualExitOn ?? null,
+          deal.timelineProgress,
+          timestamp,
+          timestamp
+        ]
       );
 
       for (const [index, tier] of deal.promoteTiers.entries()) {
-        insertPromoteTier.run(
-          createId("tier"),
-          deal.id,
-          tier.label,
-          tier.hurdle,
-          tier.investorShare,
-          tier.sponsorShare,
-          index + 1,
-          timestamp,
-          timestamp
+        await client.query(
+          `
+            INSERT INTO promote_tiers (
+              id,
+              deal_id,
+              label,
+              hurdle,
+              investor_share,
+              sponsor_share,
+              sort_order,
+              created_at,
+              updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          `,
+          [
+            createId("tier"),
+            deal.id,
+            tier.label,
+            tier.hurdle,
+            tier.investorShare,
+            tier.sponsorShare,
+            index + 1,
+            timestamp,
+            timestamp
+          ]
         );
       }
 
       for (const [index, milestone] of deal.timeline.entries()) {
-        insertTimelineItem.run(
-          createId("timeline"),
-          deal.id,
-          milestone.label,
-          milestone.date,
-          milestone.status,
-          index + 1,
-          timestamp,
-          timestamp
+        await client.query(
+          `
+            INSERT INTO deal_timeline_items (
+              id,
+              deal_id,
+              label,
+              milestone_date,
+              status,
+              sort_order,
+              created_at,
+              updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+          `,
+          [
+            createId("timeline"),
+            deal.id,
+            milestone.label,
+            milestone.date,
+            milestone.status,
+            index + 1,
+            timestamp,
+            timestamp
+          ]
         );
       }
     }
 
     for (const position of seedData.positions) {
-      insertPosition.run(
-        position.id,
-        position.dealId,
-        position.participantId,
-        position.classType,
-        position.contributionType,
-        position.contributionAmount,
-        position.distributionsToDate ?? 0,
-        timestamp,
-        timestamp
+      await client.query(
+        `
+          INSERT INTO positions (
+            id,
+            deal_id,
+            participant_id,
+            class_type,
+            contribution_type,
+            contribution_amount,
+            distributions_to_date,
+            created_at,
+            updated_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        `,
+        [
+          position.id,
+          position.dealId,
+          position.participantId,
+          position.classType,
+          position.contributionType,
+          position.contributionAmount,
+          position.distributionsToDate ?? 0,
+          timestamp,
+          timestamp
+        ]
       );
     }
 
     for (const contractor of seedData.contractors) {
-      insertContractor.run(
-        contractor.id,
-        contractor.dealId,
-        contractor.participantId,
-        contractor.trade,
-        contractor.totalContractValue,
-        contractor.cashPaid,
-        contractor.deferredAmount,
-        contractor.contributionType,
-        contractor.hybrid ? 1 : 0,
-        contractor.status,
-        timestamp,
-        timestamp
+      await client.query(
+        `
+          INSERT INTO contractor_participation (
+            id,
+            deal_id,
+            participant_id,
+            trade,
+            total_contract_value,
+            cash_paid,
+            deferred_amount,
+            contribution_type,
+            hybrid,
+            status,
+            created_at,
+            updated_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        `,
+        [
+          contractor.id,
+          contractor.dealId,
+          contractor.participantId,
+          contractor.trade,
+          contractor.totalContractValue,
+          contractor.cashPaid,
+          contractor.deferredAmount,
+          contractor.contributionType,
+          contractor.hybrid ? 1 : 0,
+          contractor.status,
+          timestamp,
+          timestamp
+        ]
       );
     }
 
     for (const deal of seedData.deals) {
-      syncDealEquity(deal.id);
+      await syncDealEquity(deal.id, client);
     }
   });
 }
 
-export function getUserByEmail(email) {
-  const row = db
-    .prepare(
-      `
-        SELECT
-          users.id AS id,
-          users.participant_id AS participantId,
-          users.role AS role,
-          participants.name AS name,
-          participants.category AS category,
-          users.email AS email,
-          users.password_salt AS passwordSalt,
-          users.password_hash AS passwordHash,
-          users.is_active AS isActive
-        FROM users
-        JOIN participants ON participants.id = users.participant_id
-        WHERE LOWER(users.email) = ?
-          AND users.is_active = 1
-      `
-    )
-    .get(normalizeEmail(email));
+async function syncDealEquity(dealId, executor = pool) {
+  const result = await queryOne(
+    `
+      SELECT COALESCE(SUM(contribution_amount), 0)::float AS "totalEquity"
+      FROM positions
+      WHERE deal_id = $1
+    `,
+    [dealId],
+    executor
+  );
+
+  await executor.query(
+    `
+      UPDATE deals
+      SET total_equity = $1, updated_at = $2
+      WHERE id = $3
+    `,
+    [roundNumber(result?.totalEquity ?? 0), nowTimestamp(), dealId]
+  );
+}
+
+export async function getUserByEmail(email) {
+  const row = await queryOne(
+    `
+      SELECT
+        users.id AS id,
+        users.participant_id AS "participantId",
+        users.role AS role,
+        participants.name AS name,
+        participants.category AS category,
+        users.email AS email,
+        users.password_salt AS "passwordSalt",
+        users.password_hash AS "passwordHash",
+        users.is_active AS "isActive"
+      FROM users
+      JOIN participants ON participants.id = users.participant_id
+      WHERE LOWER(users.email) = $1
+        AND users.is_active = 1
+    `,
+    [normalizeEmail(email)]
+  );
 
   return mapUserRow(row);
 }
 
-export function getUserById(userId) {
-  const row = db
-    .prepare(
-      `
-        SELECT
-          users.id AS id,
-          users.participant_id AS participantId,
-          users.role AS role,
-          participants.name AS name,
-          participants.category AS category,
-          users.email AS email,
-          users.password_salt AS passwordSalt,
-          users.password_hash AS passwordHash,
-          users.is_active AS isActive
-        FROM users
-        JOIN participants ON participants.id = users.participant_id
-        WHERE users.id = ?
-          AND users.is_active = 1
-      `
-    )
-    .get(userId);
+export async function getUserById(userId) {
+  const row = await queryOne(
+    `
+      SELECT
+        users.id AS id,
+        users.participant_id AS "participantId",
+        users.role AS role,
+        participants.name AS name,
+        participants.category AS category,
+        users.email AS email,
+        users.password_salt AS "passwordSalt",
+        users.password_hash AS "passwordHash",
+        users.is_active AS "isActive"
+      FROM users
+      JOIN participants ON participants.id = users.participant_id
+      WHERE users.id = $1
+        AND users.is_active = 1
+    `,
+    [userId]
+  );
 
   return mapUserRow(row);
 }
 
-export function getAppDataSnapshot() {
-  const participants = db
-    .prepare(
-      `
-        SELECT id, name, category
-        FROM participants
-        ORDER BY name
-      `
-    )
-    .all()
-    .map((row) => ({
-      id: row.id,
-      name: row.name,
-      category: row.category
-    }));
+export async function getAppDataSnapshot() {
+  const participants = (await queryAll(
+    `
+      SELECT id, name, category
+      FROM participants
+      ORDER BY name
+    `
+  )).map((row) => ({
+    id: row.id,
+    name: row.name,
+    category: row.category
+  }));
 
-  const users = db
-    .prepare(
-      `
-        SELECT
-          users.id AS id,
-          users.participant_id AS participantId,
-          users.role AS role,
-          participants.name AS name,
-          participants.category AS category,
-          users.email AS email,
-          users.password_salt AS passwordSalt,
-          users.password_hash AS passwordHash,
-          users.is_active AS isActive
-        FROM users
-        JOIN participants ON participants.id = users.participant_id
-        WHERE users.is_active = 1
-        ORDER BY participants.name
-      `
-    )
-    .all()
-    .map((row) => mapUserRow(row));
+  const users = (await queryAll(
+    `
+      SELECT
+        users.id AS id,
+        users.participant_id AS "participantId",
+        users.role AS role,
+        participants.name AS name,
+        participants.category AS category,
+        users.email AS email,
+        users.password_salt AS "passwordSalt",
+        users.password_hash AS "passwordHash",
+        users.is_active AS "isActive"
+      FROM users
+      JOIN participants ON participants.id = users.participant_id
+      WHERE users.is_active = 1
+      ORDER BY participants.name
+    `
+  )).map((row) => mapUserRow(row));
 
-  const deals = db
-    .prepare(
-      `
-        SELECT
-          id,
-          name,
-          location,
-          total_equity AS totalEquity,
-          debt,
-          total_project_cost AS totalProjectCost,
-          sale_price AS salePrice,
-          hold_months AS holdMonths,
-          pref_rate AS prefRate,
-          status,
-          current_phase AS currentPhase,
-          funded_on AS fundedOn,
-          projected_exit_on AS projectedExitOn,
-          actual_exit_on AS actualExitOn,
-          timeline_progress AS timelineProgress
-        FROM deals
-        ORDER BY name
-      `
-    )
-    .all()
-    .map((row) => ({
-      ...row,
-      totalEquity: Number(row.totalEquity),
-      debt: Number(row.debt),
-      totalProjectCost: Number(row.totalProjectCost),
-      salePrice: Number(row.salePrice),
-      holdMonths: Number(row.holdMonths),
-      prefRate: Number(row.prefRate),
-      timelineProgress: Number(row.timelineProgress),
-      promoteTiers: [],
-      timeline: []
-    }));
+  const deals = (await queryAll(
+    `
+      SELECT
+        id,
+        name,
+        location,
+        total_equity AS "totalEquity",
+        debt,
+        total_project_cost AS "totalProjectCost",
+        sale_price AS "salePrice",
+        hold_months AS "holdMonths",
+        pref_rate AS "prefRate",
+        status,
+        current_phase AS "currentPhase",
+        funded_on AS "fundedOn",
+        projected_exit_on AS "projectedExitOn",
+        actual_exit_on AS "actualExitOn",
+        timeline_progress AS "timelineProgress"
+      FROM deals
+      ORDER BY name
+    `
+  )).map((row) => ({
+    ...row,
+    totalEquity: Number(row.totalEquity),
+    debt: Number(row.debt),
+    totalProjectCost: Number(row.totalProjectCost),
+    salePrice: Number(row.salePrice),
+    holdMonths: Number(row.holdMonths),
+    prefRate: Number(row.prefRate),
+    timelineProgress: Number(row.timelineProgress),
+    promoteTiers: [],
+    timeline: []
+  }));
 
   const dealMap = new Map(deals.map((deal) => [deal.id, deal]));
 
-  for (const row of db
-    .prepare(
-      `
-        SELECT
-          deal_id AS dealId,
-          label,
-          hurdle,
-          investor_share AS investorShare,
-          sponsor_share AS sponsorShare,
-          sort_order AS sortOrder
-        FROM promote_tiers
-        ORDER BY deal_id, sort_order
-      `
-    )
-    .all()) {
+  for (const row of await queryAll(
+    `
+      SELECT
+        deal_id AS "dealId",
+        label,
+        hurdle,
+        investor_share AS "investorShare",
+        sponsor_share AS "sponsorShare",
+        sort_order AS "sortOrder"
+      FROM promote_tiers
+      ORDER BY deal_id, sort_order
+    `
+  )) {
     dealMap.get(row.dealId)?.promoteTiers.push({
       label: row.label,
       hurdle: Number(row.hurdle),
@@ -489,20 +505,18 @@ export function getAppDataSnapshot() {
     });
   }
 
-  for (const row of db
-    .prepare(
-      `
-        SELECT
-          deal_id AS dealId,
-          label,
-          milestone_date AS date,
-          status,
-          sort_order AS sortOrder
-        FROM deal_timeline_items
-        ORDER BY deal_id, sort_order
-      `
-    )
-    .all()) {
+  for (const row of await queryAll(
+    `
+      SELECT
+        deal_id AS "dealId",
+        label,
+        milestone_date AS date,
+        status,
+        sort_order AS "sortOrder"
+      FROM deal_timeline_items
+      ORDER BY deal_id, sort_order
+    `
+  )) {
     dealMap.get(row.dealId)?.timeline.push({
       label: row.label,
       date: row.date,
@@ -511,56 +525,50 @@ export function getAppDataSnapshot() {
     });
   }
 
-  const positions = db
-    .prepare(
-      `
-        SELECT
-          id,
-          deal_id AS dealId,
-          participant_id AS participantId,
-          class_type AS classType,
-          contribution_type AS contributionType,
-          contribution_amount AS contributionAmount,
-          distributions_to_date AS distributionsToDate
-        FROM positions
-        ORDER BY deal_id, participant_id
-      `
-    )
-    .all()
-    .map((row) => ({
-      ...row,
-      contributionAmount: Number(row.contributionAmount),
-      distributionsToDate: Number(row.distributionsToDate)
-    }));
+  const positions = (await queryAll(
+    `
+      SELECT
+        id,
+        deal_id AS "dealId",
+        participant_id AS "participantId",
+        class_type AS "classType",
+        contribution_type AS "contributionType",
+        contribution_amount AS "contributionAmount",
+        distributions_to_date AS "distributionsToDate"
+      FROM positions
+      ORDER BY deal_id, participant_id
+    `
+  )).map((row) => ({
+    ...row,
+    contributionAmount: Number(row.contributionAmount),
+    distributionsToDate: Number(row.distributionsToDate)
+  }));
 
-  const contractors = db
-    .prepare(
-      `
-        SELECT
-          contractor_participation.id AS id,
-          contractor_participation.deal_id AS dealId,
-          contractor_participation.participant_id AS participantId,
-          participants.name AS contractorName,
-          contractor_participation.trade AS trade,
-          contractor_participation.total_contract_value AS totalContractValue,
-          contractor_participation.cash_paid AS cashPaid,
-          contractor_participation.deferred_amount AS deferredAmount,
-          contractor_participation.contribution_type AS contributionType,
-          contractor_participation.hybrid AS hybrid,
-          contractor_participation.status AS status
-        FROM contractor_participation
-        JOIN participants ON participants.id = contractor_participation.participant_id
-        ORDER BY contractor_participation.deal_id, participants.name
-      `
-    )
-    .all()
-    .map((row) => ({
-      ...row,
-      totalContractValue: Number(row.totalContractValue),
-      cashPaid: Number(row.cashPaid),
-      deferredAmount: Number(row.deferredAmount),
-      hybrid: Boolean(row.hybrid)
-    }));
+  const contractors = (await queryAll(
+    `
+      SELECT
+        contractor_participation.id AS id,
+        contractor_participation.deal_id AS "dealId",
+        contractor_participation.participant_id AS "participantId",
+        participants.name AS "contractorName",
+        contractor_participation.trade AS trade,
+        contractor_participation.total_contract_value AS "totalContractValue",
+        contractor_participation.cash_paid AS "cashPaid",
+        contractor_participation.deferred_amount AS "deferredAmount",
+        contractor_participation.contribution_type AS "contributionType",
+        contractor_participation.hybrid AS hybrid,
+        contractor_participation.status AS status
+      FROM contractor_participation
+      JOIN participants ON participants.id = contractor_participation.participant_id
+      ORDER BY contractor_participation.deal_id, participants.name
+    `
+  )).map((row) => ({
+    ...row,
+    totalContractValue: Number(row.totalContractValue),
+    cashPaid: Number(row.cashPaid),
+    deferredAmount: Number(row.deferredAmount),
+    hybrid: Boolean(row.hybrid)
+  }));
 
   return {
     asOfDate: todayStamp(),
@@ -572,7 +580,7 @@ export function getAppDataSnapshot() {
   };
 }
 
-export function createManagedUser({ category, name, email, password }) {
+export async function createManagedUser({ category, name, email, password }) {
   const normalizedCategory = String(category).trim();
   const normalizedName = String(name).trim();
   const normalizedEmail = normalizeEmail(email);
@@ -594,7 +602,7 @@ export function createManagedUser({ category, name, email, password }) {
     throw new Error("Password must be at least 8 characters.");
   }
 
-  const existingUser = getUserByEmail(normalizedEmail);
+  const existingUser = await getUserByEmail(normalizedEmail);
 
   if (existingUser) {
     throw new Error("A user with that email already exists.");
@@ -605,15 +613,16 @@ export function createManagedUser({ category, name, email, password }) {
   const participantId = createId("participant");
   const userId = createId("user");
 
-  runInTransaction(() => {
-    db.prepare(
+  await withTransaction(async (client) => {
+    await client.query(
       `
         INSERT INTO participants (id, name, category, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?)
-      `
-    ).run(participantId, normalizedName, normalizedCategory, timestamp, timestamp);
+        VALUES ($1, $2, $3, $4, $5)
+      `,
+      [participantId, normalizedName, normalizedCategory, timestamp, timestamp]
+    );
 
-    db.prepare(
+    await client.query(
       `
         INSERT INTO users (
           id,
@@ -626,25 +635,26 @@ export function createManagedUser({ category, name, email, password }) {
           created_at,
           updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `
-    ).run(
-      userId,
-      participantId,
-      "investor",
-      normalizedEmail,
-      passwordRecord.salt,
-      passwordRecord.hash,
-      1,
-      timestamp,
-      timestamp
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `,
+      [
+        userId,
+        participantId,
+        "investor",
+        normalizedEmail,
+        passwordRecord.salt,
+        passwordRecord.hash,
+        1,
+        timestamp,
+        timestamp
+      ]
     );
   });
 
   return getUserById(userId);
 }
 
-export function createDealAllocation(input) {
+export async function createDealAllocation(input) {
   const dealId = String(input.dealId ?? "").trim();
   const participantId = String(input.participantId ?? "").trim();
   const classType = String(input.classType ?? "").trim() || "Class A";
@@ -671,44 +681,41 @@ export function createDealAllocation(input) {
     throw new Error("Contribution amount must be greater than zero.");
   }
 
-  const deal = db
-    .prepare(
-      `
-        SELECT id, name
-        FROM deals
-        WHERE id = ?
-      `
-    )
-    .get(dealId);
+  const deal = await queryOne(
+    `
+      SELECT id, name
+      FROM deals
+      WHERE id = $1
+    `,
+    [dealId]
+  );
 
   if (!deal) {
     throw new Error("Deal not found.");
   }
 
-  const participant = db
-    .prepare(
-      `
-        SELECT id, name, category
-        FROM participants
-        WHERE id = ?
-      `
-    )
-    .get(participantId);
+  const participant = await queryOne(
+    `
+      SELECT id, name, category
+      FROM participants
+      WHERE id = $1
+    `,
+    [participantId]
+  );
 
   if (!participant) {
     throw new Error("Participant not found.");
   }
 
-  const existingPosition = db
-    .prepare(
-      `
-        SELECT id
-        FROM positions
-        WHERE deal_id = ?
-          AND participant_id = ?
-      `
-    )
-    .get(dealId, participantId);
+  const existingPosition = await queryOne(
+    `
+      SELECT id
+      FROM positions
+      WHERE deal_id = $1
+        AND participant_id = $2
+    `,
+    [dealId, participantId]
+  );
 
   if (existingPosition) {
     throw new Error("That participant already has a position in this deal.");
@@ -743,8 +750,8 @@ export function createDealAllocation(input) {
   const timestamp = nowTimestamp();
   const positionId = createId("position");
 
-  runInTransaction(() => {
-    db.prepare(
+  await withTransaction(async (client) => {
+    await client.query(
       `
         INSERT INTO positions (
           id,
@@ -757,22 +764,24 @@ export function createDealAllocation(input) {
           created_at,
           updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `
-    ).run(
-      positionId,
-      dealId,
-      participantId,
-      classType,
-      contributionType || (participant.category === "contractor" ? "Deferred compensation" : "Cash equity"),
-      roundNumber(contributionAmount),
-      0,
-      timestamp,
-      timestamp
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `,
+      [
+        positionId,
+        dealId,
+        participantId,
+        classType,
+        contributionType ||
+          (participant.category === "contractor" ? "Deferred compensation" : "Cash equity"),
+        roundNumber(contributionAmount),
+        0,
+        timestamp,
+        timestamp
+      ]
     );
 
     if (participant.category === "contractor") {
-      db.prepare(
+      await client.query(
         `
           INSERT INTO contractor_participation (
             id,
@@ -788,44 +797,44 @@ export function createDealAllocation(input) {
             created_at,
             updated_at
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `
-      ).run(
-        createId("contractor"),
-        dealId,
-        participantId,
-        trade,
-        roundNumber(totalContractValue),
-        roundNumber(cashPaid),
-        roundNumber(contributionAmount),
-        "Class C",
-        cashPaid > 0 && cashPaid < totalContractValue ? 1 : 0,
-        contractorStatus,
-        timestamp,
-        timestamp
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        `,
+        [
+          createId("contractor"),
+          dealId,
+          participantId,
+          trade,
+          roundNumber(totalContractValue),
+          roundNumber(cashPaid),
+          roundNumber(contributionAmount),
+          "Class C",
+          cashPaid > 0 && cashPaid < totalContractValue ? 1 : 0,
+          contractorStatus,
+          timestamp,
+          timestamp
+        ]
       );
     }
 
-    syncDealEquity(dealId);
+    await syncDealEquity(dealId, client);
   });
 }
 
-export function updateDeal(dealId, input) {
+export async function updateDeal(dealId, input) {
   const id = String(dealId ?? "").trim();
 
   if (!id) {
     throw new Error("Deal id is required.");
   }
 
-  const existingDeal = db
-    .prepare(
-      `
-        SELECT id
-        FROM deals
-        WHERE id = ?
-      `
-    )
-    .get(id);
+  const existingDeal = await queryOne(
+    `
+      SELECT id
+      FROM deals
+      WHERE id = $1
+    `,
+    [id]
+  );
 
   if (!existingDeal) {
     throw new Error("Deal not found.");
@@ -877,41 +886,46 @@ export function updateDeal(dealId, input) {
     throw new Error("Timeline progress must be between 0 and 100.");
   }
 
-  db.prepare(
+  await pool.query(
     `
       UPDATE deals
       SET
-        name = ?,
-        location = ?,
-        debt = ?,
-        total_project_cost = ?,
-        sale_price = ?,
-        hold_months = ?,
-        pref_rate = ?,
-        status = ?,
-        current_phase = ?,
-        funded_on = ?,
-        projected_exit_on = ?,
-        actual_exit_on = ?,
-        timeline_progress = ?,
-        updated_at = ?
-      WHERE id = ?
-    `
-  ).run(
-    name,
-    location,
-    roundNumber(debt),
-    roundNumber(totalProjectCost),
-    roundNumber(salePrice),
-    Math.round(holdMonths),
-    prefRate,
-    status,
-    currentPhase,
-    fundedOn,
-    projectedExitOn || null,
-    actualExitOn || null,
-    Math.round(timelineProgress),
-    nowTimestamp(),
-    id
+        name = $1,
+        location = $2,
+        debt = $3,
+        total_project_cost = $4,
+        sale_price = $5,
+        hold_months = $6,
+        pref_rate = $7,
+        status = $8,
+        current_phase = $9,
+        funded_on = $10,
+        projected_exit_on = $11,
+        actual_exit_on = $12,
+        timeline_progress = $13,
+        updated_at = $14
+      WHERE id = $15
+    `,
+    [
+      name,
+      location,
+      roundNumber(debt),
+      roundNumber(totalProjectCost),
+      roundNumber(salePrice),
+      Math.round(holdMonths),
+      prefRate,
+      status,
+      currentPhase,
+      fundedOn,
+      projectedExitOn || null,
+      actualExitOn || null,
+      Math.round(timelineProgress),
+      nowTimestamp(),
+      id
+    ]
   );
+}
+
+export async function closeDatabasePool() {
+  await pool.end();
 }

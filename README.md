@@ -10,6 +10,11 @@ Database-backed investor dashboard and sponsor-side deal calculator for:
 ## Run locally
 
 ```bash
+export PGHOST=127.0.0.1
+export PGPORT=5432
+export PGUSER=postgres
+export PGPASSWORD='your-password'
+export PGDATABASE=investors
 npm start
 ```
 
@@ -25,7 +30,7 @@ The app runs on `http://localhost:3000`.
 ## What is included
 
 - Cookie-based login with per-user dashboard access
-- SQLite persistence in `data/deal_app.db`
+- Postgres persistence using the `investors` database
 - Personal investor portfolio totals and per-project breakdowns
 - Limited project summary for investors without exposing the full cap table
 - Sponsor calculator to plug in sale price, hold months, and pref rate
@@ -38,7 +43,8 @@ The app runs on `http://localhost:3000`.
 ## Database
 
 - Schema file: [`data/schema.sql`](/home/herbertabingwa/njinko_construction/data/schema.sql)
-- Database file created at runtime: `data/deal_app.db`
+- Runtime connection uses `DATABASE_URL` or the standard `PGHOST` / `PGPORT` / `PGUSER` / `PGPASSWORD` / `PGDATABASE` variables
+- Default local assumptions if env vars are omitted: host `127.0.0.1`, port `5432`, user `postgres`, database `investors`
 
 ### Core tables
 
@@ -54,5 +60,5 @@ The app runs on `http://localhost:3000`.
 
 - Seed data lives in [`src/data.js`](/home/herbertabingwa/njinko_construction/src/data.js) and loads on first database initialization.
 - Database access is implemented in [`src/database.js`](/home/herbertabingwa/njinko_construction/src/database.js).
-- The app remains dependency-free and uses Node's built-in HTTP server plus Node 22's built-in SQLite module.
+- The app uses Node's built-in HTTP server plus the [`pg`](https://www.npmjs.com/package/pg) driver for Postgres.
 - This is still a prototype, not production-grade auth, authorization, or accounting infrastructure.

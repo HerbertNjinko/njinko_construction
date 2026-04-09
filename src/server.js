@@ -120,7 +120,7 @@ function destroySession(request) {
   return "sessionId=; HttpOnly; Max-Age=0; Path=/; SameSite=Lax";
 }
 
-function getCurrentUser(request) {
+async function getCurrentUser(request) {
   const cookies = parseCookies(request);
   const sessionId = cookies.sessionId;
 
@@ -137,8 +137,8 @@ function getCurrentUser(request) {
   return getUserById(session.userId);
 }
 
-function requireUser(request, response) {
-  const user = getCurrentUser(request);
+async function requireUser(request, response) {
+  const user = await getCurrentUser(request);
 
   if (!user) {
     sendJson(response, 401, { error: "Authentication required." });
@@ -148,8 +148,8 @@ function requireUser(request, response) {
   return user;
 }
 
-function requireManager(request, response) {
-  const user = requireUser(request, response);
+async function requireManager(request, response) {
+  const user = await requireUser(request, response);
 
   if (!user) {
     return null;
@@ -173,180 +173,187 @@ function stripUserSecrets(user) {
 }
 
 const server = createServer(async (request, response) => {
-  const method = request.method ?? "GET";
-  const url = new URL(request.url, `http://${request.headers.host}`);
-  const dealUpdateMatch = url.pathname.match(/^\/api\/admin\/deals\/([^/]+)$/);
+  try {
+    const method = request.method ?? "GET";
+    const url = new URL(request.url, `http://${request.headers.host}`);
+    const dealUpdateMatch = url.pathname.match(/^\/api\/admin\/deals\/([^/]+)$/);
 
-  if (method === "POST" && url.pathname === "/api/login") {
-    const body = await readJsonBody(request);
+    if (method === "POST" && url.pathname === "/api/login") {
+      const body = await readJsonBody(request);
 
-    if (!body || typeof body.email !== "string" || typeof body.password !== "string") {
-      sendJson(response, 400, { error: "Email and password are required." });
-      return;
-    }
-
-    const user = getUserByEmail(body.email);
-
-    if (!user || !verifyPassword(user, body.password)) {
-      sendJson(response, 401, { error: "Invalid credentials." });
-      return;
-    }
-
-    const sessionId = createSession(user.id);
-    sendJson(
-      response,
-      200,
-      {
-        user: stripUserSecrets(user)
-      },
-      {
-        "Set-Cookie": `sessionId=${sessionId}; HttpOnly; Path=/; SameSite=Lax`
+      if (!body || typeof body.email !== "string" || typeof body.password !== "string") {
+        sendJson(response, 400, { error: "Email and password are required." });
+        return;
       }
-    );
-    return;
+
+      const user = await getUserByEmail(body.email);
+
+      if (!user || !verifyPassword(user, body.password)) {
+        sendJson(response, 401, { error: "Invalid credentials." });
+        return;
+      }
+
+      const sessionId = createSession(user.id);
+      sendJson(
+        response,
+        200,
+        {
+          user: stripUserSecrets(user)
+        },
+        {
+          "Set-Cookie": `sessionId=${sessionId}; HttpOnly; Path=/; SameSite=Lax`
+        }
+      );
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/logout") {
+      sendJson(response, 200, { ok: true }, { "Set-Cookie": destroySession(request) });
+      return;
+    }
+
+    if (method === "GET" && url.pathname === "/api/session") {
+      const user = await getCurrentUser(request);
+      sendJson(response, 200, { user: user ? stripUserSecrets(user) : null });
+      return;
+    }
+
+    if (method === "GET" && url.pathname === "/api/dashboard") {
+      const user = await requireUser(request, response);
+
+      if (!user) {
+        return;
+      }
+
+      const snapshot = await getAppDataSnapshot();
+      sendJson(response, 200, buildDashboardForUser(user, snapshot));
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/calculator") {
+      const user = await requireUser(request, response);
+
+      if (!user) {
+        return;
+      }
+
+      if (user.role !== "manager") {
+        sendJson(response, 403, { error: "Calculator access is limited to the sponsor view." });
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body || typeof body.dealId !== "string") {
+        sendJson(response, 400, { error: "A valid deal is required." });
+        return;
+      }
+
+      const snapshot = await getAppDataSnapshot();
+      const scenario = calculateScenarioForDeal(
+        body.dealId,
+        {
+          salePrice: body.salePrice,
+          holdMonths: body.holdMonths,
+          prefRate: body.prefRate
+        },
+        snapshot
+      );
+
+      if (!scenario) {
+        sendJson(response, 404, { error: "Deal not found." });
+        return;
+      }
+
+      sendJson(response, 200, scenario);
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/admin/users") {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const createdUser = await createManagedUser(body);
+        sendJson(response, 201, { user: stripUserSecrets(createdUser) });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/admin/allocations") {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        await createDealAllocation(body);
+        sendJson(response, 201, { ok: true });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "PATCH" && dealUpdateMatch) {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        await updateDeal(decodeURIComponent(dealUpdateMatch[1]), body);
+        sendJson(response, 200, { ok: true });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "GET") {
+      await serveStatic(request, response);
+      return;
+    }
+
+    response.writeHead(405, { "Content-Type": "application/json; charset=utf-8" });
+    response.end(JSON.stringify({ error: "Method not allowed." }));
+  } catch (error) {
+    sendJson(response, 500, {
+      error: "Internal server error.",
+      detail: error.message
+    });
   }
-
-  if (method === "POST" && url.pathname === "/api/logout") {
-    sendJson(response, 200, { ok: true }, { "Set-Cookie": destroySession(request) });
-    return;
-  }
-
-  if (method === "GET" && url.pathname === "/api/session") {
-    const user = getCurrentUser(request);
-    sendJson(response, 200, { user: user ? stripUserSecrets(user) : null });
-    return;
-  }
-
-  if (method === "GET" && url.pathname === "/api/dashboard") {
-    const user = requireUser(request, response);
-
-    if (!user) {
-      return;
-    }
-
-    const snapshot = getAppDataSnapshot();
-    sendJson(response, 200, buildDashboardForUser(user, snapshot));
-    return;
-  }
-
-  if (method === "POST" && url.pathname === "/api/calculator") {
-    const user = requireUser(request, response);
-
-    if (!user) {
-      return;
-    }
-
-    if (user.role !== "manager") {
-      sendJson(response, 403, { error: "Calculator access is limited to the sponsor view." });
-      return;
-    }
-
-    const body = await readJsonBody(request);
-
-    if (!body || typeof body.dealId !== "string") {
-      sendJson(response, 400, { error: "A valid deal is required." });
-      return;
-    }
-
-    const snapshot = getAppDataSnapshot();
-    const scenario = calculateScenarioForDeal(
-      body.dealId,
-      {
-        salePrice: body.salePrice,
-        holdMonths: body.holdMonths,
-        prefRate: body.prefRate
-      },
-      snapshot
-    );
-
-    if (!scenario) {
-      sendJson(response, 404, { error: "Deal not found." });
-      return;
-    }
-
-    sendJson(response, 200, scenario);
-    return;
-  }
-
-  if (method === "POST" && url.pathname === "/api/admin/users") {
-    const manager = requireManager(request, response);
-
-    if (!manager) {
-      return;
-    }
-
-    const body = await readJsonBody(request);
-
-    if (!body) {
-      sendJson(response, 400, { error: "A valid request body is required." });
-      return;
-    }
-
-    try {
-      const createdUser = createManagedUser(body);
-      sendJson(response, 201, { user: stripUserSecrets(createdUser) });
-    } catch (error) {
-      sendJson(response, 400, { error: error.message });
-    }
-
-    return;
-  }
-
-  if (method === "POST" && url.pathname === "/api/admin/allocations") {
-    const manager = requireManager(request, response);
-
-    if (!manager) {
-      return;
-    }
-
-    const body = await readJsonBody(request);
-
-    if (!body) {
-      sendJson(response, 400, { error: "A valid request body is required." });
-      return;
-    }
-
-    try {
-      createDealAllocation(body);
-      sendJson(response, 201, { ok: true });
-    } catch (error) {
-      sendJson(response, 400, { error: error.message });
-    }
-
-    return;
-  }
-
-  if (method === "PATCH" && dealUpdateMatch) {
-    const manager = requireManager(request, response);
-
-    if (!manager) {
-      return;
-    }
-
-    const body = await readJsonBody(request);
-
-    if (!body) {
-      sendJson(response, 400, { error: "A valid request body is required." });
-      return;
-    }
-
-    try {
-      updateDeal(decodeURIComponent(dealUpdateMatch[1]), body);
-      sendJson(response, 200, { ok: true });
-    } catch (error) {
-      sendJson(response, 400, { error: error.message });
-    }
-
-    return;
-  }
-
-  if (method === "GET") {
-    await serveStatic(request, response);
-    return;
-  }
-
-  response.writeHead(405, { "Content-Type": "application/json; charset=utf-8" });
-  response.end(JSON.stringify({ error: "Method not allowed." }));
 });
 
 server.listen(PORT, HOST, () => {
