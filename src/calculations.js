@@ -219,6 +219,7 @@ function buildProfilePayload(user, participant) {
 function buildGovernanceIssues(data, viewerParticipantId, { includeAll = false } = {}) {
   const participantMap = getParticipantMap(data);
   const dealMap = new Map(data.deals.map((deal) => [deal.id, deal]));
+  const asOfDate = String(data.asOfDate ?? new Date().toISOString().slice(0, 10));
   const investorCapitalByDeal = new Map();
   const votesByIssue = new Map();
 
@@ -259,25 +260,41 @@ function buildGovernanceIssues(data, viewerParticipantId, { includeAll = false }
       const relevantVotes = (votesByIssue.get(issue.id) ?? []).filter((vote) =>
         capitalByParticipant.has(vote.participantId)
       );
-      let yesInvestment = 0;
+      const votesByParticipant = new Map(
+        relevantVotes.map((vote) => [vote.participantId, vote])
+      );
+      let explicitYesInvestment = 0;
       let noInvestment = 0;
 
       for (const vote of relevantVotes) {
         const investedAmount = capitalByParticipant.get(vote.participantId) ?? 0;
 
         if (vote.voteChoice === "yes") {
-          yesInvestment += investedAmount;
+          explicitYesInvestment += investedAmount;
         } else if (vote.voteChoice === "no") {
           noInvestment += investedAmount;
         }
       }
 
-      const pendingInvestment = Math.max(0, eligibleInvestment - yesInvestment - noInvestment);
+      const closesOn = issue.closesOn ?? null;
+      const isClosed = Boolean(closesOn) && asOfDate > closesOn;
+      const unresolvedInvestment = Math.max(
+        0,
+        eligibleInvestment - explicitYesInvestment - noInvestment
+      );
+      const assumedYesInvestment = isClosed ? unresolvedInvestment : 0;
+      const pendingInvestment = isClosed ? 0 : unresolvedInvestment;
+      const yesInvestment = explicitYesInvestment + assumedYesInvestment;
       const yesPct = eligibleInvestment > 0 ? yesInvestment / eligibleInvestment : 0;
       const noPct = eligibleInvestment > 0 ? noInvestment / eligibleInvestment : 0;
       const pendingPct = eligibleInvestment > 0 ? pendingInvestment / eligibleInvestment : 0;
+      const explicitYesPct =
+        eligibleInvestment > 0 ? explicitYesInvestment / eligibleInvestment : 0;
+      const assumedYesPct =
+        eligibleInvestment > 0 ? assumedYesInvestment / eligibleInvestment : 0;
       const myInvestment = capitalByParticipant.get(viewerParticipantId) ?? 0;
-      const myVote = relevantVotes.find((vote) => vote.participantId === viewerParticipantId)?.voteChoice ?? null;
+      const myVote =
+        relevantVotes.find((vote) => vote.participantId === viewerParticipantId)?.voteChoice ?? null;
       const isEligibleToVote = myInvestment > 0;
       let status = "open";
 
@@ -289,6 +306,31 @@ function buildGovernanceIssues(data, viewerParticipantId, { includeAll = false }
         }
       }
 
+      const investorVotes = [...capitalByParticipant.entries()]
+        .map(([participantId, investedAmount]) => {
+          const participant = participantMap.get(participantId);
+          const explicitVote = votesByParticipant.get(participantId)?.voteChoice ?? null;
+          const finalVote = isClosed ? explicitVote ?? "assumed_yes" : explicitVote;
+
+          return {
+            participantId,
+            participantName: participant?.name ?? "Investor",
+            weightPct: eligibleInvestment > 0 ? investedAmount / eligibleInvestment : 0,
+            explicitVote,
+            finalVote,
+            hasVoted: Boolean(explicitVote),
+            isAssumedApproval: isClosed && !explicitVote
+          };
+        })
+        .sort((left, right) => {
+          if (right.weightPct !== left.weightPct) {
+            return right.weightPct - left.weightPct;
+          }
+
+          return left.participantName.localeCompare(right.participantName);
+        });
+      const finalResults = isClosed ? investorVotes : [];
+
       return {
         id: issue.id,
         dealId: issue.dealId,
@@ -297,22 +339,30 @@ function buildGovernanceIssues(data, viewerParticipantId, { includeAll = false }
         title: issue.title,
         description: issue.description,
         approvalThreshold: issue.approvalThreshold,
+        closesOn,
+        isClosed,
         createdAt: issue.createdAt,
         updatedAt: issue.updatedAt,
         eligibleInvestment,
         eligibleVoterCount: capitalByParticipant.size,
         voteCount: relevantVotes.length,
+        explicitYesInvestment: roundCurrency(explicitYesInvestment),
+        assumedYesInvestment: roundCurrency(assumedYesInvestment),
         yesInvestment: roundCurrency(yesInvestment),
         noInvestment: roundCurrency(noInvestment),
         pendingInvestment: roundCurrency(pendingInvestment),
+        explicitYesPct,
+        assumedYesPct,
         yesPct,
         noPct,
         pendingPct,
         status,
         isEligibleToVote,
-        canVote: isEligibleToVote && status === "open",
+        canVote: isEligibleToVote && status === "open" && !isClosed,
+        investorVotes,
         myVote,
-        myWeightPct: eligibleInvestment > 0 ? myInvestment / eligibleInvestment : 0
+        myWeightPct: eligibleInvestment > 0 ? myInvestment / eligibleInvestment : 0,
+        finalResults
       };
     })
     .filter((issue) => includeAll || issue.isEligibleToVote);

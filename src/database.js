@@ -2,7 +2,7 @@ import { randomBytes, randomUUID, scryptSync } from "node:crypto";
 
 import { seedData } from "./data.js";
 import { assertDatabaseReady } from "./migrations.js";
-import { sendCredentialNotification } from "./notifications.js";
+import { sendCredentialNotification, sendIssueCreatedNotification } from "./notifications.js";
 import { pool, queryAll, queryOne, withTransaction } from "./postgres.js";
 
 function nowTimestamp() {
@@ -789,6 +789,7 @@ export async function getAppDataSnapshot() {
         title,
         description,
         approval_threshold AS "approvalThreshold",
+        closes_on AS "closesOn",
         created_by_user_id AS "createdByUserId",
         created_at AS "createdAt",
         updated_at AS "updatedAt"
@@ -1425,6 +1426,7 @@ function normalizeIssueInput(input) {
   const title = String(input.title ?? "").trim();
   const description = String(input.description ?? "").trim();
   const approvalThreshold = Number(input.approvalThreshold ?? 0.75);
+  const closesOn = String(input.closesOn ?? "").trim();
 
   if (!dealId) {
     throw new Error("A deal selection is required.");
@@ -1442,11 +1444,20 @@ function normalizeIssueInput(input) {
     throw new Error("Approval threshold must be between 0 and 1.");
   }
 
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(closesOn) || Number.isNaN(new Date(closesOn).getTime())) {
+    throw new Error("A valid vote close date is required.");
+  }
+
+  if (closesOn < todayStamp()) {
+    throw new Error("Vote close date cannot be in the past.");
+  }
+
   return {
     dealId,
     title,
     description,
-    approvalThreshold: roundNumber(approvalThreshold)
+    approvalThreshold: roundNumber(approvalThreshold),
+    closesOn
   };
 }
 
@@ -1848,6 +1859,31 @@ export async function createDealIssue(input, createdByUserId) {
     throw new Error("Deal not found.");
   }
 
+  const recipients = await queryAll(
+    `
+      SELECT
+        users.id AS "userId",
+        users.participant_id AS "participantId",
+        users.email AS email,
+        participants.name AS "fullName",
+        COALESCE(SUM(positions.contribution_amount), 0)::float AS "contributionAmount"
+      FROM positions
+      JOIN participants ON participants.id = positions.participant_id
+      JOIN users ON users.participant_id = positions.participant_id
+      WHERE positions.deal_id = $1
+        AND participants.category = 'investor'
+        AND users.is_active = 1
+      GROUP BY users.id, users.participant_id, users.email, participants.name
+      HAVING COALESCE(SUM(positions.contribution_amount), 0) > 0
+      ORDER BY participants.name
+    `,
+    [issue.dealId]
+  );
+  const totalRecipientContribution = recipients.reduce(
+    (sum, recipient) => sum + Number(recipient.contributionAmount ?? 0),
+    0
+  );
+
   const timestamp = nowTimestamp();
   const issueId = createId("issue");
 
@@ -1859,11 +1895,12 @@ export async function createDealIssue(input, createdByUserId) {
         title,
         description,
         approval_threshold,
+        closes_on,
         created_by_user_id,
         created_at,
         updated_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
     `,
     [
       issueId,
@@ -1871,16 +1908,51 @@ export async function createDealIssue(input, createdByUserId) {
       issue.title,
       issue.description,
       issue.approvalThreshold,
+      issue.closesOn,
       createdByUserId,
       timestamp,
       timestamp
     ]
   );
 
+  const notifications = await Promise.all(
+    recipients.map(async (recipient) => {
+      try {
+        return await sendIssueCreatedNotification({
+          userId: recipient.userId,
+          participantId: recipient.participantId,
+          fullName: recipient.fullName,
+          email: recipient.email,
+          dealName: deal.name,
+          issueTitle: issue.title,
+          issueDescription: issue.description,
+          approvalThreshold: issue.approvalThreshold,
+          closesOn: issue.closesOn,
+          weightPct:
+            totalRecipientContribution > 0
+              ? Number(recipient.contributionAmount ?? 0) / totalRecipientContribution
+              : 0
+        });
+      } catch (error) {
+        return {
+          status: "failed",
+          provider: "notification_error",
+          localPath: null,
+          errorMessage: error.message,
+          recipientEmail: recipient.email
+        };
+      }
+    })
+  );
+
   return {
-    id: issueId,
-    dealId: issue.dealId,
-    title: issue.title
+    issue: {
+      id: issueId,
+      dealId: issue.dealId,
+      closesOn: issue.closesOn,
+      title: issue.title
+    },
+    notifications
   };
 }
 
@@ -1897,6 +1969,7 @@ export async function castDealIssueVote(issueId, userId, voteChoiceInput) {
       SELECT
         deal_issues.id AS id,
         deal_issues.deal_id AS "dealId",
+        deal_issues.closes_on AS "closesOn",
         users.id AS "userId",
         users.participant_id AS "participantId",
         participants.category AS category,
@@ -1923,6 +1996,10 @@ export async function castDealIssueVote(issueId, userId, voteChoiceInput) {
 
   if (Number(votingContext.contributionAmount) <= 0) {
     throw new Error("Only investors with capital in this deal can vote on this issue.");
+  }
+
+  if (votingContext.closesOn && todayStamp() > votingContext.closesOn) {
+    throw new Error("Voting on this issue has already closed.");
   }
 
   const timestamp = nowTimestamp();

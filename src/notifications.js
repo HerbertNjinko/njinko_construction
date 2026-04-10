@@ -49,6 +49,34 @@ function buildCredentialBody({ fullName, email, temporaryPassword, role }) {
   ].join("\n");
 }
 
+function buildIssueCreatedBody({
+  fullName,
+  dealName,
+  issueTitle,
+  issueDescription,
+  approvalThreshold,
+  closesOn,
+  weightPct
+}) {
+  return [
+    `Hello ${fullName},`,
+    "",
+    `A new investor voting issue has been opened for ${dealName}.`,
+    "",
+    `Issue: ${issueTitle}`,
+    `Approval required: ${Math.round(approvalThreshold * 100)}%`,
+    `Your voting weight: ${Math.round(weightPct * 1000) / 10}%`,
+    `Vote closes: ${closesOn || "Open ended"}`,
+    "",
+    "Issue details:",
+    issueDescription,
+    "",
+    `Log in to review and vote: ${resolveLoginUrl()}`,
+    "",
+    "If you have questions, contact the Njinko team."
+  ].join("\n");
+}
+
 function getSmtpConfig() {
   const host = normalizeConfigValue(process.env.SMTP_HOST);
   const user = normalizeConfigValue(process.env.SMTP_USER);
@@ -188,6 +216,83 @@ async function deliverNotification(notificationId, payload) {
   return saveLocalOutbox(notificationId, payload);
 }
 
+async function queueAndDeliverNotification({
+  userId,
+  participantId,
+  recipientEmail,
+  subject,
+  bodyText,
+  persist = true
+}) {
+  const notificationId = createNotificationId();
+  const payload = {
+    recipientEmail,
+    subject,
+    bodyText
+  };
+  const createdAt = nowTimestamp();
+
+  if (persist) {
+    await pool.query(
+      `
+        INSERT INTO email_notifications (
+          id,
+          user_id,
+          participant_id,
+          recipient_email,
+          subject,
+          body_text,
+          status,
+          provider,
+          created_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `,
+      [
+        notificationId,
+        userId,
+        participantId,
+        payload.recipientEmail,
+        payload.subject,
+        payload.bodyText,
+        "queued",
+        "pending",
+        createdAt
+      ]
+    );
+  }
+
+  const delivery = await deliverNotification(notificationId, payload);
+
+  if (persist) {
+    await pool.query(
+      `
+        UPDATE email_notifications
+        SET
+          status = $1,
+          provider = $2,
+          local_path = $3,
+          error_message = $4,
+          sent_at = $5
+        WHERE id = $6
+      `,
+      [
+        delivery.status,
+        delivery.provider,
+        delivery.localPath,
+        delivery.errorMessage,
+        delivery.sentAt,
+        notificationId
+      ]
+    );
+  }
+
+  return {
+    id: notificationId,
+    ...delivery
+  };
+}
+
 export async function sendCredentialNotification({
   userId,
   participantId,
@@ -196,7 +301,6 @@ export async function sendCredentialNotification({
   role,
   temporaryPassword
 }) {
-  const notificationId = createNotificationId();
   const payload = {
     recipientEmail: email,
     subject: "Your Njinko Construction portal login",
@@ -207,61 +311,42 @@ export async function sendCredentialNotification({
       role
     })
   };
-  const createdAt = nowTimestamp();
+  return queueAndDeliverNotification({
+    userId,
+    participantId,
+    recipientEmail: payload.recipientEmail,
+    subject: payload.subject,
+    bodyText: payload.bodyText,
+    persist: true
+  });
+}
 
-  await pool.query(
-    `
-      INSERT INTO email_notifications (
-        id,
-        user_id,
-        participant_id,
-        recipient_email,
-        subject,
-        body_text,
-        status,
-        provider,
-        created_at
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-    `,
-    [
-      notificationId,
-      userId,
-      participantId,
-      payload.recipientEmail,
-      payload.subject,
-      payload.bodyText,
-      "queued",
-      "pending",
-      createdAt
-    ]
-  );
-
-  const delivery = await deliverNotification(notificationId, payload);
-
-  await pool.query(
-    `
-      UPDATE email_notifications
-      SET
-        status = $1,
-        provider = $2,
-        local_path = $3,
-        error_message = $4,
-        sent_at = $5
-      WHERE id = $6
-    `,
-    [
-      delivery.status,
-      delivery.provider,
-      delivery.localPath,
-      delivery.errorMessage,
-      delivery.sentAt,
-      notificationId
-    ]
-  );
-
-  return {
-    id: notificationId,
-    ...delivery
-  };
+export async function sendIssueCreatedNotification({
+  userId,
+  participantId,
+  fullName,
+  email,
+  dealName,
+  issueTitle,
+  issueDescription,
+  approvalThreshold,
+  closesOn,
+  weightPct
+}) {
+  return queueAndDeliverNotification({
+    userId,
+    participantId,
+    recipientEmail: email,
+    subject: `New investor vote for ${dealName}`,
+    bodyText: buildIssueCreatedBody({
+      fullName,
+      dealName,
+      issueTitle,
+      issueDescription,
+      approvalThreshold,
+      closesOn,
+      weightPct
+    }),
+    persist: false
+  });
 }

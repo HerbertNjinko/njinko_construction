@@ -1,0 +1,2 @@
+ALTER TABLE deal_issues
+ADD COLUMN IF NOT EXISTS closes_on TEXT;

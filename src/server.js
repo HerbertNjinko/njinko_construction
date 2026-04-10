@@ -461,8 +461,8 @@ const server = createServer(async (request, response) => {
       }
 
       try {
-        const issue = await createDealIssue(body, manager.id);
-        sendJson(response, 201, { issue });
+        const result = await createDealIssue(body, manager.id);
+        sendJson(response, 201, result);
       } catch (error) {
         sendJson(response, 400, { error: error.message });
       }

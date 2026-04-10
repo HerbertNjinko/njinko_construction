@@ -145,6 +145,7 @@ CREATE TABLE IF NOT EXISTS deal_issues (
   title TEXT NOT NULL,
   description TEXT NOT NULL,
   approval_threshold REAL NOT NULL DEFAULT 0.75 CHECK (approval_threshold > 0 AND approval_threshold <= 1),
+  closes_on TEXT,
   created_by_user_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,

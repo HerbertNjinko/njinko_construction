@@ -8,12 +8,20 @@ const state = {
   adminDealId: null,
   dealEditorDrafts: {},
   rollupDealFilter: "",
+  contractorDealFilter: "",
+  collapsedSections: {},
   allocationPage: 1,
   allocationFilters: {
     dealId: "",
     participantId: "",
     category: "",
     classType: ""
+  },
+  userFilters: {
+    search: "",
+    category: "",
+    role: "",
+    status: ""
   },
   loginError: "",
   loading: true,
@@ -69,6 +77,10 @@ function formatPercent(value) {
 
 function formatRate(value) {
   return precisePercent.format(value ?? 0);
+}
+
+function roundMoney(value) {
+  return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
 }
 
 function inputValue(value) {
@@ -133,6 +145,68 @@ function renderMessage(message) {
   `;
 }
 
+function isSectionCollapsed(sectionId) {
+  return Boolean(state.collapsedSections?.[sectionId]);
+}
+
+function toggleSectionCollapsed(sectionId) {
+  state.collapsedSections = {
+    ...state.collapsedSections,
+    [sectionId]: !isSectionCollapsed(sectionId)
+  };
+}
+
+function renderSectionToggle(sectionId) {
+  const collapsed = isSectionCollapsed(sectionId);
+
+  return `
+    <button
+      class="button-secondary button-inline section-toggle-button"
+      type="button"
+      data-section-toggle="${escapeHtml(sectionId)}"
+      aria-expanded="${collapsed ? "false" : "true"}"
+    >
+      ${collapsed ? "Maximize" : "Minimize"}
+    </button>
+  `;
+}
+
+function renderCollapsibleSection({
+  sectionId,
+  title,
+  copy = "",
+  body,
+  message = "",
+  panelClass = "panel",
+  headerActions = "",
+  bodyClass = ""
+}) {
+  const collapsed = isSectionCollapsed(sectionId);
+
+  return `
+    <section class="${escapeHtml(panelClass)} collapsible-section ${
+      collapsed ? "collapsed" : ""
+    }">
+      <div class="section-head">
+        <div>
+          <h3>${escapeHtml(title)}</h3>
+          ${copy ? `<p class="section-copy">${escapeHtml(copy)}</p>` : ""}
+        </div>
+        <div class="section-tools">
+          ${headerActions}
+          ${renderSectionToggle(sectionId)}
+        </div>
+      </div>
+      ${message}
+      ${
+        collapsed
+          ? '<div class="section-collapsed-note">Section minimized. Use Maximize to reopen it.</div>'
+          : `<div class="collapsible-section-body ${escapeHtml(bodyClass)}">${body}</div>`
+      }
+    </section>
+  `;
+}
+
 function metricCard(label, value) {
   return `
     <article class="metric-card">
@@ -180,6 +254,31 @@ function formatNotificationStatus(notification) {
     : "Notification could not be delivered.";
 }
 
+function formatNotificationBatchSummary(notifications = []) {
+  if (!notifications.length) {
+    return "No investor alerts were sent.";
+  }
+
+  const sent = notifications.filter((item) => item.status === "sent").length;
+  const savedLocal = notifications.filter((item) => item.status === "saved_local").length;
+  const failed = notifications.filter((item) => item.status === "failed").length;
+  const parts = [];
+
+  if (sent) {
+    parts.push(`${sent} sent`);
+  }
+
+  if (savedLocal) {
+    parts.push(`${savedLocal} saved to local outbox`);
+  }
+
+  if (failed) {
+    parts.push(`${failed} failed`);
+  }
+
+  return parts.length ? `Investor alerts: ${parts.join(", ")}.` : "No investor alerts were sent.";
+}
+
 function formatDateTime(value) {
   if (!value) {
     return "Never";
@@ -199,6 +298,12 @@ function getCreateDealDefaults() {
     timelineProgress: 0,
     fundedOn: new Date().toISOString().slice(0, 10)
   };
+}
+
+function getDefaultVoteCloseDate() {
+  const nextWeek = new Date();
+  nextWeek.setDate(nextWeek.getDate() + 7);
+  return nextWeek.toISOString().slice(0, 10);
 }
 
 async function readFileAsPayload(file) {
@@ -260,6 +365,39 @@ function applyAllocationFilters(rows) {
   });
 }
 
+function applyUserFilters(rows) {
+  const search = state.userFilters.search.trim().toLowerCase();
+
+  return rows.filter((row) => {
+    if (
+      search &&
+      !`${row.name} ${row.email} ${row.contactPhone} ${row.category} ${row.role}`
+        .toLowerCase()
+        .includes(search)
+    ) {
+      return false;
+    }
+
+    if (state.userFilters.category && row.category !== state.userFilters.category) {
+      return false;
+    }
+
+    if (state.userFilters.role && row.role !== state.userFilters.role) {
+      return false;
+    }
+
+    if (state.userFilters.status) {
+      const rowStatus = row.isActive ? "active" : "disabled";
+
+      if (rowStatus !== state.userFilters.status) {
+        return false;
+      }
+    }
+
+    return true;
+  });
+}
+
 function getAllocationFilterOptions(rows) {
   const deals = [...new Map(rows.map((row) => [row.dealId, { id: row.dealId, name: row.dealName }])).values()]
     .sort((left, right) => left.name.localeCompare(right.name));
@@ -281,9 +419,73 @@ function getAllocationFilterOptions(rows) {
   };
 }
 
+function getUserFilterOptions(rows) {
+  return {
+    categories: [...new Set(rows.map((row) => row.category))].sort((left, right) =>
+      left.localeCompare(right)
+    ),
+    roles: [...new Set(rows.map((row) => row.role))].sort((left, right) =>
+      left.localeCompare(right)
+    )
+  };
+}
+
 function getFilteredRollupDeals() {
   const deals = state.dashboard?.deals ?? [];
   return state.rollupDealFilter ? deals.filter((deal) => deal.id === state.rollupDealFilter) : deals;
+}
+
+function applyContractorFilters(rows) {
+  return state.contractorDealFilter
+    ? rows.filter((row) => row.dealId === state.contractorDealFilter)
+    : rows;
+}
+
+function getContractorFilterOptions(rows) {
+  return [
+    ...new Map(rows.map((row) => [row.dealId, { id: row.dealId, name: row.dealName }])).values()
+  ].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function buildContractorProjectRollups(rows) {
+  const byDeal = new Map();
+
+  for (const row of rows) {
+    if (!byDeal.has(row.dealId)) {
+      byDeal.set(row.dealId, {
+        dealId: row.dealId,
+        dealName: row.dealName,
+        contractorCount: 0,
+        totalContractValue: 0,
+        cashPaid: 0,
+        deferredAmount: 0,
+        prefEarned: 0,
+        profitShare: 0,
+        totalPayout: 0
+      });
+    }
+
+    const summary = byDeal.get(row.dealId);
+    summary.contractorCount += 1;
+    summary.totalContractValue += row.totalContractValue ?? 0;
+    summary.cashPaid += row.cashPaid ?? 0;
+    summary.deferredAmount += row.deferredAmount ?? 0;
+    summary.prefEarned += row.prefEarned ?? 0;
+    summary.profitShare += row.profitShare ?? 0;
+    summary.totalPayout += row.totalPayout ?? 0;
+  }
+
+  return [...byDeal.values()]
+    .map((row) => ({
+      ...row,
+      totalContractValue: roundMoney(row.totalContractValue),
+      cashPaid: roundMoney(row.cashPaid),
+      deferredAmount: roundMoney(row.deferredAmount),
+      prefEarned: roundMoney(row.prefEarned),
+      profitShare: roundMoney(row.profitShare),
+      totalPayout: roundMoney(row.totalPayout)
+    }))
+    .sort((left, right) => left.dealName.localeCompare(right.dealName));
 }
 
 function createTimelineDraft(step = {}) {
@@ -489,6 +691,15 @@ async function refreshDashboard() {
       state.rollupDealFilter = "";
     }
 
+    const contractorOptions = getContractorFilterOptions(state.dashboard.contractorLedger);
+
+    if (
+      state.contractorDealFilter &&
+      !contractorOptions.some((deal) => deal.id === state.contractorDealFilter)
+    ) {
+      state.contractorDealFilter = "";
+    }
+
     const allocationRows = state.dashboard.admin.allocations;
     const allocationOptions = getAllocationFilterOptions(allocationRows);
 
@@ -522,6 +733,20 @@ async function refreshDashboard() {
       state.allocationFilters.classType = "";
     }
 
+    const userRows = state.dashboard.admin.users;
+    const userFilterOptions = getUserFilterOptions(userRows);
+
+    if (
+      state.userFilters.category &&
+      !userFilterOptions.categories.includes(state.userFilters.category)
+    ) {
+      state.userFilters.category = "";
+    }
+
+    if (state.userFilters.role && !userFilterOptions.roles.includes(state.userFilters.role)) {
+      state.userFilters.role = "";
+    }
+
     const filteredAllocationCount = applyAllocationFilters(allocationRows).length;
     const totalPages = Math.max(1, Math.ceil(filteredAllocationCount / ALLOCATION_PAGE_SIZE));
     state.allocationPage = Math.min(Math.max(state.allocationPage, 1), totalPages);
@@ -544,12 +769,19 @@ async function refreshDashboard() {
     state.adminDealId = null;
     state.dealEditorDrafts = {};
     state.rollupDealFilter = "";
+    state.contractorDealFilter = "";
     state.allocationPage = 1;
     state.allocationFilters = {
       dealId: "",
       participantId: "",
       category: "",
       classType: ""
+    };
+    state.userFilters = {
+      search: "",
+      category: "",
+      role: "",
+      status: ""
     };
   }
 }
@@ -675,23 +907,19 @@ function renderPasswordResetGate() {
 function renderProfilePanel() {
   const { profile, viewer } = state.dashboard;
 
-  return `
-    <section class="panel">
-      <div class="section-head">
-        <div>
-          <h3>Profile & Payout Details</h3>
-          <p class="section-copy">
-            Update your contact information and payment instructions here. Deal-level positions remain read only.
-          </p>
-        </div>
-      </div>
+  return renderCollapsibleSection({
+    sectionId: `${viewer.role}-profile`,
+    title: "Profile & Payout Details",
+    copy:
+      "Update your contact information and payment instructions here. Deal-level positions remain read only.",
+    message: renderMessage(state.messages.profile),
+    body: `
       <div class="summary-grid">
         ${summaryItem("Portal role", titleCase(viewer.role))}
         ${summaryItem("User category", titleCase(viewer.category ?? viewer.role))}
         ${summaryItem("Driver's license", profile.driverLicenseNumber || "Not provided")}
         ${summaryItem("Attached ID", profile.idCardFileName || "No file attached")}
       </div>
-      ${renderMessage(state.messages.profile)}
       <form id="profile-form">
         <div class="form-grid-3">
           <label>
@@ -787,8 +1015,8 @@ function renderProfilePanel() {
         </div>
         <button class="button-primary" type="submit">Save profile</button>
       </form>
-    </section>
-  `;
+    `
+  });
 }
 
 function renderIssueStatus(issue) {
@@ -802,13 +1030,24 @@ function renderIssueStatus(issue) {
 function renderIssueMetrics(issue, { showCapital = false, showViewer = true } = {}) {
   const metrics = [
     summaryItem("Approval needed", formatPercent(issue.approvalThreshold)),
-    summaryItem("Yes votes", formatPercent(issue.yesPct)),
+    summaryItem(issue.isClosed ? "Approved" : "Yes votes", formatPercent(issue.yesPct)),
     summaryItem("No votes", formatPercent(issue.noPct)),
-    summaryItem("Pending", formatPercent(issue.pendingPct))
+    summaryItem(
+      issue.isClosed ? "Assumed approvals" : "Pending",
+      formatPercent(issue.isClosed ? issue.assumedYesPct : issue.pendingPct)
+    ),
+    summaryItem("Vote closes", issue.closesOn || "Open ended")
   ];
 
   if (showViewer) {
-    metrics.push(summaryItem("Your vote", issue.myVote ? titleCase(issue.myVote) : "Not cast"));
+    const viewerVoteLabel =
+      issue.myVote
+        ? titleCase(issue.myVote)
+        : issue.isClosed && issue.isEligibleToVote
+          ? "Assumed yes"
+          : "Not cast";
+
+    metrics.push(summaryItem("Your vote", viewerVoteLabel));
     metrics.push(summaryItem("Your voting power", formatPercent(issue.myWeightPct)));
   }
 
@@ -818,6 +1057,95 @@ function renderIssueMetrics(issue, { showCapital = false, showViewer = true } = 
   }
 
   return metrics.join("");
+}
+
+function getFinalVoteLabel(result) {
+  if (!result.finalVote) {
+    return "Open";
+  }
+
+  if (result.finalVote === "assumed_yes") {
+    return "Assumed approve";
+  }
+
+  return titleCase(result.finalVote ?? "");
+}
+
+function getIssueResponseLabel(result) {
+  return result.explicitVote ? titleCase(result.explicitVote) : "Not voted";
+}
+
+function getVotePillClass(voteChoice) {
+  if (voteChoice === "yes") {
+    return "vote-result-yes";
+  }
+
+  if (voteChoice === "no") {
+    return "vote-result-no";
+  }
+
+  if (voteChoice === "assumed_yes") {
+    return "vote-result-assumed_yes";
+  }
+
+  return "vote-result-pending";
+}
+
+function renderIssueVoteLedger(issue) {
+  if (!issue.investorVotes?.length) {
+    return "";
+  }
+
+  return `
+    <div class="issue-results">
+      <div class="section-head">
+        <div>
+          <h4>Investor Vote Ledger</h4>
+          <p class="section-copy">
+            Track each investor’s response and vote weight for this issue.
+          </p>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table class="issue-results-table">
+          <thead>
+            <tr>
+              <th>Investor</th>
+              <th>Response</th>
+              <th>Final outcome</th>
+              <th>Vote weight</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${issue.investorVotes
+              .map(
+                (result) => `
+                  <tr>
+                    <td>${escapeHtml(result.participantName)}</td>
+                    <td>
+                      <span class="vote-result-pill ${escapeHtml(
+                        getVotePillClass(result.explicitVote)
+                      )}">
+                        ${escapeHtml(getIssueResponseLabel(result))}
+                      </span>
+                    </td>
+                    <td>
+                      <span class="vote-result-pill ${escapeHtml(
+                        getVotePillClass(result.finalVote)
+                      )}">
+                        ${escapeHtml(getFinalVoteLabel(result))}
+                      </span>
+                    </td>
+                    <td>${escapeHtml(formatPercent(result.weightPct))}</td>
+                  </tr>
+                `
+              )
+              .join("")}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
 }
 
 function renderInvestorIssueCard(issue) {
@@ -831,6 +1159,7 @@ function renderInvestorIssueCard(issue) {
         </div>
         <div class="issue-head-meta">
           ${renderIssueStatus(issue)}
+          <span class="read-only-tag">${escapeHtml(`Closes ${issue.closesOn || "TBD"}`)}</span>
           <span class="read-only-tag">${escapeHtml(`${formatPercent(issue.myWeightPct)} power`)}</span>
         </div>
       </div>
@@ -857,7 +1186,13 @@ function renderInvestorIssueCard(issue) {
           Vote no
         </button>
         <span class="read-only-tag">
-          ${escapeHtml(issue.canVote ? "Weighted by your invested percentage in this deal." : "Voting is closed for this issue.")}
+          ${escapeHtml(
+            issue.canVote
+              ? "Weighted by your invested percentage in this deal."
+              : issue.isClosed && !issue.myVote
+                ? `Voting closed on ${issue.closesOn}. Uncast votes were treated as approved.`
+                : "Voting is closed for this issue."
+          )}
         </span>
       </div>
     </article>
@@ -867,17 +1202,12 @@ function renderInvestorIssueCard(issue) {
 function renderInvestorGovernancePanel() {
   const issues = state.dashboard.governance?.issues ?? [];
 
-  return `
-    <section class="panel">
-      <div class="section-head">
-        <div>
-          <h3>Major Issue Voting</h3>
-          <p class="section-copy">
-            Your approval power is weighted by your invested percentage in each deal.
-          </p>
-        </div>
-      </div>
-      ${renderMessage(state.messages.vote)}
+  return renderCollapsibleSection({
+    sectionId: "investor-governance",
+    title: "Major Issue Voting",
+    copy: "Your approval power is weighted by your invested percentage in each deal.",
+    message: renderMessage(state.messages.vote),
+    body: `
       <div class="issue-grid">
         ${
           issues.length
@@ -885,11 +1215,14 @@ function renderInvestorGovernancePanel() {
             : '<div class="empty-state">No active voting items are tied to your eligible investor positions.</div>'
         }
       </div>
-    </section>
-  `;
+    `
+  });
 }
 
 function renderInvestorProject(project) {
+  const sectionId = `investor-project-${project.id}`;
+  const collapsed = isSectionCollapsed(sectionId);
+
   return `
     <article class="deal-card">
       <div class="deal-head">
@@ -908,9 +1241,15 @@ function renderInvestorProject(project) {
         <div>
           <p class="metric-label">Timeline</p>
           <p class="metric-value">${escapeHtml(`${project.timelineProgress}%`)}</p>
+          <div class="button-row deal-card-actions">
+            ${renderSectionToggle(sectionId)}
+          </div>
         </div>
       </div>
-      <div class="deal-body">
+      ${
+        collapsed
+          ? '<div class="deal-card-collapsed-note">Project minimized. Use Maximize to reopen this breakdown.</div>'
+          : `<div class="deal-body">
         <div class="progress-shell">
           <div class="progress-fill" style="width:${project.timelineProgress}%"></div>
         </div>
@@ -1000,7 +1339,8 @@ function renderInvestorProject(project) {
               .join("")}
           </div>
         </div>
-      </div>
+      </div>`
+      }
     </article>
   `;
 }
@@ -1026,48 +1366,46 @@ function renderInvestorDashboard() {
 
       ${renderProfilePanel()}
 
-      <section class="panel">
-        <div class="section-head">
-          <div>
-            <h3>Personal Portfolio View</h3>
-            <p class="section-copy">
-              Totals across all deals tied to your login. No visibility into other investor amounts.
-            </p>
+      ${renderCollapsibleSection({
+        sectionId: "investor-portfolio",
+        title: "Personal Portfolio View",
+        copy: "Totals across all deals tied to your login. No visibility into other investor amounts.",
+        body: `
+          <div class="metrics-grid">
+            ${metricCard("Total invested", formatCurrency(portfolio.totalInvested))}
+            ${metricCard("Total returned", formatCurrency(portfolio.totalReturned))}
+            ${metricCard("Total amount payout", formatCurrency(portfolio.totalAmountPayout))}
+            ${metricCard("Current active investments", String(portfolio.activeInvestments))}
+            ${metricCard("Current pref earned", formatCurrency(portfolio.currentPrefEarned))}
           </div>
-        </div>
-        <div class="metrics-grid">
-          ${metricCard("Total invested", formatCurrency(portfolio.totalInvested))}
-          ${metricCard("Total returned", formatCurrency(portfolio.totalReturned))}
-          ${metricCard("Total amount payout", formatCurrency(portfolio.totalAmountPayout))}
-          ${metricCard("Current active investments", String(portfolio.activeInvestments))}
-          ${metricCard("Current pref earned", formatCurrency(portfolio.currentPrefEarned))}
-        </div>
-      </section>
+        `
+      })}
 
       ${renderInvestorGovernancePanel()}
 
-      <section class="panel">
-        <div class="section-head">
-          <div>
-            <h3>Per-Project Breakdown</h3>
-            <p class="section-copy">
-              Each deal shows your amount invested, ownership, returns breakdown, project status, and timeline.
-            </p>
+      ${renderCollapsibleSection({
+        sectionId: "investor-project-breakdown",
+        title: "Per-Project Breakdown",
+        copy:
+          "Each deal shows your amount invested, ownership, returns breakdown, project status, and timeline.",
+        body: `
+          <div class="deal-grid">
+            ${
+              projects.length
+                ? projects.map((project) => renderInvestorProject(project)).join("")
+                : '<div class="empty-state">No positions are linked to this login.</div>'
+            }
           </div>
-        </div>
-        <div class="deal-grid">
-          ${
-            projects.length
-              ? projects.map((project) => renderInvestorProject(project)).join("")
-              : '<div class="empty-state">No positions are linked to this login.</div>'
-          }
-        </div>
-      </section>
+        `
+      })}
     </div>
   `;
 }
 
 function renderManagerDeal(deal) {
+  const sectionId = `manager-rollup-deal-${deal.id}`;
+  const collapsed = isSectionCollapsed(sectionId);
+
   return `
     <article class="deal-card">
       <div class="deal-head">
@@ -1096,10 +1434,14 @@ function renderManagerDeal(deal) {
             >
               Delete deal
             </button>
+            ${renderSectionToggle(sectionId)}
           </div>
         </div>
       </div>
-      <div class="deal-body">
+      ${
+        collapsed
+          ? '<div class="deal-card-collapsed-note">Project minimized. Use Maximize to reopen this rollup.</div>'
+          : `<div class="deal-body">
         <div class="summary-grid">
           ${summaryItem("Tracked equity", formatCurrency(deal.totalEquity))}
           ${summaryItem("Debt", formatCurrency(deal.debt))}
@@ -1121,7 +1463,8 @@ function renderManagerDeal(deal) {
             )
             .join("")}
         </div>
-      </div>
+      </div>`
+      }
     </article>
   `;
 }
@@ -1140,265 +1483,319 @@ function renderCalculator() {
 
   const result = state.calculator?.deal?.id === selectedDealId ? state.calculator : null;
 
-  return `
-    <section class="calculator-layout">
-      <div class="calculator-form">
-        <p class="eyebrow">Sponsor Tool</p>
-        <h3>Promote IRR Trigger Calculator</h3>
-        <p class="section-copy">
-          Plug in a sale price, hold length, and pref rate to see investor distributions,
-          Class A vs Class C outputs, and the sponsor promote tier that gets triggered.
-        </p>
-        <form id="calculator-form">
-          <label>
-            Deal
-            <select name="dealId" id="calculator-deal-select">
-              ${deals
-                .map(
-                  (deal) => `
-                    <option value="${escapeHtml(deal.id)}" ${
-                      deal.id === selectedPreset.id ? "selected" : ""
-                    }>
-                      ${escapeHtml(deal.name)}
-                    </option>
-                  `
-                )
-                .join("")}
-            </select>
-          </label>
-          <label>
-            Sale price
-            <input
-              type="number"
-              min="0"
-              step="1000"
-              name="salePrice"
-              value="${escapeHtml(String(result?.inputs.salePrice ?? selectedPreset.salePrice))}"
-              required
-            />
-          </label>
-          <label>
-            Hold months
-            <input
-              type="number"
-              min="1"
-              step="1"
-              name="holdMonths"
-              value="${escapeHtml(String(result?.inputs.holdMonths ?? selectedPreset.holdMonths))}"
-              required
-            />
-          </label>
-          <label>
-            Pref rate
-            <input
-              type="number"
-              min="0"
-              max="0.3"
-              step="0.005"
-              name="prefRate"
-              value="${escapeHtml(String(result?.inputs.prefRate ?? selectedPreset.prefRate))}"
-              required
-            />
-          </label>
-          <button class="button-primary" type="submit">Recalculate waterfall</button>
-        </form>
-      </div>
-      <div class="calculator-results">
-        ${
-          result
-            ? `
-              <div class="section-head">
-                <div>
-                  <p class="eyebrow">${escapeHtml(result.deal.statusLabel)}</p>
-                  <h3>${escapeHtml(result.deal.name)}</h3>
-                  <p class="section-copy">
-                    Promote is shown on the current deal-level scenario, with capital returned,
-                    pref, and residual split after hurdle selection.
-                  </p>
-                </div>
-              </div>
-              <div class="metrics-grid">
-                ${metricCard("Gross project IRR", formatPercent(result.outputs.projectIrr))}
-                ${metricCard(
-                  "Distributable equity",
-                  formatCurrency(result.outputs.distributableEquity)
-                )}
-                ${metricCard(
-                  "Investor profit pool",
-                  formatCurrency(result.outputs.investorProfitPool)
-                )}
-                ${metricCard(
-                  "Sponsor promote",
-                  formatCurrency(result.outputs.sponsorPromote)
-                )}
-              </div>
-              <div class="panel panel-inline">
+  return renderCollapsibleSection({
+    sectionId: "manager-calculator",
+    title: "Promote IRR Trigger Calculator",
+    copy:
+      "Plug in a sale price, hold length, and pref rate to see investor distributions, Class A vs Class C outputs, and the sponsor promote tier that gets triggered.",
+    bodyClass: "calculator-section-body",
+    body: `
+      <div class="calculator-layout">
+        <div class="calculator-form">
+          <p class="eyebrow">Sponsor Tool</p>
+          <form id="calculator-form">
+            <label>
+              Deal
+              <select name="dealId" id="calculator-deal-select">
+                ${deals
+                  .map(
+                    (deal) => `
+                      <option value="${escapeHtml(deal.id)}" ${
+                        deal.id === selectedPreset.id ? "selected" : ""
+                      }>
+                        ${escapeHtml(deal.name)}
+                      </option>
+                    `
+                  )
+                  .join("")}
+              </select>
+            </label>
+            <label>
+              Sale price
+              <input
+                type="number"
+                min="0"
+                step="1000"
+                name="salePrice"
+                value="${escapeHtml(String(result?.inputs.salePrice ?? selectedPreset.salePrice))}"
+                required
+              />
+            </label>
+            <label>
+              Hold months
+              <input
+                type="number"
+                min="1"
+                step="1"
+                name="holdMonths"
+                value="${escapeHtml(String(result?.inputs.holdMonths ?? selectedPreset.holdMonths))}"
+                required
+              />
+            </label>
+            <label>
+              Pref rate
+              <input
+                type="number"
+                min="0"
+                max="0.3"
+                step="0.005"
+                name="prefRate"
+                value="${escapeHtml(String(result?.inputs.prefRate ?? selectedPreset.prefRate))}"
+                required
+              />
+            </label>
+            <button class="button-primary" type="submit">Recalculate waterfall</button>
+          </form>
+        </div>
+        <div class="calculator-results">
+          ${
+            result
+              ? `
                 <div class="section-head">
                   <div>
-                    <h4>Promote tiers</h4>
-                    <p class="section-copy">Highest cleared IRR tier becomes the active split in this prototype.</p>
+                    <p class="eyebrow">${escapeHtml(result.deal.statusLabel)}</p>
+                    <h3>${escapeHtml(result.deal.name)}</h3>
+                    <p class="section-copy">
+                      Promote is shown on the current deal-level scenario, with capital returned,
+                      pref, and residual split after hurdle selection.
+                    </p>
                   </div>
                 </div>
-                <div class="tier-grid">
-                  ${result.outputs.promoteTiers
-                    .map(
-                      (tier) => `
-                        <article class="tier-card ${tier.isActive ? "active" : ""} ${
-                          tier.isEnabled ? "" : "disabled"
-                        }">
-                          <h4>${escapeHtml(tier.label)}</h4>
-                          <p>${escapeHtml(formatPercent(tier.hurdle))} hurdle</p>
-                          <p>${escapeHtml(
-                            `${Math.round(tier.investorShare * 100)}/${Math.round(
-                              tier.sponsorShare * 100
-                            )} investor/sponsor`
-                          )}</p>
-                          <p>${escapeHtml(tier.isEnabled ? "Enabled" : "Disabled")}</p>
-                        </article>
-                      `
-                    )
-                    .join("")}
+                <div class="metrics-grid">
+                  ${metricCard("Gross project IRR", formatPercent(result.outputs.projectIrr))}
+                  ${metricCard(
+                    "Distributable equity",
+                    formatCurrency(result.outputs.distributableEquity)
+                  )}
+                  ${metricCard(
+                    "Investor profit pool",
+                    formatCurrency(result.outputs.investorProfitPool)
+                  )}
+                  ${metricCard(
+                    "Sponsor promote",
+                    formatCurrency(result.outputs.sponsorPromote)
+                  )}
                 </div>
-              </div>
-              <div class="panel panel-inline">
-                <div class="section-head">
-                  <div>
-                    <h4>Waterfall outputs</h4>
-                    <p class="section-copy">Class A cash investors and Class C contractor participants flow through the same payout engine.</p>
+                <div class="panel panel-inline">
+                  <div class="section-head">
+                    <div>
+                      <h4>Promote tiers</h4>
+                      <p class="section-copy">Highest cleared IRR tier becomes the active split in this prototype.</p>
+                    </div>
                   </div>
-                </div>
-                <div class="class-grid">
-                  ${result.outputs.classBreakdown
-                    .map(
-                      (item) => `
-                        <article class="class-card">
-                          <h4>${escapeHtml(item.classType)}</h4>
-                          <p>${escapeHtml(formatCurrency(item.capitalReturned))} capital</p>
-                          <p>${escapeHtml(formatCurrency(item.prefEarned))} pref</p>
-                          <p>${escapeHtml(formatCurrency(item.profitShare))} profit</p>
-                        </article>
-                      `
-                    )
-                    .join("")}
-                </div>
-              </div>
-              <div class="table-wrap table-top-gap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Participant</th>
-                      <th>Class</th>
-                      <th>Contribution</th>
-                      <th>Ownership</th>
-                      <th>Capital</th>
-                      <th>Pref</th>
-                      <th>Profit Share</th>
-                      <th>Total Payout</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    ${result.outputs.participants
+                  <div class="tier-grid">
+                    ${result.outputs.promoteTiers
                       .map(
-                        (participant) => `
-                          <tr>
-                            <td>${escapeHtml(participant.participantName)}</td>
-                            <td>${escapeHtml(participant.classType)}</td>
-                            <td>${escapeHtml(formatCurrency(participant.contributionAmount))}</td>
-                            <td>${escapeHtml(formatPercent(participant.ownershipPct))}</td>
-                            <td>${escapeHtml(formatCurrency(participant.capitalReturned))}</td>
-                            <td>${escapeHtml(formatCurrency(participant.prefEarned))}</td>
-                            <td>${escapeHtml(formatCurrency(participant.profitShare))}</td>
-                            <td>${escapeHtml(formatCurrency(participant.totalPayout))}</td>
-                          </tr>
+                        (tier) => `
+                          <article class="tier-card ${tier.isActive ? "active" : ""} ${
+                            tier.isEnabled ? "" : "disabled"
+                          }">
+                            <h4>${escapeHtml(tier.label)}</h4>
+                            <p>${escapeHtml(formatPercent(tier.hurdle))} hurdle</p>
+                            <p>${escapeHtml(
+                              `${Math.round(tier.investorShare * 100)}/${Math.round(
+                                tier.sponsorShare * 100
+                              )} investor/sponsor`
+                            )}</p>
+                            <p>${escapeHtml(tier.isEnabled ? "Enabled" : "Disabled")}</p>
+                          </article>
                         `
                       )
                       .join("")}
-                  </tbody>
-                </table>
-              </div>
-            `
-            : `
-              <div class="empty-state">
-                Select a deal and run a scenario to see the promote hurdle, investor payouts, and sponsor share.
-              </div>
-            `
-        }
+                  </div>
+                </div>
+                <div class="panel panel-inline">
+                  <div class="section-head">
+                    <div>
+                      <h4>Waterfall outputs</h4>
+                      <p class="section-copy">Class A cash investors and Class C contractor participants flow through the same payout engine.</p>
+                    </div>
+                  </div>
+                  <div class="class-grid">
+                    ${result.outputs.classBreakdown
+                      .map(
+                        (item) => `
+                          <article class="class-card">
+                            <h4>${escapeHtml(item.classType)}</h4>
+                            <p>${escapeHtml(formatCurrency(item.capitalReturned))} capital</p>
+                            <p>${escapeHtml(formatCurrency(item.prefEarned))} pref</p>
+                            <p>${escapeHtml(formatCurrency(item.profitShare))} profit</p>
+                          </article>
+                        `
+                      )
+                      .join("")}
+                  </div>
+                </div>
+                <div class="table-wrap table-top-gap">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Participant</th>
+                        <th>Class</th>
+                        <th>Contribution</th>
+                        <th>Ownership</th>
+                        <th>Capital</th>
+                        <th>Pref</th>
+                        <th>Profit Share</th>
+                        <th>Total Payout</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      ${result.outputs.participants
+                        .map(
+                          (participant) => `
+                            <tr>
+                              <td>${escapeHtml(participant.participantName)}</td>
+                              <td>${escapeHtml(participant.classType)}</td>
+                              <td>${escapeHtml(formatCurrency(participant.contributionAmount))}</td>
+                              <td>${escapeHtml(formatPercent(participant.ownershipPct))}</td>
+                              <td>${escapeHtml(formatCurrency(participant.capitalReturned))}</td>
+                              <td>${escapeHtml(formatCurrency(participant.prefEarned))}</td>
+                              <td>${escapeHtml(formatCurrency(participant.profitShare))}</td>
+                              <td>${escapeHtml(formatCurrency(participant.totalPayout))}</td>
+                            </tr>
+                          `
+                        )
+                        .join("")}
+                    </tbody>
+                  </table>
+                </div>
+              `
+              : `
+                <div class="empty-state">
+                  Select a deal and run a scenario to see the promote hurdle, investor payouts, and sponsor share.
+                </div>
+              `
+          }
+        </div>
       </div>
-    </section>
-  `;
+    `
+  });
 }
 
 function renderContractorTable() {
   const rows = state.dashboard.contractorLedger;
+  const filteredRows = applyContractorFilters(rows);
+  const contractorDeals = getContractorFilterOptions(rows);
+  const projectRollups = buildContractorProjectRollups(filteredRows);
 
-  return `
-    <section class="panel">
-      <div class="section-head">
-        <div>
-          <h3>Contractor Tracking System</h3>
-          <p class="section-copy">
-            Deferred labor is tracked separately from cash equity, tagged as Class C, and
-            still participates in the deal waterfall.
-          </p>
-        </div>
+  return renderCollapsibleSection({
+    sectionId: "manager-contractor-tracking",
+    title: "Contractor Tracking System",
+    copy:
+      "Deferred labor is tracked separately from cash equity, tagged as Class C, and organized by project so each development can be reviewed on its own.",
+    headerActions: `
+      <label class="toolbar-field">
+        Project filter
+        <select id="contractor-filter-deal">
+          <option value="">All projects</option>
+          ${contractorDeals
+            .map(
+              (deal) => `
+                <option value="${escapeHtml(deal.id)}" ${
+                  deal.id === state.contractorDealFilter ? "selected" : ""
+                }>
+                  ${escapeHtml(deal.name)}
+                </option>
+              `
+            )
+            .join("")}
+        </select>
+      </label>
+    `,
+    body: `
+      <div class="contractor-rollup-grid">
+        ${
+          projectRollups.length
+            ? projectRollups
+                .map(
+                  (project) => `
+                    <article class="contractor-rollup-card">
+                      <div class="section-head">
+                        <div>
+                          <p class="eyebrow">${escapeHtml(`${project.contractorCount} contractor${project.contractorCount === 1 ? "" : "s"}`)}</p>
+                          <h4>${escapeHtml(project.dealName)}</h4>
+                        </div>
+                      </div>
+                      <div class="summary-grid">
+                        ${summaryItem("Total contract", formatCurrency(project.totalContractValue))}
+                        ${summaryItem("Cash paid", formatCurrency(project.cashPaid))}
+                        ${summaryItem("Deferred", formatCurrency(project.deferredAmount))}
+                        ${summaryItem("Pref earned", formatCurrency(project.prefEarned))}
+                        ${summaryItem("Profit share", formatCurrency(project.profitShare))}
+                        ${summaryItem("Total payout", formatCurrency(project.totalPayout))}
+                      </div>
+                    </article>
+                  `
+                )
+                .join("")
+            : '<div class="empty-state">No contractor records match the selected project filter.</div>'
+        }
       </div>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Contractor</th>
-              <th>Deal</th>
-              <th>Trade</th>
-              <th>Total Contract</th>
-              <th>Cash Paid</th>
-              <th>Deferred</th>
-              <th>Ownership</th>
-              <th>Pref Earned</th>
-              <th>Profit Share</th>
-              <th>Total Payout</th>
-              <th>Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${rows
-              .map(
-                (row) => `
+      ${
+        filteredRows.length
+          ? `
+            <div class="table-wrap contractor-table-wrap">
+              <table>
+                <thead>
                   <tr>
-                    <td>${escapeHtml(row.contractorName)}</td>
-                    <td>${escapeHtml(row.dealName)}</td>
-                    <td>${escapeHtml(row.trade)}</td>
-                    <td>${escapeHtml(formatCurrency(row.totalContractValue))}</td>
-                    <td>${escapeHtml(formatCurrency(row.cashPaid))}</td>
-                    <td>${escapeHtml(formatCurrency(row.deferredAmount))}</td>
-                    <td>${escapeHtml(formatPercent(row.ownershipPct))}</td>
-                    <td>${escapeHtml(formatCurrency(row.prefEarned))}</td>
-                    <td>${escapeHtml(formatCurrency(row.profitShare))}</td>
-                    <td>${escapeHtml(formatCurrency(row.totalPayout))}</td>
-                    <td>
-                      <span class="hybrid-pill">
-                        ${escapeHtml(row.status)}${row.hybrid ? " · Hybrid" : ""}
-                      </span>
-                    </td>
+                    <th>Contractor</th>
+                    <th>Deal</th>
+                    <th>Trade</th>
+                    <th>Total Contract</th>
+                    <th>Cash Paid</th>
+                    <th>Deferred</th>
+                    <th>Ownership</th>
+                    <th>Pref Earned</th>
+                    <th>Profit Share</th>
+                    <th>Total Payout</th>
+                    <th>Status</th>
                   </tr>
-                `
-              )
-              .join("")}
-          </tbody>
-        </table>
-      </div>
-    </section>
-  `;
+                </thead>
+                <tbody>
+                  ${filteredRows
+                    .map(
+                      (row) => `
+                        <tr>
+                          <td>${escapeHtml(row.contractorName)}</td>
+                          <td>${escapeHtml(row.dealName)}</td>
+                          <td>${escapeHtml(row.trade)}</td>
+                          <td>${escapeHtml(formatCurrency(row.totalContractValue))}</td>
+                          <td>${escapeHtml(formatCurrency(row.cashPaid))}</td>
+                          <td>${escapeHtml(formatCurrency(row.deferredAmount))}</td>
+                          <td>${escapeHtml(formatPercent(row.ownershipPct))}</td>
+                          <td>${escapeHtml(formatCurrency(row.prefEarned))}</td>
+                          <td>${escapeHtml(formatCurrency(row.profitShare))}</td>
+                          <td>${escapeHtml(formatCurrency(row.totalPayout))}</td>
+                          <td>
+                            <span class="hybrid-pill">
+                              ${escapeHtml(row.status)}${row.hybrid ? " · Hybrid" : ""}
+                            </span>
+                          </td>
+                        </tr>
+                      `
+                    )
+                    .join("")}
+                </tbody>
+              </table>
+            </div>
+          `
+          : ""
+      }
+    `
+  });
 }
 
 function renderCreateUserPanel() {
-  return `
-    <article class="admin-card">
+  return renderCollapsibleSection({
+    sectionId: "admin-create-user",
+    title: "Add Platform User",
+    copy:
+      "Creates the user profile, login, first-login password reset requirement, and credential notification.",
+    message: renderMessage(state.messages.user),
+    panelClass: "admin-card",
+    body: `
       <p class="eyebrow">Manager Control</p>
-      <h3>Add Platform User</h3>
-      <p class="section-copy">
-        Creates the user profile, login, first-login password reset requirement, and credential notification.
-      </p>
-      ${renderMessage(state.messages.user)}
       <form id="user-form">
         <label>
           Category
@@ -1458,22 +1855,23 @@ function renderCreateUserPanel() {
         </label>
         <button class="button-primary" type="submit">Create user</button>
       </form>
-    </article>
-  `;
+    `
+  });
 }
 
 function renderAllocationPanel() {
   const participants = state.dashboard.admin.participants;
   const deals = state.dashboard.deals;
 
-  return `
-    <article class="admin-card">
+  return renderCollapsibleSection({
+    sectionId: "admin-add-allocation",
+    title: "Add Deal Allocation",
+    copy:
+      "Link a participant to a deal. Contractor fields are only required for contractor participants.",
+    message: renderMessage(state.messages.allocation),
+    panelClass: "admin-card",
+    body: `
       <p class="eyebrow">Manager Control</p>
-      <h3>Add Deal Allocation</h3>
-      <p class="section-copy">
-        Link a participant to a deal. Contractor fields are only required for contractor participants.
-      </p>
-      ${renderMessage(state.messages.allocation)}
       <form id="allocation-form">
         <label>
           Participant
@@ -1549,21 +1947,21 @@ function renderAllocationPanel() {
         </div>
         <button class="button-primary" type="submit">Save allocation</button>
       </form>
-    </article>
-  `;
+    `
+  });
 }
 
 function renderCreateDealPanel() {
   const defaults = getCreateDealDefaults();
 
-  return `
-    <article class="admin-card">
+  return renderCollapsibleSection({
+    sectionId: "admin-create-deal",
+    title: "Create Project",
+    copy: "Add a new deal to the database so it can be allocated to investors and contractors.",
+    message: renderMessage(state.messages.dealCreate),
+    panelClass: "admin-card",
+    body: `
       <p class="eyebrow">Manager Control</p>
-      <h3>Create Project</h3>
-      <p class="section-copy">
-        Add a new deal to the database so it can be allocated to investors and contractors.
-      </p>
-      ${renderMessage(state.messages.dealCreate)}
       <form id="create-deal-form">
         <div class="form-grid-2">
           <label>
@@ -1686,8 +2084,8 @@ function renderCreateDealPanel() {
         </label>
         <button class="button-primary" type="submit">Create project</button>
       </form>
-    </article>
-  `;
+    `
+  });
 }
 
 function renderTimelineEditorRows(draft) {
@@ -1841,24 +2239,26 @@ function renderPromoteTierEditorRows(draft) {
 function renderDealEditorPanel() {
   const deal = getManagerEditableDeal();
   const draft = deal ? getDealEditorDraft(deal) : null;
+  const defaultVoteCloseDate = getDefaultVoteCloseDate();
 
   if (!deal) {
-    return `
-      <article class="admin-card">
-        <h3>Update Project</h3>
-        <div class="empty-state">No deals are available to edit.</div>
-      </article>
-    `;
+    return renderCollapsibleSection({
+      sectionId: "admin-edit-deal",
+      title: "Update Project",
+      copy: "Save project status, phase, financial assumptions, timeline milestones, and promote tiers.",
+      panelClass: "admin-card",
+      body: '<div class="empty-state">No deals are available to edit.</div>'
+    });
   }
 
-  return `
-    <article class="admin-card admin-card-wide">
+  return renderCollapsibleSection({
+    sectionId: "admin-edit-deal",
+    title: "Update Project",
+    copy: "Save project status, phase, financial assumptions, timeline milestones, and promote tiers.",
+    message: renderMessage(state.messages.deal),
+    panelClass: "admin-card admin-card-wide",
+    body: `
       <p class="eyebrow">Manager Control</p>
-      <h3>Update Project</h3>
-      <p class="section-copy">
-        Save project status, phase, financial assumptions, timeline milestones, and promote tiers.
-      </p>
-      ${renderMessage(state.messages.deal)}
       <form id="deal-form" data-deal-id="${escapeHtml(deal.id)}">
         <label>
           Deal
@@ -2067,14 +2467,12 @@ function renderDealEditorPanel() {
           />
         </label>
 
-        <div class="editor-section">
-          <div class="section-head">
-            <div>
-              <h4>Timeline Milestones</h4>
-              <p class="section-copy">
-                These investor-facing milestones appear in each deal’s timeline section.
-              </p>
-            </div>
+        ${renderCollapsibleSection({
+          sectionId: `admin-edit-deal-${draft.id}-timeline`,
+          title: "Timeline Milestones",
+          copy: "These investor-facing milestones appear in each deal’s timeline section.",
+          panelClass: "editor-section",
+          headerActions: `
             <button
               class="button-secondary button-inline"
               type="button"
@@ -2083,18 +2481,17 @@ function renderDealEditorPanel() {
             >
               Add milestone
             </button>
-          </div>
-          ${renderTimelineEditorRows(draft)}
-        </div>
+          `,
+          body: `${renderTimelineEditorRows(draft)}`
+        })}
 
-        <div class="editor-section">
-          <div class="section-head">
-            <div>
-              <h4>Promote Tiers</h4>
-              <p class="section-copy">
-                Enable or disable tiers per project. The highest cleared enabled tier drives the split.
-              </p>
-            </div>
+        ${renderCollapsibleSection({
+          sectionId: `admin-edit-deal-${draft.id}-tiers`,
+          title: "Promote Tiers",
+          copy:
+            "Enable or disable tiers per project. The highest cleared enabled tier drives the split.",
+          panelClass: "editor-section",
+          headerActions: `
             <button
               class="button-secondary button-inline"
               type="button"
@@ -2103,76 +2500,84 @@ function renderDealEditorPanel() {
             >
               Add tier
             </button>
-          </div>
-          <p class="helper-copy">
-            Use decimals for hurdles and splits. Example: <code>0.12</code> = 12% hurdle, <code>0.70</code>/<code>0.30</code> = 70/30 split.
-          </p>
-          ${renderPromoteTierEditorRows(draft)}
-        </div>
+          `,
+          body: `
+            <p class="helper-copy">
+              Use decimals for hurdles and splits. Example: <code>0.12</code> = 12% hurdle, <code>0.70</code>/<code>0.30</code> = 70/30 split.
+            </p>
+            ${renderPromoteTierEditorRows(draft)}
+          `
+        })}
 
-        <div class="editor-section">
-          <div class="section-head">
-            <div>
-              <h4>Major Issue Voting</h4>
-              <p class="section-copy">
-                Create investor votes tied to this project. Approval is weighted by invested capital.
-              </p>
-            </div>
-          </div>
-          ${renderMessage(state.messages.issue)}
-          <div class="editor-row issue-creator" data-deal-issue-root="${escapeHtml(draft.id)}">
-            <div class="form-grid-2">
+        ${renderCollapsibleSection({
+          sectionId: `admin-edit-deal-${draft.id}-issues`,
+          title: "Major Issue Voting",
+          copy: "Create investor votes tied to this project. Approval is weighted by invested capital.",
+          panelClass: "editor-section",
+          message: renderMessage(state.messages.issue),
+          body: `
+            <div class="editor-row issue-creator" data-deal-issue-root="${escapeHtml(draft.id)}">
+              <div class="form-grid-2">
+                <label>
+                  Issue title
+                  <input type="text" name="title" placeholder="Approve sale price reduction" />
+                </label>
+                <label>
+                  Approval threshold
+                  <input type="number" name="approvalThreshold" min="0.01" max="1" step="0.01" value="0.75" />
+                </label>
+              </div>
               <label>
-                Issue title
-                <input type="text" name="title" placeholder="Approve sale price reduction" />
+                Vote close date
+                <input type="date" name="closesOn" value="${escapeHtml(defaultVoteCloseDate)}" />
               </label>
               <label>
-                Approval threshold
-                <input type="number" name="approvalThreshold" min="0.01" max="1" step="0.01" value="0.75" />
+                Description
+                <textarea
+                  name="description"
+                  rows="3"
+                  placeholder="Describe the decision that investors are being asked to approve."
+                ></textarea>
               </label>
+              <button
+                class="button-primary"
+                type="button"
+                data-deal-editor-action="create-issue"
+                data-deal-id="${escapeHtml(draft.id)}"
+              >
+                Create voting issue
+              </button>
             </div>
-            <label>
-              Description
-              <textarea
-                name="description"
-                rows="3"
-                placeholder="Describe the decision that investors are being asked to approve."
-              ></textarea>
-            </label>
-            <button
-              class="button-primary"
-              type="button"
-              data-deal-editor-action="create-issue"
-              data-deal-id="${escapeHtml(draft.id)}"
-            >
-              Create voting issue
-            </button>
-          </div>
-          <div class="issue-grid compact-top-gap">
-            ${
-              deal.issues.length
-                ? deal.issues
-                    .map(
-                      (issue) => `
-                        <article class="issue-card issue-card-compact">
-                          <div class="section-head">
-                            <div>
-                              <h4>${escapeHtml(issue.title)}</h4>
-                              <p class="section-copy">${escapeHtml(issue.description)}</p>
+            <div class="issue-grid compact-top-gap">
+              ${
+                deal.issues.length
+                  ? deal.issues
+                      .map(
+                        (issue) => `
+                          <article class="issue-card issue-card-compact">
+                            <div class="section-head">
+                              <div>
+                                <h4>${escapeHtml(issue.title)}</h4>
+                                <p class="section-copy">${escapeHtml(issue.description)}</p>
+                              </div>
+                              <div class="issue-head-meta">
+                                ${renderIssueStatus(issue)}
+                                <span class="read-only-tag">${escapeHtml(`Closes ${issue.closesOn || "TBD"}`)}</span>
+                              </div>
                             </div>
-                            ${renderIssueStatus(issue)}
-                          </div>
-                          <div class="summary-grid">
-                            ${renderIssueMetrics(issue, { showCapital: true, showViewer: false })}
-                          </div>
-                        </article>
-                      `
-                    )
-                    .join("")
-                : '<div class="empty-state">No major issues have been created for this project yet.</div>'
-            }
-          </div>
-        </div>
+                            <div class="summary-grid">
+                              ${renderIssueMetrics(issue, { showCapital: true, showViewer: false })}
+                            </div>
+                            ${renderIssueVoteLedger(issue)}
+                          </article>
+                        `
+                      )
+                      .join("")
+                  : '<div class="empty-state">No major issues have been created for this project yet.</div>'
+              }
+            </div>
+          `
+        })}
 
         <div class="button-row">
           <button class="button-primary" type="submit">Save project changes</button>
@@ -2186,24 +2591,81 @@ function renderDealEditorPanel() {
           </button>
         </div>
       </form>
-    </article>
-  `;
+    `
+  });
 }
 
 function renderUserDirectory() {
   const rows = state.dashboard.admin.users;
+  const filteredRows = applyUserFilters(rows);
+  const filterOptions = getUserFilterOptions(rows);
 
-  return `
-    <section class="panel">
-      <div class="section-head">
-        <div>
-          <h3>User Directory</h3>
-          <p class="section-copy">
-            Manage login access, status, and credential-delivery history without touching deal records.
-          </p>
+  return renderCollapsibleSection({
+    sectionId: "manager-user-directory",
+    title: "User Directory",
+    copy:
+      "Manage login access, status, and credential-delivery history without touching deal records.",
+    message: renderMessage(state.messages.directory),
+    body: `
+      <div class="table-toolbar">
+        <div class="filter-grid filter-grid-4">
+          <label>
+            Search
+            <input
+              type="search"
+              id="user-filter-search"
+              value="${inputValue(state.userFilters.search)}"
+              placeholder="Name, email, or contact"
+            />
+          </label>
+          <label>
+            Category
+            <select id="user-filter-category">
+              <option value="">All categories</option>
+              ${filterOptions.categories
+                .map(
+                  (category) => `
+                    <option value="${escapeHtml(category)}" ${
+                      category === state.userFilters.category ? "selected" : ""
+                    }>
+                      ${escapeHtml(titleCase(category))}
+                    </option>
+                  `
+                )
+                .join("")}
+            </select>
+          </label>
+          <label>
+            Role
+            <select id="user-filter-role">
+              <option value="">All roles</option>
+              ${filterOptions.roles
+                .map(
+                  (role) => `
+                    <option value="${escapeHtml(role)}" ${
+                      role === state.userFilters.role ? "selected" : ""
+                    }>
+                      ${escapeHtml(titleCase(role))}
+                    </option>
+                  `
+                )
+                .join("")}
+            </select>
+          </label>
+          <label>
+            Status
+            <select id="user-filter-status">
+              <option value="">All statuses</option>
+              <option value="active" ${state.userFilters.status === "active" ? "selected" : ""}>Active</option>
+              <option value="disabled" ${state.userFilters.status === "disabled" ? "selected" : ""}>Disabled</option>
+            </select>
+          </label>
         </div>
+        <span class="read-only-tag">Showing ${escapeHtml(String(filteredRows.length))} of ${escapeHtml(String(rows.length))}</span>
       </div>
-      ${renderMessage(state.messages.directory)}
+      ${
+        filteredRows.length
+          ? `
       <div class="table-wrap">
         <table>
           <thead>
@@ -2222,7 +2684,7 @@ function renderUserDirectory() {
             </tr>
           </thead>
           <tbody>
-            ${rows
+            ${filteredRows
               .map(
                 (row) => {
                   return `
@@ -2269,8 +2731,11 @@ function renderUserDirectory() {
           </tbody>
         </table>
       </div>
-    </section>
-  `;
+      `
+          : '<div class="empty-state">No users match the current filters.</div>'
+      }
+    `
+  });
 }
 
 function renderAllocationTable() {
@@ -2284,16 +2749,11 @@ function renderAllocationTable() {
   const showingFrom = filteredRows.length ? startIndex + 1 : 0;
   const showingTo = Math.min(startIndex + ALLOCATION_PAGE_SIZE, filteredRows.length);
 
-  return `
-    <section class="panel">
-      <div class="section-head">
-        <div>
-          <h3>Current Deal Allocations</h3>
-          <p class="section-copy">
-            Stored capital and deferred-comp participation records across all projects.
-          </p>
-        </div>
-      </div>
+  return renderCollapsibleSection({
+    sectionId: "manager-allocations",
+    title: "Current Deal Allocations",
+    copy: "Stored capital and deferred-comp participation records across all projects.",
+    body: `
       <div class="table-toolbar">
         <div class="filter-grid filter-grid-4">
           <label>
@@ -2435,29 +2895,24 @@ function renderAllocationTable() {
       `
           : '<div class="empty-state">No allocations match the current filters.</div>'
       }
-    </section>
-  `;
+    `
+  });
 }
 
 function renderManagerAdmin() {
-  return `
-    <section class="panel">
-      <div class="section-head">
-        <div>
-          <h3>Admin Console</h3>
-          <p class="section-copy">
-            Manager-only controls for platform users, new deals, deal allocations, and project updates.
-          </p>
-        </div>
-      </div>
+  return renderCollapsibleSection({
+    sectionId: "manager-admin-console",
+    title: "Admin Console",
+    copy: "Manager-only controls for platform users, new deals, deal allocations, and project updates.",
+    body: `
       <div class="admin-grid">
         ${renderCreateUserPanel()}
         ${renderCreateDealPanel()}
         ${renderAllocationPanel()}
         ${renderDealEditorPanel()}
       </div>
-    </section>
-  `;
+    `
+  });
 }
 
 function renderManagerDashboard() {
@@ -2478,39 +2933,34 @@ function renderManagerDashboard() {
         </div>
       </section>
 
-      <section class="panel">
-        <div class="section-head">
-          <div>
-            <h3>Portfolio Controls</h3>
-            <p class="section-copy">
-              Sponsor-level snapshot across all tracked deals, including projected promote and contractor participation.
-            </p>
+      ${renderCollapsibleSection({
+        sectionId: "manager-portfolio-controls",
+        title: "Portfolio Controls",
+        copy:
+          "Sponsor-level snapshot across all tracked deals, including projected promote and contractor participation.",
+        body: `
+          <div class="metrics-grid">
+            ${metricCard("Tracked deals", String(overview.totalDeals))}
+            ${metricCard("Active deals", String(overview.activeDeals))}
+            ${metricCard("Tracked equity", formatCurrency(overview.totalTrackedEquity))}
+            ${metricCard(
+              "Projected sponsor promote",
+              formatCurrency(overview.projectedSponsorPromote)
+            )}
           </div>
-        </div>
-        <div class="metrics-grid">
-          ${metricCard("Tracked deals", String(overview.totalDeals))}
-          ${metricCard("Active deals", String(overview.activeDeals))}
-          ${metricCard("Tracked equity", formatCurrency(overview.totalTrackedEquity))}
-          ${metricCard(
-            "Projected sponsor promote",
-            formatCurrency(overview.projectedSponsorPromote)
-          )}
-        </div>
-      </section>
+        `
+      })}
 
       ${renderProfilePanel()}
       ${renderManagerAdmin()}
       ${renderUserDirectory()}
       ${renderAllocationTable()}
 
-      <section class="panel">
-        <div class="section-head">
-          <div>
-            <h3>Deal Rollup</h3>
-            <p class="section-copy">
-              Current forecast by deal, with active promote tier and class-level payout totals.
-            </p>
-          </div>
+      ${renderCollapsibleSection({
+        sectionId: "manager-deal-rollup",
+        title: "Deal Rollup",
+        copy: "Current forecast by deal, with active promote tier and class-level payout totals.",
+        headerActions: `
           <label class="toolbar-field">
             Deal filter
             <select id="deal-rollup-filter">
@@ -2528,15 +2978,17 @@ function renderManagerDashboard() {
                 .join("")}
             </select>
           </label>
-        </div>
-        <div class="project-grid">
-          ${
-            rollupDeals.length
-              ? rollupDeals.map((deal) => renderManagerDeal(deal)).join("")
-              : '<div class="empty-state">No deals match the selected rollup filter.</div>'
-          }
-        </div>
-      </section>
+        `,
+        body: `
+          <div class="project-grid">
+            ${
+              rollupDeals.length
+                ? rollupDeals.map((deal) => renderManagerDeal(deal)).join("")
+                : '<div class="empty-state">No deals match the selected rollup filter.</div>'
+            }
+          </div>
+        `
+      })}
 
       ${renderCalculator()}
       ${renderContractorTable()}
@@ -2592,12 +3044,19 @@ async function loadSession() {
       state.adminDealId = null;
       state.dealEditorDrafts = {};
       state.rollupDealFilter = "";
+      state.contractorDealFilter = "";
       state.allocationPage = 1;
       state.allocationFilters = {
         dealId: "",
         participantId: "",
         category: "",
         classType: ""
+      };
+      state.userFilters = {
+        search: "",
+        category: "",
+        role: "",
+        status: ""
       };
     }
   } catch (error) {
@@ -2615,6 +3074,12 @@ async function loadSession() {
       participantId: "",
       category: "",
       classType: ""
+    };
+    state.userFilters = {
+      search: "",
+      category: "",
+      role: "",
+      status: ""
     };
   } finally {
     state.loading = false;
@@ -2900,6 +3365,12 @@ document.addEventListener("change", async (event) => {
     return;
   }
 
+  if (event.target.id === "contractor-filter-deal") {
+    state.contractorDealFilter = event.target.value;
+    render();
+    return;
+  }
+
   if (event.target.id === "allocation-filter-deal") {
     state.allocationFilters.dealId = event.target.value;
     state.allocationPage = 1;
@@ -2928,6 +3399,24 @@ document.addEventListener("change", async (event) => {
     return;
   }
 
+  if (event.target.id === "user-filter-category") {
+    state.userFilters.category = event.target.value;
+    render();
+    return;
+  }
+
+  if (event.target.id === "user-filter-role") {
+    state.userFilters.role = event.target.value;
+    render();
+    return;
+  }
+
+  if (event.target.id === "user-filter-status") {
+    state.userFilters.status = event.target.value;
+    render();
+    return;
+  }
+
   if (event.target.id === "calculator-deal-select") {
     try {
       await loadCalculator(event.target.value);
@@ -2937,10 +3426,30 @@ document.addEventListener("change", async (event) => {
 });
 
 document.addEventListener("input", (event) => {
+  if (event.target.id === "user-filter-search") {
+    state.userFilters.search = event.target.value;
+    render();
+    return;
+  }
+
   syncDealEditorField(event.target);
 });
 
 document.addEventListener("click", async (event) => {
+  const sectionToggle = event.target.closest("[data-section-toggle]");
+
+  if (sectionToggle) {
+    const sectionId = sectionToggle.dataset.sectionToggle;
+
+    if (!sectionId) {
+      return;
+    }
+
+    toggleSectionCollapsed(sectionId);
+    render();
+    return;
+  }
+
   const dealEditorAction = event.target.closest("[data-deal-editor-action]");
 
   if (dealEditorAction) {
@@ -2990,29 +3499,36 @@ document.addEventListener("click", async (event) => {
       const issueRoot = document.querySelector(`[data-deal-issue-root="${dealId}"]`);
       const titleInput = issueRoot?.querySelector('input[name="title"]');
       const thresholdInput = issueRoot?.querySelector('input[name="approvalThreshold"]');
+      const closesOnInput = issueRoot?.querySelector('input[name="closesOn"]');
       const descriptionInput = issueRoot?.querySelector('textarea[name="description"]');
       const title = String(titleInput?.value ?? "").trim();
       const description = String(descriptionInput?.value ?? "").trim();
       const approvalThreshold = Number(thresholdInput?.value ?? 0.75);
+      const closesOn = String(closesOnInput?.value ?? "").trim();
 
-      if (!title || !description) {
-        setMessage("issue", "error", "Issue title and description are required.");
+      if (!title || !description || !closesOn) {
+        setMessage("issue", "error", "Issue title, close date, and description are required.");
         render();
         return;
       }
 
       try {
-        await api("/api/admin/issues", {
+        const result = await api("/api/admin/issues", {
           method: "POST",
           body: JSON.stringify({
             dealId,
             title,
             description,
-            approvalThreshold
+            approvalThreshold,
+            closesOn
           })
         });
         await refreshDashboard();
-        setMessage("issue", "success", "Voting issue created.");
+        setMessage(
+          "issue",
+          "success",
+          `Voting issue created. ${formatNotificationBatchSummary(result.notifications)}`
+        );
       } catch (error) {
         setMessage("issue", "error", error.message);
       }
@@ -3155,12 +3671,19 @@ document.addEventListener("click", async (event) => {
     state.calculatorSelectionId = null;
     state.adminDealId = null;
     state.rollupDealFilter = "";
+    state.contractorDealFilter = "";
     state.allocationPage = 1;
     state.allocationFilters = {
       dealId: "",
       participantId: "",
       category: "",
       classType: ""
+    };
+    state.userFilters = {
+      search: "",
+      category: "",
+      role: "",
+      status: ""
     };
     state.loginError = "";
     clearMessages();

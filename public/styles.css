@@ -311,6 +311,7 @@ button:disabled {
 .metrics-grid,
 .deal-grid,
 .issue-grid,
+.contractor-rollup-grid,
 .summary-grid,
 .timeline-grid,
 .project-grid,
@@ -479,6 +480,41 @@ button:disabled {
   margin-bottom: 1rem;
 }
 
+.section-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.75rem;
+}
+
+.section-toggle-button {
+  min-width: 7rem;
+  justify-content: center;
+}
+
+.collapsible-section-body {
+  display: grid;
+  gap: 1rem;
+}
+
+.collapsible-section-body > form {
+  margin-top: 0;
+}
+
+.collapsible-section.collapsed > .section-head {
+  margin-bottom: 0;
+}
+
+.section-collapsed-note,
+.deal-card-collapsed-note {
+  padding: 1rem 1.1rem;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.58);
+  border: 1px solid rgba(31, 26, 23, 0.08);
+  color: var(--muted);
+}
+
 .toolbar-field {
   min-width: min(100%, 260px);
 }
@@ -494,6 +530,11 @@ button:disabled {
 
 .issue-grid {
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
+.contractor-rollup-grid {
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  margin-bottom: 1rem;
 }
 
 .deal-card {
@@ -543,7 +584,8 @@ button:disabled {
 .timeline-step,
 .class-card,
 .tier-card,
-.issue-card {
+.issue-card,
+.contractor-rollup-card {
   padding: 0.95rem 1rem;
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.62);
@@ -581,6 +623,13 @@ button:disabled {
   padding: 1rem;
 }
 
+.contractor-rollup-card > .section-head h4 {
+  font-size: 1.1rem;
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--ink);
+}
+
 .issue-head-meta {
   display: flex;
   flex-wrap: wrap;
@@ -591,6 +640,43 @@ button:disabled {
 .issue-actions {
   margin-top: 1rem;
   align-items: center;
+}
+
+.issue-results {
+  margin-top: 1rem;
+}
+
+.issue-results-table {
+  min-width: 0;
+}
+
+.vote-result-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.36rem 0.7rem;
+  border-radius: 999px;
+  font-size: 0.82rem;
+  line-height: 1;
+}
+
+.vote-result-yes {
+  background: rgba(24, 133, 85, 0.12);
+  color: var(--sold);
+}
+
+.vote-result-no {
+  background: rgba(167, 60, 45, 0.12);
+  color: #8a2e23;
+}
+
+.vote-result-assumed_yes {
+  background: rgba(183, 129, 36, 0.14);
+  color: var(--gold);
+}
+
+.vote-result-pending {
+  background: rgba(15, 107, 217, 0.12);
+  color: var(--listed);
 }
 
 .vote-status {
@@ -660,6 +746,10 @@ button:disabled {
   margin-top: 0.75rem;
 }
 
+.deal-card-collapsed-note {
+  margin: 1.4rem;
+}
+
 .calculator-layout {
   display: grid;
   grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
@@ -721,6 +811,14 @@ button:disabled {
   margin-top: 0.6rem;
 }
 
+.editor-section.collapsible-section {
+  margin-top: 0.6rem;
+}
+
+.editor-section > .section-head h3 {
+  font-size: 1.18rem;
+}
+
 .editor-row {
   padding: 1rem;
   border-radius: 18px;
@@ -733,6 +831,10 @@ button:disabled {
 }
 
 .compact-top-gap {
+  margin-top: 1rem;
+}
+
+.contractor-table-wrap {
   margin-top: 1rem;
 }
 
@@ -802,6 +904,16 @@ td {
   .calculator-form,
   .calculator-results {
     padding: 1.15rem;
+  }
+
+  .section-head,
+  .section-tools {
+    align-items: flex-start;
+  }
+
+  .section-tools {
+    width: 100%;
+    justify-content: flex-start;
   }
 
   h1 {
