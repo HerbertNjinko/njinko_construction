@@ -1,0 +1,2 @@
+ALTER TABLE promote_tiers
+ADD COLUMN IF NOT EXISTS is_enabled INTEGER NOT NULL DEFAULT 1 CHECK (is_enabled IN (0, 1));

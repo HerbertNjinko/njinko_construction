@@ -45,6 +45,11 @@ function resolveNumber(value, fallback) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function resolveTimelineProgress(status, timelineProgress) {
+  const progress = Math.max(0, Math.min(100, resolveNumber(timelineProgress, 0)));
+  return status === "sold" ? 100 : progress;
+}
+
 export function getTriggeredTier(projectIrr, tiers) {
   if (!tiers.length) {
     return null;
@@ -66,7 +71,7 @@ export function calculateWaterfall({ deal, positions, overrides = {} }) {
   const holdMonths = resolveNumber(overrides.holdMonths, deal.holdMonths);
   const prefRate = resolveNumber(overrides.prefRate, deal.prefRate);
   const debt = resolveNumber(overrides.debt, deal.debt);
-  const promoteTiers = deal.promoteTiers ?? [];
+  const promoteTiers = (deal.promoteTiers ?? []).filter((tier) => tier.isEnabled !== false);
 
   const totalEquity = roundCurrency(
     positions.reduce((sum, position) => sum + position.contributionAmount, 0)
@@ -211,10 +216,123 @@ function buildProfilePayload(user, participant) {
   };
 }
 
+function buildGovernanceIssues(data, viewerParticipantId, { includeAll = false } = {}) {
+  const participantMap = getParticipantMap(data);
+  const dealMap = new Map(data.deals.map((deal) => [deal.id, deal]));
+  const investorCapitalByDeal = new Map();
+  const votesByIssue = new Map();
+
+  for (const position of data.positions) {
+    const participant = participantMap.get(position.participantId);
+
+    if (participant?.category !== "investor") {
+      continue;
+    }
+
+    if (!investorCapitalByDeal.has(position.dealId)) {
+      investorCapitalByDeal.set(position.dealId, new Map());
+    }
+
+    const dealCapital = investorCapitalByDeal.get(position.dealId);
+    dealCapital.set(
+      position.participantId,
+      roundCurrency((dealCapital.get(position.participantId) ?? 0) + position.contributionAmount)
+    );
+  }
+
+  for (const vote of data.issueVotes ?? []) {
+    if (!votesByIssue.has(vote.issueId)) {
+      votesByIssue.set(vote.issueId, []);
+    }
+
+    votesByIssue.get(vote.issueId).push(vote);
+  }
+
+  return [...(data.dealIssues ?? [])]
+    .sort((left, right) => String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? "")))
+    .map((issue) => {
+      const deal = dealMap.get(issue.dealId);
+      const capitalByParticipant = investorCapitalByDeal.get(issue.dealId) ?? new Map();
+      const eligibleInvestment = roundCurrency(
+        [...capitalByParticipant.values()].reduce((sum, value) => sum + value, 0)
+      );
+      const relevantVotes = (votesByIssue.get(issue.id) ?? []).filter((vote) =>
+        capitalByParticipant.has(vote.participantId)
+      );
+      let yesInvestment = 0;
+      let noInvestment = 0;
+
+      for (const vote of relevantVotes) {
+        const investedAmount = capitalByParticipant.get(vote.participantId) ?? 0;
+
+        if (vote.voteChoice === "yes") {
+          yesInvestment += investedAmount;
+        } else if (vote.voteChoice === "no") {
+          noInvestment += investedAmount;
+        }
+      }
+
+      const pendingInvestment = Math.max(0, eligibleInvestment - yesInvestment - noInvestment);
+      const yesPct = eligibleInvestment > 0 ? yesInvestment / eligibleInvestment : 0;
+      const noPct = eligibleInvestment > 0 ? noInvestment / eligibleInvestment : 0;
+      const pendingPct = eligibleInvestment > 0 ? pendingInvestment / eligibleInvestment : 0;
+      const myInvestment = capitalByParticipant.get(viewerParticipantId) ?? 0;
+      const myVote = relevantVotes.find((vote) => vote.participantId === viewerParticipantId)?.voteChoice ?? null;
+      const isEligibleToVote = myInvestment > 0;
+      let status = "open";
+
+      if (eligibleInvestment > 0) {
+        if (yesPct >= issue.approvalThreshold) {
+          status = "passed";
+        } else if (yesPct + pendingPct < issue.approvalThreshold) {
+          status = "failed";
+        }
+      }
+
+      return {
+        id: issue.id,
+        dealId: issue.dealId,
+        dealName: deal?.name ?? "Deal",
+        dealStatus: deal?.status ?? "under_construction",
+        title: issue.title,
+        description: issue.description,
+        approvalThreshold: issue.approvalThreshold,
+        createdAt: issue.createdAt,
+        updatedAt: issue.updatedAt,
+        eligibleInvestment,
+        eligibleVoterCount: capitalByParticipant.size,
+        voteCount: relevantVotes.length,
+        yesInvestment: roundCurrency(yesInvestment),
+        noInvestment: roundCurrency(noInvestment),
+        pendingInvestment: roundCurrency(pendingInvestment),
+        yesPct,
+        noPct,
+        pendingPct,
+        status,
+        isEligibleToVote,
+        canVote: isEligibleToVote && status === "open",
+        myVote,
+        myWeightPct: eligibleInvestment > 0 ? myInvestment / eligibleInvestment : 0
+      };
+    })
+    .filter((issue) => includeAll || issue.isEligibleToVote);
+}
+
 export function buildInvestorDashboard(user, data = seedData) {
   const participantMap = getParticipantMap(data);
   const dealMap = new Map(data.deals.map((deal) => [deal.id, deal]));
   const participant = participantMap.get(user.participantId);
+  const governanceIssues = buildGovernanceIssues(data, user.participantId);
+  const issuesByDeal = new Map();
+
+  for (const issue of governanceIssues) {
+    if (!issuesByDeal.has(issue.dealId)) {
+      issuesByDeal.set(issue.dealId, []);
+    }
+
+    issuesByDeal.get(issue.dealId).push(issue);
+  }
+
   const visiblePositions = data.positions.filter(
     (position) => position.participantId === user.participantId
   );
@@ -233,9 +351,10 @@ export function buildInvestorDashboard(user, data = seedData) {
       status: deal.status,
       statusLabel: statusLabel(deal.status),
       currentPhase: deal.currentPhase,
-      timelineProgress: deal.timelineProgress,
+      timelineProgress: resolveTimelineProgress(deal.status, deal.timelineProgress),
       timeline: deal.timeline,
       projectionLabel: deal.status === "sold" ? "Actual at exit" : "Projected at exit",
+      issues: issuesByDeal.get(deal.id) ?? [],
       personalPosition: {
         classType: position.classType,
         contributionType: position.contributionType,
@@ -253,6 +372,8 @@ export function buildInvestorDashboard(user, data = seedData) {
         salePriceLabel: exitLabel,
         totalEquity: waterfall.totalEquity,
         debt: deal.debt,
+        debtInterestRate: deal.debtInterestRate ?? 0,
+        totalInterestPaid: deal.totalInterestPaid ?? 0,
         holdMonths: deal.holdMonths,
         projectIrr: waterfall.projectIrr,
         fundedOn: deal.fundedOn,
@@ -275,6 +396,9 @@ export function buildInvestorDashboard(user, data = seedData) {
   const currentPrefEarned = roundCurrency(
     projects.reduce((sum, project) => sum + project.personalPosition.prefEarned, 0)
   );
+  const totalAmountPayout = roundCurrency(
+    projects.reduce((sum, project) => sum + project.personalPosition.totalPayout, 0)
+  );
 
   return {
     role: user.role,
@@ -288,8 +412,12 @@ export function buildInvestorDashboard(user, data = seedData) {
     portfolio: {
       totalInvested,
       totalReturned,
+      totalAmountPayout,
       activeInvestments,
       currentPrefEarned
+    },
+    governance: {
+      issues: governanceIssues
     },
     projects
   };
@@ -302,6 +430,18 @@ export function buildManagerDashboard(user, data = seedData) {
     data.contractors.map((item) => [`${item.dealId}:${item.participantId}`, item])
   );
   const participant = participantMap.get(user.participantId);
+  const governanceIssues = buildGovernanceIssues(data, user.participantId, {
+    includeAll: true
+  });
+  const issuesByDeal = new Map();
+
+  for (const issue of governanceIssues) {
+    if (!issuesByDeal.has(issue.dealId)) {
+      issuesByDeal.set(issue.dealId, []);
+    }
+
+    issuesByDeal.get(issue.dealId).push(issue);
+  }
 
   const deals = data.deals.map((deal) => {
     const dealPositions = data.positions.filter((position) => position.dealId === deal.id);
@@ -315,12 +455,14 @@ export function buildManagerDashboard(user, data = seedData) {
       statusLabel: statusLabel(deal.status),
       totalEquity: waterfall.totalEquity,
       debt: deal.debt,
+      debtInterestRate: deal.debtInterestRate ?? 0,
+      totalInterestPaid: deal.totalInterestPaid ?? 0,
       totalProjectCost: deal.totalProjectCost,
       salePrice: deal.salePrice,
       holdMonths: deal.holdMonths,
       prefRate: deal.prefRate,
       currentPhase: deal.currentPhase,
-      timelineProgress: deal.timelineProgress,
+      timelineProgress: resolveTimelineProgress(deal.status, deal.timelineProgress),
       timeline: deal.timeline,
       fundedOn: deal.fundedOn,
       projectedExitOn: deal.projectedExitOn,
@@ -329,6 +471,7 @@ export function buildManagerDashboard(user, data = seedData) {
       sponsorPromote: waterfall.sponsorPromote,
       activeTier: waterfall.activeTier,
       classBreakdown: waterfall.classBreakdown,
+      issues: issuesByDeal.get(deal.id) ?? [],
       promoteTiers: deal.promoteTiers,
       participantResults: waterfall.participantResults.map((result) => ({
         ...result,
@@ -474,6 +617,9 @@ export function buildManagerDashboard(user, data = seedData) {
       participants: adminParticipants,
       allocations: adminAllocations
     },
+    governance: {
+      issues: governanceIssues
+    },
     calculator: {
       deals: deals.map((deal) => ({
         id: deal.id,
@@ -533,7 +679,9 @@ export function calculateScenarioForDeal(dealId, overrides = {}, data = seedData
       })),
       promoteTiers: deal.promoteTiers.map((tier) => ({
         ...tier,
-        isActive: waterfall.activeTier?.label === tier.label
+        isEnabled: tier.isEnabled !== false,
+        isActive:
+          tier.isEnabled !== false && waterfall.activeTier?.label === tier.label
       }))
     }
   };

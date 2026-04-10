@@ -195,6 +195,17 @@ label {
   font-size: 0.95rem;
 }
 
+.checkbox-field {
+  grid-template-columns: 1fr auto;
+  align-items: center;
+}
+
+.checkbox-field input[type="checkbox"] {
+  width: 1.15rem;
+  height: 1.15rem;
+  padding: 0;
+}
+
 input,
 textarea,
 select,
@@ -299,6 +310,7 @@ button:disabled {
 .credentials-grid,
 .metrics-grid,
 .deal-grid,
+.issue-grid,
 .summary-grid,
 .timeline-grid,
 .project-grid,
@@ -480,6 +492,10 @@ button:disabled {
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
 }
 
+.issue-grid {
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+}
+
 .deal-card {
   overflow: hidden;
   display: grid;
@@ -526,7 +542,8 @@ button:disabled {
 .breakdown-item,
 .timeline-step,
 .class-card,
-.tier-card {
+.tier-card,
+.issue-card {
   padding: 0.95rem 1rem;
   border-radius: 18px;
   background: rgba(255, 255, 255, 0.62);
@@ -551,6 +568,57 @@ button:disabled {
 .tier-card p {
   margin-top: 0.45rem;
   font-size: 1.08rem;
+}
+
+.issue-card > .section-head h4 {
+  font-size: 1.1rem;
+  letter-spacing: normal;
+  text-transform: none;
+  color: var(--ink);
+}
+
+.issue-card-compact {
+  padding: 1rem;
+}
+
+.issue-head-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.6rem;
+}
+
+.issue-actions {
+  margin-top: 1rem;
+  align-items: center;
+}
+
+.vote-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.42rem 0.8rem;
+  border-radius: 999px;
+  font-size: 0.84rem;
+  line-height: 1;
+}
+
+.vote-status-open {
+  background: rgba(15, 107, 217, 0.12);
+  color: var(--listed);
+}
+
+.vote-status-passed {
+  background: rgba(24, 133, 85, 0.12);
+  color: var(--sold);
+}
+
+.vote-status-failed {
+  background: rgba(167, 60, 45, 0.12);
+  color: #8a2e23;
+}
+
+.tier-card.disabled {
+  opacity: 0.58;
 }
 
 .timeline-step.active {
@@ -585,6 +653,11 @@ button:disabled {
 .deal-body {
   display: grid;
   gap: 1rem;
+}
+
+.deal-card-actions {
+  justify-content: flex-end;
+  margin-top: 0.75rem;
 }
 
 .calculator-layout {
@@ -638,7 +711,28 @@ button:disabled {
   align-items: center;
 }
 
+.editor-section,
+.editor-stack {
+  display: grid;
+  gap: 1rem;
+}
+
+.editor-section {
+  margin-top: 0.6rem;
+}
+
+.editor-row {
+  padding: 1rem;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.62);
+  border: 1px solid rgba(31, 26, 23, 0.08);
+}
+
 .table-top-gap {
+  margin-top: 1rem;
+}
+
+.compact-top-gap {
   margin-top: 1rem;
 }
 

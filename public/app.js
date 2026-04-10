@@ -6,6 +6,7 @@ const state = {
   calculator: null,
   calculatorSelectionId: null,
   adminDealId: null,
+  dealEditorDrafts: {},
   rollupDealFilter: "",
   allocationPage: 1,
   allocationFilters: {
@@ -21,6 +22,8 @@ const state = {
     allocation: null,
     deal: null,
     dealCreate: null,
+    issue: null,
+    vote: null,
     directory: null,
     profile: null,
     password: null
@@ -41,6 +44,12 @@ const percent = new Intl.NumberFormat("en-US", {
   maximumFractionDigits: 1
 });
 
+const precisePercent = new Intl.NumberFormat("en-US", {
+  style: "percent",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2
+});
+
 function escapeHtml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -56,6 +65,10 @@ function formatCurrency(value) {
 
 function formatPercent(value) {
   return percent.format(value ?? 0);
+}
+
+function formatRate(value) {
+  return precisePercent.format(value ?? 0);
 }
 
 function inputValue(value) {
@@ -93,6 +106,8 @@ function clearMessages() {
     allocation: null,
     deal: null,
     dealCreate: null,
+    issue: null,
+    vote: null,
     directory: null,
     profile: null,
     password: null
@@ -179,6 +194,8 @@ function getCreateDealDefaults() {
     status: "under_construction",
     holdMonths: 18,
     prefRate: 0.08,
+    debtInterestRate: 0,
+    totalInterestPaid: 0,
     timelineProgress: 0,
     fundedOn: new Date().toISOString().slice(0, 10)
   };
@@ -269,6 +286,168 @@ function getFilteredRollupDeals() {
   return state.rollupDealFilter ? deals.filter((deal) => deal.id === state.rollupDealFilter) : deals;
 }
 
+function createTimelineDraft(step = {}) {
+  return {
+    label: String(step.label ?? ""),
+    date: String(step.date ?? ""),
+    status: String(step.status ?? "upcoming")
+  };
+}
+
+function createTierDraft(tier = {}) {
+  return {
+    label: String(tier.label ?? ""),
+    hurdle: tier.hurdle === 0 || tier.hurdle ? String(tier.hurdle) : "",
+    investorShare:
+      tier.investorShare === 0 || tier.investorShare ? String(tier.investorShare) : "",
+    sponsorShare:
+      tier.sponsorShare === 0 || tier.sponsorShare ? String(tier.sponsorShare) : "",
+    isEnabled: tier.isEnabled !== false
+  };
+}
+
+function buildDealEditorDraft(deal) {
+  return {
+    id: deal.id,
+    name: String(deal.name ?? ""),
+    location: String(deal.location ?? ""),
+    currentPhase: String(deal.currentPhase ?? ""),
+    status: String(deal.status ?? "under_construction"),
+    totalProjectCost: String(deal.totalProjectCost ?? 0),
+    debt: String(deal.debt ?? 0),
+    debtInterestRate: String(deal.debtInterestRate ?? 0),
+    totalInterestPaid: String(deal.totalInterestPaid ?? 0),
+    salePrice: String(deal.salePrice ?? 0),
+    holdMonths: String(deal.holdMonths ?? 1),
+    prefRate: String(deal.prefRate ?? 0),
+    timelineProgress: String(deal.timelineProgress ?? 0),
+    fundedOn: String(deal.fundedOn ?? ""),
+    projectedExitOn: String(deal.projectedExitOn ?? ""),
+    actualExitOn: String(deal.actualExitOn ?? ""),
+    timeline:
+      deal.timeline?.length
+        ? deal.timeline.map((step) => createTimelineDraft(step))
+        : [createTimelineDraft()],
+    promoteTiers:
+      deal.promoteTiers?.length
+        ? deal.promoteTiers.map((tier) => createTierDraft(tier))
+        : [createTierDraft({ investorShare: 0.7, sponsorShare: 0.3, isEnabled: true })]
+  };
+}
+
+function getDealById(dealId) {
+  return state.dashboard?.deals?.find((deal) => deal.id === dealId) ?? null;
+}
+
+function getDealEditorDraft(deal = getManagerEditableDeal()) {
+  if (!deal) {
+    return null;
+  }
+
+  if (!state.dealEditorDrafts[deal.id]) {
+    state.dealEditorDrafts[deal.id] = buildDealEditorDraft(deal);
+  }
+
+  return state.dealEditorDrafts[deal.id];
+}
+
+function updateDealEditorDraft(dealId, updater) {
+  const deal = getDealById(dealId);
+
+  if (!deal) {
+    return null;
+  }
+
+  const current = getDealEditorDraft(deal);
+  const nextDraft = updater({
+    ...current,
+    timeline: current.timeline.map((step) => ({ ...step })),
+    promoteTiers: current.promoteTiers.map((tier) => ({ ...tier }))
+  });
+
+  state.dealEditorDrafts = {
+    ...state.dealEditorDrafts,
+    [dealId]: nextDraft
+  };
+
+  return nextDraft;
+}
+
+function syncDealEditorField(target) {
+  const form = target.closest("#deal-form");
+
+  if (!form) {
+    return false;
+  }
+
+  const dealId = form.dataset.dealId;
+
+  if (!dealId) {
+    return false;
+  }
+
+  if (target.dataset.dealField) {
+    updateDealEditorDraft(dealId, (draft) => ({
+      ...draft,
+      [target.dataset.dealField]: target.value,
+      ...(target.dataset.dealField === "status" && target.value === "sold"
+        ? { timelineProgress: "100" }
+        : {})
+    }));
+    return true;
+  }
+
+  if (target.dataset.timelineField) {
+    const index = Number(target.dataset.index);
+
+    if (!Number.isFinite(index)) {
+      return false;
+    }
+
+    updateDealEditorDraft(dealId, (draft) => {
+      const timeline = draft.timeline.map((step, stepIndex) =>
+        stepIndex === index
+          ? { ...step, [target.dataset.timelineField]: target.value }
+          : step
+      );
+
+      return {
+        ...draft,
+        timeline
+      };
+    });
+    return true;
+  }
+
+  if (target.dataset.tierField) {
+    const index = Number(target.dataset.index);
+
+    if (!Number.isFinite(index)) {
+      return false;
+    }
+
+    updateDealEditorDraft(dealId, (draft) => {
+      const promoteTiers = draft.promoteTiers.map((tier, tierIndex) =>
+        tierIndex === index
+          ? {
+              ...tier,
+              [target.dataset.tierField]:
+                target.type === "checkbox" ? target.checked : target.value
+            }
+          : tier
+      );
+
+      return {
+        ...draft,
+        promoteTiers
+      };
+    });
+    return true;
+  }
+
+  return false;
+}
+
 async function loadCalculator(dealId, overrides = null) {
   const preset = getCalculatorPreset(dealId);
 
@@ -294,6 +473,7 @@ async function loadCalculator(dealId, overrides = null) {
 
 async function refreshDashboard() {
   state.dashboard = await api("/api/dashboard", { method: "GET" });
+  state.dealEditorDrafts = {};
 
   if (state.dashboard.role === "manager") {
     const dealIds = new Set(state.dashboard.deals.map((deal) => deal.id));
@@ -362,6 +542,7 @@ async function refreshDashboard() {
     state.calculator = null;
     state.calculatorSelectionId = null;
     state.adminDealId = null;
+    state.dealEditorDrafts = {};
     state.rollupDealFilter = "";
     state.allocationPage = 1;
     state.allocationFilters = {
@@ -610,6 +791,104 @@ function renderProfilePanel() {
   `;
 }
 
+function renderIssueStatus(issue) {
+  return `
+    <span class="vote-status vote-status-${escapeHtml(issue.status)}">
+      ${escapeHtml(titleCase(issue.status))}
+    </span>
+  `;
+}
+
+function renderIssueMetrics(issue, { showCapital = false, showViewer = true } = {}) {
+  const metrics = [
+    summaryItem("Approval needed", formatPercent(issue.approvalThreshold)),
+    summaryItem("Yes votes", formatPercent(issue.yesPct)),
+    summaryItem("No votes", formatPercent(issue.noPct)),
+    summaryItem("Pending", formatPercent(issue.pendingPct))
+  ];
+
+  if (showViewer) {
+    metrics.push(summaryItem("Your vote", issue.myVote ? titleCase(issue.myVote) : "Not cast"));
+    metrics.push(summaryItem("Your voting power", formatPercent(issue.myWeightPct)));
+  }
+
+  if (showCapital) {
+    metrics.push(summaryItem("Eligible capital", formatCurrency(issue.eligibleInvestment)));
+    metrics.push(summaryItem("Votes cast", `${issue.voteCount} of ${issue.eligibleVoterCount}`));
+  }
+
+  return metrics.join("");
+}
+
+function renderInvestorIssueCard(issue) {
+  return `
+    <article class="issue-card">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">${escapeHtml(issue.dealName)}</p>
+          <h4>${escapeHtml(issue.title)}</h4>
+          <p class="section-copy">${escapeHtml(issue.description)}</p>
+        </div>
+        <div class="issue-head-meta">
+          ${renderIssueStatus(issue)}
+          <span class="read-only-tag">${escapeHtml(`${formatPercent(issue.myWeightPct)} power`)}</span>
+        </div>
+      </div>
+      <div class="summary-grid">
+        ${renderIssueMetrics(issue)}
+      </div>
+      <div class="button-row issue-actions">
+        <button
+          class="${issue.myVote === "yes" ? "button-primary" : "button-secondary"} button-inline"
+          type="button"
+          data-issue-vote="yes"
+          data-issue-id="${escapeHtml(issue.id)}"
+          ${issue.canVote ? "" : "disabled"}
+        >
+          Vote yes
+        </button>
+        <button
+          class="${issue.myVote === "no" ? "button-danger" : "button-secondary"} button-inline"
+          type="button"
+          data-issue-vote="no"
+          data-issue-id="${escapeHtml(issue.id)}"
+          ${issue.canVote ? "" : "disabled"}
+        >
+          Vote no
+        </button>
+        <span class="read-only-tag">
+          ${escapeHtml(issue.canVote ? "Weighted by your invested percentage in this deal." : "Voting is closed for this issue.")}
+        </span>
+      </div>
+    </article>
+  `;
+}
+
+function renderInvestorGovernancePanel() {
+  const issues = state.dashboard.governance?.issues ?? [];
+
+  return `
+    <section class="panel">
+      <div class="section-head">
+        <div>
+          <h3>Major Issue Voting</h3>
+          <p class="section-copy">
+            Your approval power is weighted by your invested percentage in each deal.
+          </p>
+        </div>
+      </div>
+      ${renderMessage(state.messages.vote)}
+      <div class="issue-grid">
+        ${
+          issues.length
+            ? issues.map((issue) => renderInvestorIssueCard(issue)).join("")
+            : '<div class="empty-state">No active voting items are tied to your eligible investor positions.</div>'
+        }
+      </div>
+    </section>
+  `;
+}
+
 function renderInvestorProject(project) {
   return `
     <article class="deal-card">
@@ -692,6 +971,12 @@ function renderInvestorProject(project) {
               formatCurrency(project.projectSummary.salePrice)
             )}
             ${summaryItem("Tracked equity", formatCurrency(project.projectSummary.totalEquity))}
+            ${summaryItem("Debt balance", formatCurrency(project.projectSummary.debt))}
+            ${summaryItem("Loan interest rate", formatRate(project.projectSummary.debtInterestRate))}
+            ${summaryItem(
+              "Interest paid",
+              formatCurrency(project.projectSummary.totalInterestPaid)
+            )}
             ${summaryItem("Hold period", `${project.projectSummary.holdMonths} months`)}
           </div>
         </div>
@@ -753,10 +1038,13 @@ function renderInvestorDashboard() {
         <div class="metrics-grid">
           ${metricCard("Total invested", formatCurrency(portfolio.totalInvested))}
           ${metricCard("Total returned", formatCurrency(portfolio.totalReturned))}
+          ${metricCard("Total amount payout", formatCurrency(portfolio.totalAmountPayout))}
           ${metricCard("Current active investments", String(portfolio.activeInvestments))}
           ${metricCard("Current pref earned", formatCurrency(portfolio.currentPrefEarned))}
         </div>
       </section>
+
+      ${renderInvestorGovernancePanel()}
 
       <section class="panel">
         <div class="section-head">
@@ -799,12 +1087,24 @@ function renderManagerDeal(deal) {
         <div>
           <p class="metric-label">Sponsor promote</p>
           <p class="metric-value">${escapeHtml(formatCurrency(deal.sponsorPromote))}</p>
+          <div class="button-row deal-card-actions">
+            <button
+              class="button-danger button-inline"
+              type="button"
+              data-deal-editor-action="delete-deal"
+              data-deal-id="${escapeHtml(deal.id)}"
+            >
+              Delete deal
+            </button>
+          </div>
         </div>
       </div>
       <div class="deal-body">
         <div class="summary-grid">
           ${summaryItem("Tracked equity", formatCurrency(deal.totalEquity))}
           ${summaryItem("Debt", formatCurrency(deal.debt))}
+          ${summaryItem("Loan rate", formatRate(deal.debtInterestRate))}
+          ${summaryItem("Interest paid", formatCurrency(deal.totalInterestPaid))}
           ${summaryItem("Current sale case", formatCurrency(deal.salePrice))}
           ${summaryItem("Gross project IRR", formatPercent(deal.projectIrr))}
         </div>
@@ -943,7 +1243,9 @@ function renderCalculator() {
                   ${result.outputs.promoteTiers
                     .map(
                       (tier) => `
-                        <article class="tier-card ${tier.isActive ? "active" : ""}">
+                        <article class="tier-card ${tier.isActive ? "active" : ""} ${
+                          tier.isEnabled ? "" : "disabled"
+                        }">
                           <h4>${escapeHtml(tier.label)}</h4>
                           <p>${escapeHtml(formatPercent(tier.hurdle))} hurdle</p>
                           <p>${escapeHtml(
@@ -951,6 +1253,7 @@ function renderCalculator() {
                               tier.sponsorShare * 100
                             )} investor/sponsor`
                           )}</p>
+                          <p>${escapeHtml(tier.isEnabled ? "Enabled" : "Disabled")}</p>
                         </article>
                       `
                     )
@@ -1298,6 +1601,34 @@ function renderCreateDealPanel() {
         </div>
         <div class="form-grid-2">
           <label>
+            Loan interest rate
+            <input
+              type="number"
+              name="debtInterestRate"
+              min="0"
+              max="1"
+              step="0.0001"
+              value="${escapeHtml(String(defaults.debtInterestRate))}"
+              required
+            />
+          </label>
+          <label>
+            Total interest paid
+            <input
+              type="number"
+              name="totalInterestPaid"
+              min="0"
+              step="1000"
+              value="${escapeHtml(String(defaults.totalInterestPaid))}"
+              required
+            />
+          </label>
+        </div>
+        <p class="helper-copy">
+          Use decimal format for the loan rate. Example: <code>0.1025</code> = 10.25%.
+        </p>
+        <div class="form-grid-2">
+          <label>
             Sale price
             <input type="number" name="salePrice" min="0" step="1000" required />
           </label>
@@ -1359,8 +1690,157 @@ function renderCreateDealPanel() {
   `;
 }
 
+function renderTimelineEditorRows(draft) {
+  return `
+    <div class="editor-stack">
+      ${draft.timeline
+        .map(
+          (step, index) => `
+            <article class="editor-row">
+              <div class="form-grid-3">
+                <label>
+                  Milestone
+                  <input
+                    type="text"
+                    value="${inputValue(step.label)}"
+                    data-index="${index}"
+                    data-timeline-field="label"
+                    placeholder="Foundation"
+                  />
+                </label>
+                <label>
+                  Date
+                  <input
+                    type="date"
+                    value="${inputValue(step.date)}"
+                    data-index="${index}"
+                    data-timeline-field="date"
+                  />
+                </label>
+                <label>
+                  Status
+                  <select data-index="${index}" data-timeline-field="status">
+                    <option value="upcoming" ${
+                      step.status === "upcoming" ? "selected" : ""
+                    }>Upcoming</option>
+                    <option value="in_progress" ${
+                      step.status === "in_progress" ? "selected" : ""
+                    }>In progress</option>
+                    <option value="complete" ${
+                      step.status === "complete" ? "selected" : ""
+                    }>Complete</option>
+                  </select>
+                </label>
+              </div>
+              <div class="button-row">
+                <button
+                  class="button-secondary button-inline"
+                  type="button"
+                  data-deal-editor-action="remove-timeline"
+                  data-index="${index}"
+                  data-deal-id="${escapeHtml(draft.id)}"
+                >
+                  Remove step
+                </button>
+              </div>
+            </article>
+          `
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderPromoteTierEditorRows(draft) {
+  return `
+    <div class="editor-stack">
+      ${draft.promoteTiers
+        .map(
+          (tier, index) => `
+            <article class="editor-row">
+              <div class="form-grid-2">
+                <label>
+                  Tier label
+                  <input
+                    type="text"
+                    value="${inputValue(tier.label)}"
+                    data-index="${index}"
+                    data-tier-field="label"
+                    placeholder="Tier 1"
+                  />
+                </label>
+                <label class="checkbox-field">
+                  <span>Enabled</span>
+                  <input
+                    type="checkbox"
+                    ${tier.isEnabled ? "checked" : ""}
+                    data-index="${index}"
+                    data-tier-field="isEnabled"
+                  />
+                </label>
+              </div>
+              <div class="form-grid-3">
+                <label>
+                  IRR hurdle
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value="${inputValue(tier.hurdle)}"
+                    data-index="${index}"
+                    data-tier-field="hurdle"
+                    placeholder="0.12"
+                  />
+                </label>
+                <label>
+                  Investor share
+                  <input
+                    type="number"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    value="${inputValue(tier.investorShare)}"
+                    data-index="${index}"
+                    data-tier-field="investorShare"
+                    placeholder="0.70"
+                  />
+                </label>
+                <label>
+                  Sponsor share
+                  <input
+                    type="number"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    value="${inputValue(tier.sponsorShare)}"
+                    data-index="${index}"
+                    data-tier-field="sponsorShare"
+                    placeholder="0.30"
+                  />
+                </label>
+              </div>
+              <div class="button-row">
+                <button
+                  class="button-secondary button-inline"
+                  type="button"
+                  data-deal-editor-action="remove-tier"
+                  data-index="${index}"
+                  data-deal-id="${escapeHtml(draft.id)}"
+                >
+                  Remove tier
+                </button>
+              </div>
+            </article>
+          `
+        )
+        .join("")}
+    </div>
+  `;
+}
+
 function renderDealEditorPanel() {
   const deal = getManagerEditableDeal();
+  const draft = deal ? getDealEditorDraft(deal) : null;
 
   if (!deal) {
     return `
@@ -1376,7 +1856,7 @@ function renderDealEditorPanel() {
       <p class="eyebrow">Manager Control</p>
       <h3>Update Project</h3>
       <p class="section-copy">
-        Save project status, phase, financial assumptions, and timeline progress to the database.
+        Save project status, phase, financial assumptions, timeline milestones, and promote tiers.
       </p>
       ${renderMessage(state.messages.deal)}
       <form id="deal-form" data-deal-id="${escapeHtml(deal.id)}">
@@ -1405,11 +1885,23 @@ function renderDealEditorPanel() {
         <div class="form-grid-2">
           <label>
             Deal name
-            <input type="text" name="name" value="${escapeHtml(deal.name)}" required />
+            <input
+              type="text"
+              name="name"
+              value="${inputValue(draft.name)}"
+              data-deal-field="name"
+              required
+            />
           </label>
           <label>
             Location
-            <input type="text" name="location" value="${escapeHtml(deal.location)}" required />
+            <input
+              type="text"
+              name="location"
+              value="${inputValue(draft.location)}"
+              data-deal-field="location"
+              required
+            />
           </label>
         </div>
         <div class="form-grid-2">
@@ -1418,18 +1910,19 @@ function renderDealEditorPanel() {
             <input
               type="text"
               name="currentPhase"
-              value="${escapeHtml(deal.currentPhase)}"
+              value="${inputValue(draft.currentPhase)}"
+              data-deal-field="currentPhase"
               required
             />
           </label>
           <label>
             Status
-            <select name="status" required>
+            <select name="status" data-deal-field="status" required>
               <option value="under_construction" ${
-                deal.status === "under_construction" ? "selected" : ""
+                draft.status === "under_construction" ? "selected" : ""
               }>Under construction</option>
-              <option value="listed" ${deal.status === "listed" ? "selected" : ""}>Listed</option>
-              <option value="sold" ${deal.status === "sold" ? "selected" : ""}>Sold</option>
+              <option value="listed" ${draft.status === "listed" ? "selected" : ""}>Listed</option>
+              <option value="sold" ${draft.status === "sold" ? "selected" : ""}>Sold</option>
             </select>
           </label>
         </div>
@@ -1441,7 +1934,8 @@ function renderDealEditorPanel() {
               name="totalProjectCost"
               min="0"
               step="1000"
-              value="${escapeHtml(String(deal.totalProjectCost))}"
+              value="${inputValue(draft.totalProjectCost)}"
+              data-deal-field="totalProjectCost"
               required
             />
           </label>
@@ -1452,11 +1946,42 @@ function renderDealEditorPanel() {
               name="debt"
               min="0"
               step="1000"
-              value="${escapeHtml(String(deal.debt))}"
+              value="${inputValue(draft.debt)}"
+              data-deal-field="debt"
               required
             />
           </label>
         </div>
+        <div class="form-grid-2">
+          <label>
+            Loan interest rate
+            <input
+              type="number"
+              name="debtInterestRate"
+              min="0"
+              max="1"
+              step="0.0001"
+              value="${inputValue(draft.debtInterestRate)}"
+              data-deal-field="debtInterestRate"
+              required
+            />
+          </label>
+          <label>
+            Total interest paid
+            <input
+              type="number"
+              name="totalInterestPaid"
+              min="0"
+              step="1000"
+              value="${inputValue(draft.totalInterestPaid)}"
+              data-deal-field="totalInterestPaid"
+              required
+            />
+          </label>
+        </div>
+        <p class="helper-copy">
+          Use decimal format for the loan rate. Example: <code>0.1025</code> = 10.25%.
+        </p>
         <div class="form-grid-2">
           <label>
             Sale price
@@ -1465,7 +1990,8 @@ function renderDealEditorPanel() {
               name="salePrice"
               min="0"
               step="1000"
-              value="${escapeHtml(String(deal.salePrice))}"
+              value="${inputValue(draft.salePrice)}"
+              data-deal-field="salePrice"
               required
             />
           </label>
@@ -1476,7 +2002,8 @@ function renderDealEditorPanel() {
               name="holdMonths"
               min="1"
               step="1"
-              value="${escapeHtml(String(deal.holdMonths))}"
+              value="${inputValue(draft.holdMonths)}"
+              data-deal-field="holdMonths"
               required
             />
           </label>
@@ -1490,7 +2017,8 @@ function renderDealEditorPanel() {
               min="0"
               max="0.3"
               step="0.005"
-              value="${escapeHtml(String(deal.prefRate))}"
+              value="${inputValue(draft.prefRate)}"
+              data-deal-field="prefRate"
               required
             />
           </label>
@@ -1502,7 +2030,8 @@ function renderDealEditorPanel() {
               min="0"
               max="100"
               step="1"
-              value="${escapeHtml(String(deal.timelineProgress))}"
+              value="${inputValue(draft.timelineProgress)}"
+              data-deal-field="timelineProgress"
               required
             />
           </label>
@@ -1510,22 +2039,152 @@ function renderDealEditorPanel() {
         <div class="form-grid-2">
           <label>
             Funded on
-            <input type="date" name="fundedOn" value="${escapeHtml(deal.fundedOn)}" required />
+            <input
+              type="date"
+              name="fundedOn"
+              value="${inputValue(draft.fundedOn)}"
+              data-deal-field="fundedOn"
+              required
+            />
           </label>
           <label>
             Projected exit
             <input
               type="date"
               name="projectedExitOn"
-              value="${escapeHtml(deal.projectedExitOn ?? "")}"
+              value="${inputValue(draft.projectedExitOn)}"
+              data-deal-field="projectedExitOn"
             />
           </label>
         </div>
         <label>
           Actual exit
-          <input type="date" name="actualExitOn" value="${escapeHtml(deal.actualExitOn ?? "")}" />
+          <input
+            type="date"
+            name="actualExitOn"
+            value="${inputValue(draft.actualExitOn)}"
+            data-deal-field="actualExitOn"
+          />
         </label>
-        <button class="button-primary" type="submit">Save project changes</button>
+
+        <div class="editor-section">
+          <div class="section-head">
+            <div>
+              <h4>Timeline Milestones</h4>
+              <p class="section-copy">
+                These investor-facing milestones appear in each deal’s timeline section.
+              </p>
+            </div>
+            <button
+              class="button-secondary button-inline"
+              type="button"
+              data-deal-editor-action="add-timeline"
+              data-deal-id="${escapeHtml(draft.id)}"
+            >
+              Add milestone
+            </button>
+          </div>
+          ${renderTimelineEditorRows(draft)}
+        </div>
+
+        <div class="editor-section">
+          <div class="section-head">
+            <div>
+              <h4>Promote Tiers</h4>
+              <p class="section-copy">
+                Enable or disable tiers per project. The highest cleared enabled tier drives the split.
+              </p>
+            </div>
+            <button
+              class="button-secondary button-inline"
+              type="button"
+              data-deal-editor-action="add-tier"
+              data-deal-id="${escapeHtml(draft.id)}"
+            >
+              Add tier
+            </button>
+          </div>
+          <p class="helper-copy">
+            Use decimals for hurdles and splits. Example: <code>0.12</code> = 12% hurdle, <code>0.70</code>/<code>0.30</code> = 70/30 split.
+          </p>
+          ${renderPromoteTierEditorRows(draft)}
+        </div>
+
+        <div class="editor-section">
+          <div class="section-head">
+            <div>
+              <h4>Major Issue Voting</h4>
+              <p class="section-copy">
+                Create investor votes tied to this project. Approval is weighted by invested capital.
+              </p>
+            </div>
+          </div>
+          ${renderMessage(state.messages.issue)}
+          <div class="editor-row issue-creator" data-deal-issue-root="${escapeHtml(draft.id)}">
+            <div class="form-grid-2">
+              <label>
+                Issue title
+                <input type="text" name="title" placeholder="Approve sale price reduction" />
+              </label>
+              <label>
+                Approval threshold
+                <input type="number" name="approvalThreshold" min="0.01" max="1" step="0.01" value="0.75" />
+              </label>
+            </div>
+            <label>
+              Description
+              <textarea
+                name="description"
+                rows="3"
+                placeholder="Describe the decision that investors are being asked to approve."
+              ></textarea>
+            </label>
+            <button
+              class="button-primary"
+              type="button"
+              data-deal-editor-action="create-issue"
+              data-deal-id="${escapeHtml(draft.id)}"
+            >
+              Create voting issue
+            </button>
+          </div>
+          <div class="issue-grid compact-top-gap">
+            ${
+              deal.issues.length
+                ? deal.issues
+                    .map(
+                      (issue) => `
+                        <article class="issue-card issue-card-compact">
+                          <div class="section-head">
+                            <div>
+                              <h4>${escapeHtml(issue.title)}</h4>
+                              <p class="section-copy">${escapeHtml(issue.description)}</p>
+                            </div>
+                            ${renderIssueStatus(issue)}
+                          </div>
+                          <div class="summary-grid">
+                            ${renderIssueMetrics(issue, { showCapital: true, showViewer: false })}
+                          </div>
+                        </article>
+                      `
+                    )
+                    .join("")
+                : '<div class="empty-state">No major issues have been created for this project yet.</div>'
+            }
+          </div>
+        </div>
+
+        <div class="button-row">
+          <button class="button-primary" type="submit">Save project changes</button>
+          <button
+            class="button-danger"
+            type="button"
+            data-deal-editor-action="delete-deal"
+            data-deal-id="${escapeHtml(draft.id)}"
+          >
+            Delete project
+          </button>
+        </div>
       </form>
     </article>
   `;
@@ -1533,7 +2192,6 @@ function renderDealEditorPanel() {
 
 function renderUserDirectory() {
   const rows = state.dashboard.admin.users;
-  const activeManagerCount = rows.filter((row) => row.role === "manager" && row.isActive).length;
 
   return `
     <section class="panel">
@@ -1567,10 +2225,6 @@ function renderUserDirectory() {
             ${rows
               .map(
                 (row) => {
-                  const isSelf = row.id === state.session?.id;
-                  const protectsFinalManager =
-                    row.role === "manager" && row.isActive && activeManagerCount <= 1;
-
                   return `
                   <tr>
                     <td>${escapeHtml(row.name)}</td>
@@ -1594,7 +2248,6 @@ function renderUserDirectory() {
                           type="button"
                           data-user-action="${row.isActive ? "disable" : "enable"}"
                           data-user-id="${escapeHtml(row.id)}"
-                          ${isSelf || protectsFinalManager ? "disabled" : ""}
                         >
                           ${row.isActive ? "Disable" : "Re-enable"}
                         </button>
@@ -1603,7 +2256,6 @@ function renderUserDirectory() {
                           type="button"
                           data-user-action="delete"
                           data-user-id="${escapeHtml(row.id)}"
-                          ${isSelf || protectsFinalManager ? "disabled" : ""}
                         >
                           Delete
                         </button>
@@ -1938,6 +2590,7 @@ async function loadSession() {
       state.calculator = null;
       state.calculatorSelectionId = null;
       state.adminDealId = null;
+      state.dealEditorDrafts = {};
       state.rollupDealFilter = "";
       state.allocationPage = 1;
       state.allocationFilters = {
@@ -1954,6 +2607,7 @@ async function loadSession() {
     state.calculator = null;
     state.calculatorSelectionId = null;
     state.adminDealId = null;
+    state.dealEditorDrafts = {};
     state.rollupDealFilter = "";
     state.allocationPage = 1;
     state.allocationFilters = {
@@ -2165,6 +2819,8 @@ document.addEventListener("submit", async (event) => {
           status: formData.get("status"),
           totalProjectCost: Number(formData.get("totalProjectCost")),
           debt: Number(formData.get("debt")),
+          debtInterestRate: Number(formData.get("debtInterestRate")),
+          totalInterestPaid: Number(formData.get("totalInterestPaid")),
           salePrice: Number(formData.get("salePrice")),
           holdMonths: Number(formData.get("holdMonths")),
           prefRate: Number(formData.get("prefRate")),
@@ -2189,26 +2845,30 @@ document.addEventListener("submit", async (event) => {
 
   if (event.target.id === "deal-form") {
     event.preventDefault();
-    const formData = new FormData(event.target);
-    const dealId = String(formData.get("dealId"));
+    const dealId = String(event.target.dataset.dealId ?? "");
+    const draft = getDealEditorDraft(getDealById(dealId));
 
     try {
       await api(`/api/admin/deals/${encodeURIComponent(dealId)}`, {
         method: "PATCH",
         body: JSON.stringify({
-          name: formData.get("name"),
-          location: formData.get("location"),
-          currentPhase: formData.get("currentPhase"),
-          status: formData.get("status"),
-          totalProjectCost: Number(formData.get("totalProjectCost")),
-          debt: Number(formData.get("debt")),
-          salePrice: Number(formData.get("salePrice")),
-          holdMonths: Number(formData.get("holdMonths")),
-          prefRate: Number(formData.get("prefRate")),
-          timelineProgress: Number(formData.get("timelineProgress")),
-          fundedOn: formData.get("fundedOn"),
-          projectedExitOn: formData.get("projectedExitOn"),
-          actualExitOn: formData.get("actualExitOn")
+          name: draft.name,
+          location: draft.location,
+          currentPhase: draft.currentPhase,
+          status: draft.status,
+          totalProjectCost: draft.totalProjectCost,
+          debt: draft.debt,
+          debtInterestRate: draft.debtInterestRate,
+          totalInterestPaid: draft.totalInterestPaid,
+          salePrice: draft.salePrice,
+          holdMonths: draft.holdMonths,
+          prefRate: draft.prefRate,
+          timelineProgress: draft.timelineProgress,
+          fundedOn: draft.fundedOn,
+          projectedExitOn: draft.projectedExitOn,
+          actualExitOn: draft.actualExitOn,
+          timeline: draft.timeline,
+          promoteTiers: draft.promoteTiers
         })
       });
       state.adminDealId = dealId;
@@ -2223,6 +2883,10 @@ document.addEventListener("submit", async (event) => {
 });
 
 document.addEventListener("change", async (event) => {
+  if (syncDealEditorField(event.target)) {
+    return;
+  }
+
   if (event.target.id === "deal-editor-select") {
     state.adminDealId = event.target.value;
     state.messages.deal = null;
@@ -2272,7 +2936,158 @@ document.addEventListener("change", async (event) => {
   }
 });
 
+document.addEventListener("input", (event) => {
+  syncDealEditorField(event.target);
+});
+
 document.addEventListener("click", async (event) => {
+  const dealEditorAction = event.target.closest("[data-deal-editor-action]");
+
+  if (dealEditorAction) {
+    const action = dealEditorAction.dataset.dealEditorAction;
+    const dealId = dealEditorAction.dataset.dealId || state.adminDealId;
+
+    if (!dealId) {
+      return;
+    }
+
+    if (action === "add-timeline") {
+      updateDealEditorDraft(dealId, (draft) => ({
+        ...draft,
+        timeline: [...draft.timeline, createTimelineDraft()]
+      }));
+      render();
+      return;
+    }
+
+    if (action === "remove-timeline") {
+      const index = Number(dealEditorAction.dataset.index);
+
+      updateDealEditorDraft(dealId, (draft) => ({
+        ...draft,
+        timeline:
+          draft.timeline.length > 1
+            ? draft.timeline.filter((_, itemIndex) => itemIndex !== index)
+            : [createTimelineDraft()]
+      }));
+      render();
+      return;
+    }
+
+    if (action === "add-tier") {
+      updateDealEditorDraft(dealId, (draft) => ({
+        ...draft,
+        promoteTiers: [
+          ...draft.promoteTiers,
+          createTierDraft({ investorShare: 0.7, sponsorShare: 0.3, isEnabled: true })
+        ]
+      }));
+      render();
+      return;
+    }
+
+    if (action === "create-issue") {
+      const issueRoot = document.querySelector(`[data-deal-issue-root="${dealId}"]`);
+      const titleInput = issueRoot?.querySelector('input[name="title"]');
+      const thresholdInput = issueRoot?.querySelector('input[name="approvalThreshold"]');
+      const descriptionInput = issueRoot?.querySelector('textarea[name="description"]');
+      const title = String(titleInput?.value ?? "").trim();
+      const description = String(descriptionInput?.value ?? "").trim();
+      const approvalThreshold = Number(thresholdInput?.value ?? 0.75);
+
+      if (!title || !description) {
+        setMessage("issue", "error", "Issue title and description are required.");
+        render();
+        return;
+      }
+
+      try {
+        await api("/api/admin/issues", {
+          method: "POST",
+          body: JSON.stringify({
+            dealId,
+            title,
+            description,
+            approvalThreshold
+          })
+        });
+        await refreshDashboard();
+        setMessage("issue", "success", "Voting issue created.");
+      } catch (error) {
+        setMessage("issue", "error", error.message);
+      }
+
+      render();
+      return;
+    }
+
+    if (action === "remove-tier") {
+      const index = Number(dealEditorAction.dataset.index);
+
+      updateDealEditorDraft(dealId, (draft) => ({
+        ...draft,
+        promoteTiers:
+          draft.promoteTiers.length > 1
+            ? draft.promoteTiers.filter((_, itemIndex) => itemIndex !== index)
+            : [createTierDraft({ investorShare: 0.7, sponsorShare: 0.3, isEnabled: true })]
+      }));
+      render();
+      return;
+    }
+
+    if (action === "delete-deal") {
+      const deal = getDealById(dealId);
+      const confirmed = window.confirm(
+        `Delete ${deal?.name ?? "this deal"}? All allocations, timeline items, contractor entries, and tiers tied to it will be removed.`
+      );
+
+      if (!confirmed) {
+        return;
+      }
+
+      try {
+        await api(`/api/admin/deals/${encodeURIComponent(dealId)}`, {
+          method: "DELETE"
+        });
+        delete state.dealEditorDrafts[dealId];
+        await refreshDashboard();
+        setMessage("deal", "success", "Project deleted.");
+      } catch (error) {
+        setMessage("deal", "error", error.message);
+      }
+
+      render();
+      return;
+    }
+  }
+
+  const issueVoteButton = event.target.closest("[data-issue-vote]");
+
+  if (issueVoteButton) {
+    const issueId = issueVoteButton.dataset.issueId;
+    const voteChoice = issueVoteButton.dataset.issueVote;
+
+    if (!issueId || !voteChoice) {
+      return;
+    }
+
+    try {
+      await api(`/api/issues/${encodeURIComponent(issueId)}/vote`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          voteChoice
+        })
+      });
+      await refreshDashboard();
+      setMessage("vote", "success", `Your ${voteChoice} vote has been recorded.`);
+    } catch (error) {
+      setMessage("vote", "error", error.message);
+    }
+
+    render();
+    return;
+  }
+
   const actionButton = event.target.closest("[data-user-action]");
 
   if (actionButton) {

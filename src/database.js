@@ -317,6 +317,8 @@ async function insertSeedData(executor) {
           location,
           total_equity,
           debt,
+          debt_interest_rate,
+          total_interest_paid,
           total_project_cost,
           sale_price,
           hold_months,
@@ -330,7 +332,7 @@ async function insertSeedData(executor) {
           created_at,
           updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
       `,
       [
         deal.id,
@@ -338,6 +340,8 @@ async function insertSeedData(executor) {
         deal.location,
         deal.totalEquity,
         deal.debt,
+        deal.debtInterestRate ?? 0,
+        deal.totalInterestPaid ?? 0,
         deal.totalProjectCost,
         deal.salePrice,
         deal.holdMonths,
@@ -356,30 +360,32 @@ async function insertSeedData(executor) {
     for (const [index, tier] of deal.promoteTiers.entries()) {
       await executor.query(
         `
-          INSERT INTO promote_tiers (
-            id,
-            deal_id,
-            label,
-            hurdle,
-            investor_share,
-            sponsor_share,
-            sort_order,
-            created_at,
-            updated_at
-          )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        `,
-        [
-          createId("tier"),
-          deal.id,
-          tier.label,
-          tier.hurdle,
-          tier.investorShare,
-          tier.sponsorShare,
-          index + 1,
-          timestamp,
-          timestamp
-        ]
+        INSERT INTO promote_tiers (
+          id,
+          deal_id,
+          label,
+          hurdle,
+          investor_share,
+          sponsor_share,
+          is_enabled,
+          sort_order,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `,
+      [
+        createId("tier"),
+        deal.id,
+        tier.label,
+        tier.hurdle,
+        tier.investorShare,
+        tier.sponsorShare,
+        tier.isEnabled === false ? 0 : 1,
+        index + 1,
+        timestamp,
+        timestamp
+      ]
       );
     }
 
@@ -505,6 +511,8 @@ export async function seedDatabase({ force = false } = {}) {
     if (force) {
       await client.query(`
         TRUNCATE TABLE
+          deal_issue_votes,
+          deal_issues,
           email_notifications,
           contractor_participation,
           positions,
@@ -651,6 +659,8 @@ export async function getAppDataSnapshot() {
         location,
         total_equity AS "totalEquity",
         debt,
+        debt_interest_rate AS "debtInterestRate",
+        total_interest_paid AS "totalInterestPaid",
         total_project_cost AS "totalProjectCost",
         sale_price AS "salePrice",
         hold_months AS "holdMonths",
@@ -668,6 +678,8 @@ export async function getAppDataSnapshot() {
     ...row,
     totalEquity: Number(row.totalEquity),
     debt: Number(row.debt),
+    debtInterestRate: Number(row.debtInterestRate),
+    totalInterestPaid: Number(row.totalInterestPaid),
     totalProjectCost: Number(row.totalProjectCost),
     salePrice: Number(row.salePrice),
     holdMonths: Number(row.holdMonths),
@@ -687,6 +699,7 @@ export async function getAppDataSnapshot() {
         hurdle,
         investor_share AS "investorShare",
         sponsor_share AS "sponsorShare",
+        is_enabled AS "isEnabled",
         sort_order AS "sortOrder"
       FROM promote_tiers
       ORDER BY deal_id, sort_order
@@ -697,6 +710,7 @@ export async function getAppDataSnapshot() {
       hurdle: Number(row.hurdle),
       investorShare: Number(row.investorShare),
       sponsorShare: Number(row.sponsorShare),
+      isEnabled: Boolean(row.isEnabled),
       description: `${row.label} promote hurdle`,
       sortOrder: Number(row.sortOrder)
     });
@@ -767,13 +781,48 @@ export async function getAppDataSnapshot() {
     hybrid: Boolean(row.hybrid)
   }));
 
+  const dealIssues = (await queryAll(
+    `
+      SELECT
+        id,
+        deal_id AS "dealId",
+        title,
+        description,
+        approval_threshold AS "approvalThreshold",
+        created_by_user_id AS "createdByUserId",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM deal_issues
+      ORDER BY created_at DESC, id
+    `
+  )).map((row) => ({
+    ...row,
+    approvalThreshold: Number(row.approvalThreshold)
+  }));
+
+  const issueVotes = await queryAll(
+    `
+      SELECT
+        id,
+        issue_id AS "issueId",
+        participant_id AS "participantId",
+        vote_choice AS "voteChoice",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM deal_issue_votes
+      ORDER BY updated_at DESC, id
+    `
+  );
+
   return {
     asOfDate: todayStamp(),
     participants,
     users,
     deals,
     positions,
-    contractors
+    contractors,
+    dealIssues,
+    issueVotes
   };
 }
 
@@ -1304,6 +1353,8 @@ function normalizeDealInput(input) {
   const projectedExitOn = String(input.projectedExitOn ?? "").trim();
   const actualExitOn = String(input.actualExitOn ?? "").trim();
   const debt = Number(input.debt);
+  const debtInterestRate = Number(input.debtInterestRate ?? 0);
+  const totalInterestPaid = Number(input.totalInterestPaid ?? 0);
   const totalProjectCost = Number(input.totalProjectCost);
   const salePrice = Number(input.salePrice);
   const holdMonths = Number(input.holdMonths);
@@ -1320,6 +1371,14 @@ function normalizeDealInput(input) {
 
   if (!Number.isFinite(debt) || debt < 0) {
     throw new Error("Debt must be zero or greater.");
+  }
+
+  if (!Number.isFinite(debtInterestRate) || debtInterestRate < 0 || debtInterestRate > 1) {
+    throw new Error("Debt interest rate must be between 0 and 1.");
+  }
+
+  if (!Number.isFinite(totalInterestPaid) || totalInterestPaid < 0) {
+    throw new Error("Total interest paid must be zero or greater.");
   }
 
   if (!Number.isFinite(totalProjectCost) || totalProjectCost < 0) {
@@ -1351,16 +1410,234 @@ function normalizeDealInput(input) {
     projectedExitOn: projectedExitOn || null,
     actualExitOn: actualExitOn || null,
     debt: roundNumber(debt),
+    debtInterestRate: roundNumber(debtInterestRate),
+    totalInterestPaid: roundNumber(totalInterestPaid),
     totalProjectCost: roundNumber(totalProjectCost),
     salePrice: roundNumber(salePrice),
     holdMonths: Math.round(holdMonths),
     prefRate: roundNumber(prefRate),
-    timelineProgress: Math.round(timelineProgress)
+    timelineProgress: status === "sold" ? 100 : Math.round(timelineProgress)
   };
+}
+
+function normalizeIssueInput(input) {
+  const dealId = String(input.dealId ?? "").trim();
+  const title = String(input.title ?? "").trim();
+  const description = String(input.description ?? "").trim();
+  const approvalThreshold = Number(input.approvalThreshold ?? 0.75);
+
+  if (!dealId) {
+    throw new Error("A deal selection is required.");
+  }
+
+  if (!title) {
+    throw new Error("Issue title is required.");
+  }
+
+  if (!description) {
+    throw new Error("Issue description is required.");
+  }
+
+  if (!Number.isFinite(approvalThreshold) || approvalThreshold <= 0 || approvalThreshold > 1) {
+    throw new Error("Approval threshold must be between 0 and 1.");
+  }
+
+  return {
+    dealId,
+    title,
+    description,
+    approvalThreshold: roundNumber(approvalThreshold)
+  };
+}
+
+function normalizeVoteChoice(value) {
+  const voteChoice = String(value ?? "").trim().toLowerCase();
+
+  if (!["yes", "no"].includes(voteChoice)) {
+    throw new Error("Vote choice must be either yes or no.");
+  }
+
+  return voteChoice;
+}
+
+function normalizeTimelineItems(items) {
+  if (!Array.isArray(items)) {
+    return null;
+  }
+
+  return items.reduce((timeline, item, index) => {
+    const label = String(item?.label ?? "").trim();
+    const date = String(item?.date ?? "").trim();
+    const status = String(item?.status ?? "").trim();
+    const isBlank = !label && !date && !status;
+
+    if (isBlank) {
+      return timeline;
+    }
+
+    if (!label || !date || !status) {
+      throw new Error(`Timeline row ${index + 1} must include a label, date, and status.`);
+    }
+
+    if (!["complete", "in_progress", "upcoming"].includes(status)) {
+      throw new Error(`Timeline row ${index + 1} has an invalid status.`);
+    }
+
+    timeline.push({
+      label,
+      date,
+      status,
+      sortOrder: timeline.length + 1
+    });
+
+    return timeline;
+  }, []);
+}
+
+function normalizePromoteTiers(items) {
+  if (!Array.isArray(items)) {
+    return null;
+  }
+
+  return items.reduce((tiers, item, index) => {
+    const label = String(item?.label ?? "").trim();
+    const hurdleRaw = String(item?.hurdle ?? "").trim();
+    const investorShareRaw = String(item?.investorShare ?? "").trim();
+    const sponsorShareRaw = String(item?.sponsorShare ?? "").trim();
+    const isEnabled = item?.isEnabled !== false;
+    const isBlank = !label && !hurdleRaw && !investorShareRaw && !sponsorShareRaw;
+
+    if (isBlank) {
+      return tiers;
+    }
+
+    const hurdle = Number(hurdleRaw);
+    const investorShare = Number(investorShareRaw);
+    const sponsorShare = Number(sponsorShareRaw);
+
+    if (!label) {
+      throw new Error(`Promote tier ${index + 1} must include a label.`);
+    }
+
+    if (!Number.isFinite(hurdle) || hurdle < 0) {
+      throw new Error(`Promote tier ${index + 1} must have a valid hurdle.`);
+    }
+
+    if (!Number.isFinite(investorShare) || investorShare < 0 || investorShare > 1) {
+      throw new Error(`Promote tier ${index + 1} must have a valid investor share.`);
+    }
+
+    if (!Number.isFinite(sponsorShare) || sponsorShare < 0 || sponsorShare > 1) {
+      throw new Error(`Promote tier ${index + 1} must have a valid sponsor share.`);
+    }
+
+    if (Math.abs(investorShare + sponsorShare - 1) > 0.001) {
+      throw new Error(
+        `Promote tier ${index + 1} must have investor and sponsor shares that total 1.0.`
+      );
+    }
+
+    tiers.push({
+      label,
+      hurdle: roundNumber(hurdle),
+      investorShare: roundNumber(investorShare),
+      sponsorShare: roundNumber(sponsorShare),
+      isEnabled,
+      sortOrder: tiers.length + 1
+    });
+
+    return tiers;
+  }, []);
+}
+
+async function replaceDealTimeline(dealId, timelineItems, executor) {
+  const timestamp = nowTimestamp();
+
+  await executor.query(
+    `
+      DELETE FROM deal_timeline_items
+      WHERE deal_id = $1
+    `,
+    [dealId]
+  );
+
+  for (const item of timelineItems) {
+    await executor.query(
+      `
+        INSERT INTO deal_timeline_items (
+          id,
+          deal_id,
+          label,
+          milestone_date,
+          status,
+          sort_order,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `,
+      [
+        createId("timeline"),
+        dealId,
+        item.label,
+        item.date,
+        item.status,
+        item.sortOrder,
+        timestamp,
+        timestamp
+      ]
+    );
+  }
+}
+
+async function replacePromoteTiers(dealId, tiers, executor) {
+  const timestamp = nowTimestamp();
+
+  await executor.query(
+    `
+      DELETE FROM promote_tiers
+      WHERE deal_id = $1
+    `,
+    [dealId]
+  );
+
+  for (const tier of tiers) {
+    await executor.query(
+      `
+        INSERT INTO promote_tiers (
+          id,
+          deal_id,
+          label,
+          hurdle,
+          investor_share,
+          sponsor_share,
+          is_enabled,
+          sort_order,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `,
+      [
+        createId("tier"),
+        dealId,
+        tier.label,
+        tier.hurdle,
+        tier.investorShare,
+        tier.sponsorShare,
+        tier.isEnabled ? 1 : 0,
+        tier.sortOrder,
+        timestamp,
+        timestamp
+      ]
+    );
+  }
 }
 
 export async function createDeal(input) {
   const deal = normalizeDealInput(input);
+  const timelineItems = normalizeTimelineItems(input.timeline);
+  const promoteTiers = normalizePromoteTiers(input.promoteTiers);
   const existingDeal = await queryOne(
     `
       SELECT id
@@ -1377,49 +1654,83 @@ export async function createDeal(input) {
   const timestamp = nowTimestamp();
   const dealId = createId("deal");
 
-  await pool.query(
-    `
-      INSERT INTO deals (
-        id,
-        name,
-        location,
-        total_equity,
-        debt,
-        total_project_cost,
-        sale_price,
-        hold_months,
-        pref_rate,
-        status,
-        current_phase,
-        funded_on,
-        projected_exit_on,
-        actual_exit_on,
-        timeline_progress,
-        created_at,
-        updated_at
-      )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
-    `,
-    [
-      dealId,
-      deal.name,
-      deal.location,
-      0,
-      deal.debt,
-      deal.totalProjectCost,
-      deal.salePrice,
-      deal.holdMonths,
-      deal.prefRate,
-      deal.status,
-      deal.currentPhase,
-      deal.fundedOn,
-      deal.projectedExitOn,
-      deal.actualExitOn,
-      deal.timelineProgress,
-      timestamp,
-      timestamp
-    ]
-  );
+  await withTransaction(async (client) => {
+    await client.query(
+      `
+        INSERT INTO deals (
+          id,
+          name,
+          location,
+          total_equity,
+          debt,
+          debt_interest_rate,
+          total_interest_paid,
+          total_project_cost,
+          sale_price,
+          hold_months,
+          pref_rate,
+          status,
+          current_phase,
+          funded_on,
+          projected_exit_on,
+          actual_exit_on,
+          timeline_progress,
+          created_at,
+          updated_at
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          $5,
+          $6,
+          $7,
+          $8,
+          $9,
+          $10,
+          $11,
+          $12,
+          $13,
+          $14,
+          $15,
+          $16,
+          $17,
+          $18,
+          $19
+        )
+      `,
+      [
+        dealId,
+        deal.name,
+        deal.location,
+        0,
+        deal.debt,
+        deal.debtInterestRate,
+        deal.totalInterestPaid,
+        deal.totalProjectCost,
+        deal.salePrice,
+        deal.holdMonths,
+        deal.prefRate,
+        deal.status,
+        deal.currentPhase,
+        deal.fundedOn,
+        deal.projectedExitOn,
+        deal.actualExitOn,
+        deal.timelineProgress,
+        timestamp,
+        timestamp
+      ]
+    );
+
+    if (timelineItems) {
+      await replaceDealTimeline(dealId, timelineItems, client);
+    }
+
+    if (promoteTiers) {
+      await replacePromoteTiers(dealId, promoteTiers, client);
+    }
+  });
 
   return queryOne(
     `
@@ -1452,6 +1763,8 @@ export async function updateDeal(dealId, input) {
   }
 
   const deal = normalizeDealInput(input);
+  const timelineItems = normalizeTimelineItems(input.timeline);
+  const promoteTiers = normalizePromoteTiers(input.promoteTiers);
   const duplicateDeal = await queryOne(
     `
       SELECT id
@@ -1466,44 +1779,219 @@ export async function updateDeal(dealId, input) {
     throw new Error("A deal with that name already exists.");
   }
 
+  await withTransaction(async (client) => {
+    await client.query(
+      `
+        UPDATE deals
+        SET
+          name = $1,
+          location = $2,
+          debt = $3,
+          debt_interest_rate = $4,
+          total_interest_paid = $5,
+          total_project_cost = $6,
+          sale_price = $7,
+          hold_months = $8,
+          pref_rate = $9,
+          status = $10,
+          current_phase = $11,
+          funded_on = $12,
+          projected_exit_on = $13,
+          actual_exit_on = $14,
+          timeline_progress = $15,
+          updated_at = $16
+        WHERE id = $17
+      `,
+      [
+        deal.name,
+        deal.location,
+        deal.debt,
+        deal.debtInterestRate,
+        deal.totalInterestPaid,
+        deal.totalProjectCost,
+        deal.salePrice,
+        deal.holdMonths,
+        deal.prefRate,
+        deal.status,
+        deal.currentPhase,
+        deal.fundedOn,
+        deal.projectedExitOn,
+        deal.actualExitOn,
+        deal.timelineProgress,
+        nowTimestamp(),
+        id
+      ]
+    );
+
+    if (timelineItems) {
+      await replaceDealTimeline(id, timelineItems, client);
+    }
+
+    if (promoteTiers) {
+      await replacePromoteTiers(id, promoteTiers, client);
+    }
+  });
+}
+
+export async function createDealIssue(input, createdByUserId) {
+  const issue = normalizeIssueInput(input);
+  const deal = await queryOne(
+    `
+      SELECT id, name
+      FROM deals
+      WHERE id = $1
+    `,
+    [issue.dealId]
+  );
+
+  if (!deal) {
+    throw new Error("Deal not found.");
+  }
+
+  const timestamp = nowTimestamp();
+  const issueId = createId("issue");
+
   await pool.query(
     `
-      UPDATE deals
-      SET
-        name = $1,
-        location = $2,
-        debt = $3,
-        total_project_cost = $4,
-        sale_price = $5,
-        hold_months = $6,
-        pref_rate = $7,
-        status = $8,
-        current_phase = $9,
-        funded_on = $10,
-        projected_exit_on = $11,
-        actual_exit_on = $12,
-        timeline_progress = $13,
-        updated_at = $14
-      WHERE id = $15
+      INSERT INTO deal_issues (
+        id,
+        deal_id,
+        title,
+        description,
+        approval_threshold,
+        created_by_user_id,
+        created_at,
+        updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
     `,
     [
-      deal.name,
-      deal.location,
-      deal.debt,
-      deal.totalProjectCost,
-      deal.salePrice,
-      deal.holdMonths,
-      deal.prefRate,
-      deal.status,
-      deal.currentPhase,
-      deal.fundedOn,
-      deal.projectedExitOn,
-      deal.actualExitOn,
-      deal.timelineProgress,
-      nowTimestamp(),
-      id
+      issueId,
+      issue.dealId,
+      issue.title,
+      issue.description,
+      issue.approvalThreshold,
+      createdByUserId,
+      timestamp,
+      timestamp
     ]
   );
+
+  return {
+    id: issueId,
+    dealId: issue.dealId,
+    title: issue.title
+  };
+}
+
+export async function castDealIssueVote(issueId, userId, voteChoiceInput) {
+  const normalizedIssueId = String(issueId ?? "").trim();
+
+  if (!normalizedIssueId) {
+    throw new Error("Issue id is required.");
+  }
+
+  const voteChoice = normalizeVoteChoice(voteChoiceInput);
+  const votingContext = await queryOne(
+    `
+      SELECT
+        deal_issues.id AS id,
+        deal_issues.deal_id AS "dealId",
+        users.id AS "userId",
+        users.participant_id AS "participantId",
+        participants.category AS category,
+        COALESCE(SUM(positions.contribution_amount), 0)::float AS "contributionAmount"
+      FROM deal_issues
+      JOIN users ON users.id = $2
+      JOIN participants ON participants.id = users.participant_id
+      LEFT JOIN positions
+        ON positions.deal_id = deal_issues.deal_id
+       AND positions.participant_id = users.participant_id
+      WHERE deal_issues.id = $1
+      GROUP BY deal_issues.id, deal_issues.deal_id, users.id, users.participant_id, participants.category
+    `,
+    [normalizedIssueId, userId]
+  );
+
+  if (!votingContext) {
+    throw new Error("Issue not found.");
+  }
+
+  if (votingContext.category !== "investor") {
+    throw new Error("Only investor participants can vote on major issues.");
+  }
+
+  if (Number(votingContext.contributionAmount) <= 0) {
+    throw new Error("Only investors with capital in this deal can vote on this issue.");
+  }
+
+  const timestamp = nowTimestamp();
+
+  await pool.query(
+    `
+      INSERT INTO deal_issue_votes (
+        id,
+        issue_id,
+        participant_id,
+        vote_choice,
+        created_at,
+        updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6)
+      ON CONFLICT (issue_id, participant_id)
+      DO UPDATE SET
+        vote_choice = EXCLUDED.vote_choice,
+        updated_at = EXCLUDED.updated_at
+    `,
+    [
+      createId("vote"),
+      normalizedIssueId,
+      votingContext.participantId,
+      voteChoice,
+      timestamp,
+      timestamp
+    ]
+  );
+
+  return {
+    issueId: normalizedIssueId,
+    participantId: votingContext.participantId,
+    voteChoice
+  };
+}
+
+export async function deleteDeal(dealId) {
+  const id = String(dealId ?? "").trim();
+
+  if (!id) {
+    throw new Error("Deal id is required.");
+  }
+
+  const existingDeal = await queryOne(
+    `
+      SELECT id
+      FROM deals
+      WHERE id = $1
+    `,
+    [id]
+  );
+
+  if (!existingDeal) {
+    throw new Error("Deal not found.");
+  }
+
+  await pool.query(
+    `
+      DELETE FROM deals
+      WHERE id = $1
+    `,
+    [id]
+  );
+
+  return {
+    ok: true,
+    deletedDealId: id
+  };
 }
 
 export async function setUserAccountActive(userId, isActive, actingUserId) {

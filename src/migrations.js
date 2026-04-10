@@ -13,7 +13,9 @@ const REQUIRED_TABLES = [
   "deal_timeline_items",
   "positions",
   "contractor_participation",
-  "email_notifications"
+  "email_notifications",
+  "deal_issues",
+  "deal_issue_votes"
 ];
 
 function listMigrationFiles() {

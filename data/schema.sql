@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS deals (
   location TEXT NOT NULL,
   total_equity REAL NOT NULL DEFAULT 0,
   debt REAL NOT NULL DEFAULT 0,
+  debt_interest_rate REAL NOT NULL DEFAULT 0,
+  total_interest_paid REAL NOT NULL DEFAULT 0,
   total_project_cost REAL NOT NULL DEFAULT 0,
   sale_price REAL NOT NULL DEFAULT 0,
   hold_months INTEGER NOT NULL DEFAULT 0,
@@ -66,6 +68,7 @@ CREATE TABLE IF NOT EXISTS promote_tiers (
   hurdle REAL NOT NULL,
   investor_share REAL NOT NULL,
   sponsor_share REAL NOT NULL,
+  is_enabled INTEGER NOT NULL DEFAULT 1 CHECK (is_enabled IN (0, 1)),
   sort_order INTEGER NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -136,6 +139,31 @@ CREATE TABLE IF NOT EXISTS email_notifications (
   FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS deal_issues (
+  id TEXT PRIMARY KEY,
+  deal_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL,
+  approval_threshold REAL NOT NULL DEFAULT 0.75 CHECK (approval_threshold > 0 AND approval_threshold <= 1),
+  created_by_user_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (deal_id) REFERENCES deals(id) ON DELETE CASCADE,
+  FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS deal_issue_votes (
+  id TEXT PRIMARY KEY,
+  issue_id TEXT NOT NULL,
+  participant_id TEXT NOT NULL,
+  vote_choice TEXT NOT NULL CHECK (vote_choice IN ('yes', 'no')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (issue_id) REFERENCES deal_issues(id) ON DELETE CASCADE,
+  FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE,
+  UNIQUE (issue_id, participant_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_positions_deal_id ON positions(deal_id);
 CREATE INDEX IF NOT EXISTS idx_positions_participant_id ON positions(participant_id);
@@ -143,3 +171,5 @@ CREATE INDEX IF NOT EXISTS idx_contractor_deal_id ON contractor_participation(de
 CREATE INDEX IF NOT EXISTS idx_timeline_deal_id ON deal_timeline_items(deal_id);
 CREATE INDEX IF NOT EXISTS idx_promote_tiers_deal_id ON promote_tiers(deal_id);
 CREATE INDEX IF NOT EXISTS idx_email_notifications_user_id ON email_notifications(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_deal_issues_deal_id ON deal_issues(deal_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_deal_issue_votes_issue_id ON deal_issue_votes(issue_id);

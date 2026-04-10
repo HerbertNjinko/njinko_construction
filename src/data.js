@@ -4,6 +4,7 @@ const buildPromoteTiers = () => [
     hurdle: 0.08,
     investorShare: 0.9,
     sponsorShare: 0.1,
+    isEnabled: true,
     description: "Base split once investor capital and pref are covered."
   },
   {
@@ -11,6 +12,7 @@ const buildPromoteTiers = () => [
     hurdle: 0.12,
     investorShare: 0.8,
     sponsorShare: 0.2,
+    isEnabled: true,
     description: "Promote steps up after a 12% project IRR."
   },
   {
@@ -18,6 +20,7 @@ const buildPromoteTiers = () => [
     hurdle: 0.18,
     investorShare: 0.7,
     sponsorShare: 0.3,
+    isEnabled: true,
     description: "Upper promote tier once the deal clears 18% IRR."
   }
 ];
@@ -125,6 +128,8 @@ export const seedData = {
       location: "Charlotte, NC",
       totalEquity: 400000,
       debt: 750000,
+      debtInterestRate: 0.1025,
+      totalInterestPaid: 68500,
       totalProjectCost: 1150000,
       salePrice: 1650000,
       holdMonths: 18,
@@ -169,6 +174,8 @@ export const seedData = {
       location: "Greensboro, NC",
       totalEquity: 300000,
       debt: 560000,
+      debtInterestRate: 0.0975,
+      totalInterestPaid: 44200,
       totalProjectCost: 860000,
       salePrice: 1095000,
       holdMonths: 14,
@@ -213,6 +220,8 @@ export const seedData = {
       location: "Durham, NC",
       totalEquity: 250000,
       debt: 430000,
+      debtInterestRate: 0.09,
+      totalInterestPaid: 31800,
       totalProjectCost: 680000,
       salePrice: 920000,
       holdMonths: 13,

@@ -7,9 +7,12 @@ import { buildDashboardForUser, calculateScenarioForDeal } from "./calculations.
 import { assertDatabaseReady } from "./migrations.js";
 import { closeDatabasePool } from "./postgres.js";
 import {
+  castDealIssueVote,
   createDeal,
   createDealAllocation,
+  createDealIssue,
   createManagedUser,
+  deleteDeal,
   deleteUserAccount,
   ensureInitialManagerUser,
   getAppDataSnapshot,
@@ -206,6 +209,7 @@ const server = createServer(async (request, response) => {
     const method = request.method ?? "GET";
     const url = new URL(request.url, `http://${request.headers.host}`);
     const dealUpdateMatch = url.pathname.match(/^\/api\/admin\/deals\/([^/]+)$/);
+    const issueVoteMatch = url.pathname.match(/^\/api\/issues\/([^/]+)\/vote$/);
     const userStatusMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)\/status$/);
     const userDeleteMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)$/);
 
@@ -435,6 +439,80 @@ const server = createServer(async (request, response) => {
       try {
         const deal = await createDeal(body);
         sendJson(response, 201, { deal });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/admin/issues") {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const issue = await createDealIssue(body, manager.id);
+        sendJson(response, 201, { issue });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "PATCH" && issueVoteMatch) {
+      const user = await requireUnlockedUser(request, response);
+
+      if (!user) {
+        return;
+      }
+
+      if (user.role === "manager") {
+        sendJson(response, 403, { error: "Managers cannot vote on investor issues." });
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body || typeof body.voteChoice !== "string") {
+        sendJson(response, 400, { error: "A valid vote choice is required." });
+        return;
+      }
+
+      try {
+        const vote = await castDealIssueVote(
+          decodeURIComponent(issueVoteMatch[1]),
+          user.id,
+          body.voteChoice
+        );
+        sendJson(response, 200, { vote });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "DELETE" && dealUpdateMatch) {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      try {
+        await deleteDeal(decodeURIComponent(dealUpdateMatch[1]));
+        sendJson(response, 200, { ok: true });
       } catch (error) {
         sendJson(response, 400, { error: error.message });
       }
