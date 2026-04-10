@@ -1,4 +1,8 @@
 const ALLOCATION_PAGE_SIZE = 50;
+const SESSION_IDLE_TIMEOUT_MS = 15 * 60 * 1000;
+const SESSION_HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
+const SESSION_ACTIVITY_THROTTLE_MS = 30 * 1000;
+const SESSION_IDLE_MESSAGE = "You were logged out after 15 minutes of inactivity.";
 
 const state = {
   session: null,
@@ -39,6 +43,9 @@ const state = {
 };
 
 const app = document.querySelector("#app");
+let sessionIdleTimeoutId = null;
+let sessionHeartbeatIntervalId = null;
+let lastActivityAt = 0;
 
 const currency = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -106,10 +113,136 @@ async function api(path, options = {}) {
   const payload = await response.json();
 
   if (!response.ok) {
-    throw new Error(payload.error ?? "Request failed.");
+    const error = new Error(payload.error ?? "Request failed.");
+    error.status = response.status;
+    error.code = payload.code;
+
+    if (response.status === 401 && path !== "/api/login") {
+      applyLoggedOutState(payload.code === "SESSION_EXPIRED" ? SESSION_IDLE_MESSAGE : payload.error);
+    }
+
+    throw error;
   }
 
   return payload;
+}
+
+function resetDashboardState() {
+  state.dashboard = null;
+  state.calculator = null;
+  state.calculatorSelectionId = null;
+  state.adminDealId = null;
+  state.dealEditorDrafts = {};
+  state.rollupDealFilter = "";
+  state.contractorDealFilter = "";
+  state.allocationPage = 1;
+  state.allocationFilters = {
+    dealId: "",
+    participantId: "",
+    category: "",
+    classType: ""
+  };
+  state.userFilters = {
+    search: "",
+    category: "",
+    role: "",
+    status: ""
+  };
+}
+
+function stopSessionTimers() {
+  if (sessionIdleTimeoutId) {
+    window.clearTimeout(sessionIdleTimeoutId);
+    sessionIdleTimeoutId = null;
+  }
+
+  if (sessionHeartbeatIntervalId) {
+    window.clearInterval(sessionHeartbeatIntervalId);
+    sessionHeartbeatIntervalId = null;
+  }
+}
+
+function scheduleIdleLogout() {
+  if (!state.session) {
+    stopSessionTimers();
+    return;
+  }
+
+  if (sessionIdleTimeoutId) {
+    window.clearTimeout(sessionIdleTimeoutId);
+  }
+
+  sessionIdleTimeoutId = window.setTimeout(() => {
+    void handleIdleLogout();
+  }, SESSION_IDLE_TIMEOUT_MS);
+}
+
+function recordSessionActivity(force = false) {
+  if (!state.session) {
+    return;
+  }
+
+  const now = Date.now();
+
+  if (!force && now - lastActivityAt < SESSION_ACTIVITY_THROTTLE_MS) {
+    return;
+  }
+
+  lastActivityAt = now;
+  scheduleIdleLogout();
+}
+
+async function pingSession() {
+  if (!state.session) {
+    return;
+  }
+
+  try {
+    await api("/api/session/ping", { method: "GET" });
+  } catch {}
+}
+
+function startSessionTimers() {
+  stopSessionTimers();
+
+  if (!state.session) {
+    return;
+  }
+
+  lastActivityAt = Date.now();
+  scheduleIdleLogout();
+  sessionHeartbeatIntervalId = window.setInterval(() => {
+    if (!state.session || Date.now() - lastActivityAt >= SESSION_IDLE_TIMEOUT_MS) {
+      return;
+    }
+
+    void pingSession();
+  }, SESSION_HEARTBEAT_INTERVAL_MS);
+}
+
+function applyLoggedOutState(notice = "") {
+  stopSessionTimers();
+  state.session = null;
+  resetDashboardState();
+  clearMessages();
+  state.loading = false;
+  state.loginError = notice || "";
+  render();
+}
+
+async function handleIdleLogout() {
+  if (!state.session) {
+    return;
+  }
+
+  try {
+    await api("/api/logout", {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+  } catch {}
+
+  applyLoggedOutState(SESSION_IDLE_MESSAGE);
 }
 
 function clearMessages() {
@@ -3036,51 +3169,26 @@ async function loadSession() {
     state.session = session.user;
 
     if (state.session && !state.session.mustChangePassword) {
+      state.loginError = "";
+      startSessionTimers();
       await refreshDashboard();
+    } else if (state.session) {
+      state.loginError = "";
+      resetDashboardState();
+      startSessionTimers();
     } else {
-      state.dashboard = null;
-      state.calculator = null;
-      state.calculatorSelectionId = null;
-      state.adminDealId = null;
-      state.dealEditorDrafts = {};
-      state.rollupDealFilter = "";
-      state.contractorDealFilter = "";
-      state.allocationPage = 1;
-      state.allocationFilters = {
-        dealId: "",
-        participantId: "",
-        category: "",
-        classType: ""
-      };
-      state.userFilters = {
-        search: "",
-        category: "",
-        role: "",
-        status: ""
-      };
+      stopSessionTimers();
+      resetDashboardState();
+
+      if (session.expired) {
+        state.loginError = SESSION_IDLE_MESSAGE;
+      }
     }
   } catch (error) {
     state.loginError = error.message;
     state.session = null;
-    state.dashboard = null;
-    state.calculator = null;
-    state.calculatorSelectionId = null;
-    state.adminDealId = null;
-    state.dealEditorDrafts = {};
-    state.rollupDealFilter = "";
-    state.allocationPage = 1;
-    state.allocationFilters = {
-      dealId: "",
-      participantId: "",
-      category: "",
-      classType: ""
-    };
-    state.userFilters = {
-      search: "",
-      category: "",
-      role: "",
-      status: ""
-    };
+    stopSessionTimers();
+    resetDashboardState();
   } finally {
     state.loading = false;
     render();
@@ -3435,6 +3543,21 @@ document.addEventListener("input", (event) => {
   syncDealEditorField(event.target);
 });
 
+function handleSessionActivity(event) {
+  if (!state.session) {
+    return;
+  }
+
+  const force = !["mousemove", "scroll"].includes(event.type);
+  recordSessionActivity(force);
+}
+
+document.addEventListener("pointerdown", handleSessionActivity);
+document.addEventListener("keydown", handleSessionActivity);
+document.addEventListener("touchstart", handleSessionActivity, { passive: true });
+document.addEventListener("mousemove", handleSessionActivity, { passive: true });
+document.addEventListener("scroll", handleSessionActivity, { passive: true });
+
 document.addEventListener("click", async (event) => {
   const sectionToggle = event.target.closest("[data-section-toggle]");
 
@@ -3664,30 +3787,11 @@ document.addEventListener("click", async (event) => {
   }
 
   if (event.target.id === "logout-button") {
-    await api("/api/logout", { method: "POST", body: JSON.stringify({}) });
-    state.session = null;
-    state.dashboard = null;
-    state.calculator = null;
-    state.calculatorSelectionId = null;
-    state.adminDealId = null;
-    state.rollupDealFilter = "";
-    state.contractorDealFilter = "";
-    state.allocationPage = 1;
-    state.allocationFilters = {
-      dealId: "",
-      participantId: "",
-      category: "",
-      classType: ""
-    };
-    state.userFilters = {
-      search: "",
-      category: "",
-      role: "",
-      status: ""
-    };
-    state.loginError = "";
-    clearMessages();
-    render();
+    try {
+      await api("/api/logout", { method: "POST", body: JSON.stringify({}) });
+    } catch {}
+
+    applyLoggedOutState();
   }
 });
 

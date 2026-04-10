@@ -28,6 +28,7 @@ import {
 const HOST = "0.0.0.0";
 const PORT = Number(process.env.PORT ?? 3000);
 const PUBLIC_DIR = join(process.cwd(), "public");
+const SESSION_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000;
 const sessions = new Map();
 
 const mimeTypes = {
@@ -114,46 +115,122 @@ function verifyPassword(user, password) {
 }
 
 function createSession(userId) {
+  const now = Date.now();
   const sessionId = randomBytes(24).toString("hex");
   sessions.set(sessionId, {
     userId,
-    createdAt: Date.now()
+    createdAt: now,
+    lastActivityAt: now
   });
   return sessionId;
 }
 
-function destroySession(request) {
-  const cookies = parseCookies(request);
-
-  if (cookies.sessionId) {
-    sessions.delete(cookies.sessionId);
-  }
-
+function clearSessionCookie() {
   return "sessionId=; HttpOnly; Max-Age=0; Path=/; SameSite=Lax";
 }
 
-async function getCurrentUser(request) {
+function destroySession(request) {
+  const cookies = parseCookies(request);
+  const sessionId = cookies.sessionId;
+
+  if (sessionId) {
+    sessions.delete(sessionId);
+  }
+
+  return clearSessionCookie();
+}
+
+function getSessionState(request, { touch = true } = {}) {
   const cookies = parseCookies(request);
   const sessionId = cookies.sessionId;
 
   if (!sessionId) {
-    return null;
+    return {
+      sessionId: null,
+      session: null,
+      expired: false
+    };
   }
 
   const session = sessions.get(sessionId);
 
   if (!session) {
-    return null;
+    return {
+      sessionId,
+      session: null,
+      expired: false
+    };
   }
 
-  return getUserById(session.userId);
+  const now = Date.now();
+
+  if (now - session.lastActivityAt >= SESSION_INACTIVITY_TIMEOUT_MS) {
+    sessions.delete(sessionId);
+    return {
+      sessionId,
+      session: null,
+      expired: true
+    };
+  }
+
+  if (touch) {
+    session.lastActivityAt = now;
+  }
+
+  return {
+    sessionId,
+    session,
+    expired: false
+  };
+}
+
+async function getCurrentUser(request, options = {}) {
+  const sessionState = getSessionState(request, options);
+
+  if (!sessionState.session) {
+    return {
+      user: null,
+      sessionId: sessionState.sessionId,
+      expired: sessionState.expired
+    };
+  }
+
+  const user = await getUserById(sessionState.session.userId);
+
+  if (!user) {
+    if (sessionState.sessionId) {
+      sessions.delete(sessionState.sessionId);
+    }
+
+    return {
+      user: null,
+      sessionId: sessionState.sessionId,
+      expired: false
+    };
+  }
+
+  return {
+    user,
+    sessionId: sessionState.sessionId,
+    expired: false
+  };
 }
 
 async function requireUser(request, response) {
-  const user = await getCurrentUser(request);
+  const { user, expired } = await getCurrentUser(request);
 
   if (!user) {
-    sendJson(response, 401, { error: "Authentication required." });
+    sendJson(
+      response,
+      401,
+      {
+        error: expired
+          ? "Session expired after 15 minutes of inactivity."
+          : "Authentication required.",
+        code: expired ? "SESSION_EXPIRED" : "AUTH_REQUIRED"
+      },
+      expired ? { "Set-Cookie": clearSessionCookie() } : {}
+    );
     return null;
   }
 
@@ -249,8 +326,27 @@ const server = createServer(async (request, response) => {
     }
 
     if (method === "GET" && url.pathname === "/api/session") {
-      const user = await getCurrentUser(request);
-      sendJson(response, 200, { user: user ? stripUserSecrets(user) : null });
+      const { user, expired } = await getCurrentUser(request);
+      sendJson(
+        response,
+        200,
+        {
+          user: user ? stripUserSecrets(user) : null,
+          expired
+        },
+        expired ? { "Set-Cookie": clearSessionCookie() } : {}
+      );
+      return;
+    }
+
+    if (method === "GET" && url.pathname === "/api/session/ping") {
+      const user = await requireUser(request, response);
+
+      if (!user) {
+        return;
+      }
+
+      sendJson(response, 200, { ok: true });
       return;
     }
 
