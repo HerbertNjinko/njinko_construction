@@ -7,12 +7,19 @@ import { buildDashboardForUser, calculateScenarioForDeal } from "./calculations.
 import { assertDatabaseReady } from "./migrations.js";
 import { closeDatabasePool } from "./postgres.js";
 import {
+  createDeal,
   createDealAllocation,
   createManagedUser,
+  deleteUserAccount,
+  ensureInitialManagerUser,
   getAppDataSnapshot,
   getUserByEmail,
   getUserById,
-  updateDeal
+  markUserLogin,
+  setUserAccountActive,
+  updateOwnProfile,
+  updateDeal,
+  updateUserPassword
 } from "./database.js";
 
 const HOST = "0.0.0.0";
@@ -151,7 +158,7 @@ async function requireUser(request, response) {
 }
 
 async function requireManager(request, response) {
-  const user = await requireUser(request, response);
+  const user = await requireUnlockedUser(request, response);
 
   if (!user) {
     return null;
@@ -165,12 +172,32 @@ async function requireManager(request, response) {
   return user;
 }
 
+async function requireUnlockedUser(request, response) {
+  const user = await requireUser(request, response);
+
+  if (!user) {
+    return null;
+  }
+
+  if (user.mustChangePassword) {
+    sendJson(response, 403, {
+      error: "Password change required before continuing.",
+      code: "PASSWORD_CHANGE_REQUIRED"
+    });
+    return null;
+  }
+
+  return user;
+}
+
 function stripUserSecrets(user) {
   return {
     id: user.id,
     name: user.name,
     email: user.email,
-    role: user.role
+    role: user.role,
+    category: user.category,
+    mustChangePassword: Boolean(user.mustChangePassword)
   };
 }
 
@@ -179,6 +206,8 @@ const server = createServer(async (request, response) => {
     const method = request.method ?? "GET";
     const url = new URL(request.url, `http://${request.headers.host}`);
     const dealUpdateMatch = url.pathname.match(/^\/api\/admin\/deals\/([^/]+)$/);
+    const userStatusMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)\/status$/);
+    const userDeleteMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)$/);
 
     if (method === "POST" && url.pathname === "/api/login") {
       const body = await readJsonBody(request);
@@ -195,6 +224,7 @@ const server = createServer(async (request, response) => {
         return;
       }
 
+      await markUserLogin(user.id);
       const sessionId = createSession(user.id);
       sendJson(
         response,
@@ -221,7 +251,7 @@ const server = createServer(async (request, response) => {
     }
 
     if (method === "GET" && url.pathname === "/api/dashboard") {
-      const user = await requireUser(request, response);
+      const user = await requireUnlockedUser(request, response);
 
       if (!user) {
         return;
@@ -233,7 +263,7 @@ const server = createServer(async (request, response) => {
     }
 
     if (method === "POST" && url.pathname === "/api/calculator") {
-      const user = await requireUser(request, response);
+      const user = await requireUnlockedUser(request, response);
 
       if (!user) {
         return;
@@ -271,6 +301,72 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    if (method === "POST" && url.pathname === "/api/profile/password") {
+      const user = await requireUser(request, response);
+
+      if (!user) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (
+        !body ||
+        typeof body.currentPassword !== "string" ||
+        typeof body.newPassword !== "string"
+      ) {
+        sendJson(response, 400, {
+          error: "Current password and new password are required."
+        });
+        return;
+      }
+
+      if (!verifyPassword(user, body.currentPassword)) {
+        sendJson(response, 400, { error: "Current password is incorrect." });
+        return;
+      }
+
+      if (body.currentPassword === body.newPassword) {
+        sendJson(response, 400, {
+          error: "New password must be different from the current password."
+        });
+        return;
+      }
+
+      try {
+        const updatedUser = await updateUserPassword(user.id, body.newPassword);
+        sendJson(response, 200, { user: stripUserSecrets(updatedUser) });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "PATCH" && url.pathname === "/api/profile") {
+      const user = await requireUnlockedUser(request, response);
+
+      if (!user) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const updatedUser = await updateOwnProfile(user.id, body);
+        sendJson(response, 200, { user: stripUserSecrets(updatedUser) });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
     if (method === "POST" && url.pathname === "/api/admin/users") {
       const manager = await requireManager(request, response);
 
@@ -287,7 +383,10 @@ const server = createServer(async (request, response) => {
 
       try {
         const createdUser = await createManagedUser(body);
-        sendJson(response, 201, { user: stripUserSecrets(createdUser) });
+        sendJson(response, 201, {
+          user: stripUserSecrets(createdUser.user),
+          notification: createdUser.notification
+        });
       } catch (error) {
         sendJson(response, 400, { error: error.message });
       }
@@ -312,6 +411,75 @@ const server = createServer(async (request, response) => {
       try {
         await createDealAllocation(body);
         sendJson(response, 201, { ok: true });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/admin/deals") {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const deal = await createDeal(body);
+        sendJson(response, 201, { deal });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "PATCH" && userStatusMatch) {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body || typeof body.isActive !== "boolean") {
+        sendJson(response, 400, { error: "A valid active status is required." });
+        return;
+      }
+
+      try {
+        const user = await setUserAccountActive(
+          decodeURIComponent(userStatusMatch[1]),
+          body.isActive,
+          manager.id
+        );
+        sendJson(response, 200, { user: stripUserSecrets(user) });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "DELETE" && userDeleteMatch) {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      try {
+        await deleteUserAccount(decodeURIComponent(userDeleteMatch[1]), manager.id);
+        sendJson(response, 200, { ok: true });
       } catch (error) {
         sendJson(response, 400, { error: error.message });
       }
@@ -358,6 +526,18 @@ const server = createServer(async (request, response) => {
   }
 });
 
+server.on("error", (error) => {
+  const message =
+    error.code === "EADDRINUSE"
+      ? `Port ${PORT} is already in use. Stop the existing process or change PORT in .env.`
+      : error.message;
+
+  process.stderr.write(`${message}\n`);
+  void closeDatabasePool().finally(() => {
+    process.exit(1);
+  });
+});
+
 async function shutdown(exitCode = 0) {
   if (server.listening) {
     await new Promise((resolve) => server.close(resolve));
@@ -376,6 +556,22 @@ process.on("SIGTERM", () => {
 
 try {
   await assertDatabaseReady();
+  const initialManager = await ensureInitialManagerUser();
+
+  if (initialManager.created) {
+    process.stdout.write(
+      `Created initial manager account for ${initialManager.user.email}.\n`
+    );
+
+    if (initialManager.notification?.provider === "smtp") {
+      process.stdout.write("Credential email sent through SMTP.\n");
+    } else if (initialManager.notification?.localPath) {
+      process.stdout.write(
+        `Credential email saved to ${initialManager.notification.localPath}.\n`
+      );
+    }
+  }
+
   server.listen(PORT, HOST, () => {
     process.stdout.write(`Deal app running at http://${HOST}:${PORT}\n`);
   });

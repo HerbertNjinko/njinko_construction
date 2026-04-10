@@ -1,15 +1,29 @@
+const ALLOCATION_PAGE_SIZE = 50;
+
 const state = {
   session: null,
   dashboard: null,
   calculator: null,
   calculatorSelectionId: null,
   adminDealId: null,
+  rollupDealFilter: "",
+  allocationPage: 1,
+  allocationFilters: {
+    dealId: "",
+    participantId: "",
+    category: "",
+    classType: ""
+  },
   loginError: "",
   loading: true,
   messages: {
     user: null,
     allocation: null,
-    deal: null
+    deal: null,
+    dealCreate: null,
+    directory: null,
+    profile: null,
+    password: null
   }
 };
 
@@ -44,6 +58,10 @@ function formatPercent(value) {
   return percent.format(value ?? 0);
 }
 
+function inputValue(value) {
+  return escapeHtml(String(value ?? ""));
+}
+
 function titleCase(value) {
   return value
     .replaceAll("_", " ")
@@ -73,7 +91,11 @@ function clearMessages() {
   state.messages = {
     user: null,
     allocation: null,
-    deal: null
+    deal: null,
+    dealCreate: null,
+    directory: null,
+    profile: null,
+    password: null
   };
 }
 
@@ -123,6 +145,64 @@ function breakdownItem(label, value) {
   `;
 }
 
+function formatNotificationStatus(notification) {
+  if (!notification) {
+    return "No notification recorded";
+  }
+
+  if (notification.status === "sent") {
+    return "Credential email sent.";
+  }
+
+  if (notification.status === "saved_local") {
+    return notification.localPath
+      ? `SMTP not configured. Saved to ${notification.localPath}.`
+      : "SMTP not configured. Saved to local outbox.";
+  }
+
+  return notification.errorMessage
+    ? `Notification error: ${notification.errorMessage}`
+    : "Notification could not be delivered.";
+}
+
+function formatDateTime(value) {
+  if (!value) {
+    return "Never";
+  }
+
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+}
+
+function getCreateDealDefaults() {
+  return {
+    status: "under_construction",
+    holdMonths: 18,
+    prefRate: 0.08,
+    timelineProgress: 0,
+    fundedOn: new Date().toISOString().slice(0, 10)
+  };
+}
+
+async function readFileAsPayload(file) {
+  if (!file) {
+    return null;
+  }
+
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () =>
+      resolve({
+        name: file.name,
+        type: file.type,
+        size: file.size,
+        dataUrl: String(reader.result ?? "")
+      });
+    reader.onerror = () => reject(new Error("Unable to read the selected file."));
+    reader.readAsDataURL(file);
+  });
+}
+
 function getManagerEditableDeal() {
   if (!state.dashboard?.deals?.length) {
     return null;
@@ -136,6 +216,57 @@ function getManagerEditableDeal() {
 
 function getCalculatorPreset(dealId) {
   return state.dashboard?.calculator?.deals?.find((deal) => deal.id === dealId) ?? null;
+}
+
+function applyAllocationFilters(rows) {
+  return rows.filter((row) => {
+    if (state.allocationFilters.dealId && row.dealId !== state.allocationFilters.dealId) {
+      return false;
+    }
+
+    if (
+      state.allocationFilters.participantId &&
+      row.participantId !== state.allocationFilters.participantId
+    ) {
+      return false;
+    }
+
+    if (state.allocationFilters.category && row.category !== state.allocationFilters.category) {
+      return false;
+    }
+
+    if (state.allocationFilters.classType && row.classType !== state.allocationFilters.classType) {
+      return false;
+    }
+
+    return true;
+  });
+}
+
+function getAllocationFilterOptions(rows) {
+  const deals = [...new Map(rows.map((row) => [row.dealId, { id: row.dealId, name: row.dealName }])).values()]
+    .sort((left, right) => left.name.localeCompare(right.name));
+  const participants = [
+    ...new Map(
+      rows.map((row) => [row.participantId, { id: row.participantId, name: row.participantName }])
+    ).values()
+  ].sort((left, right) => left.name.localeCompare(right.name));
+
+  return {
+    deals,
+    participants,
+    categories: [...new Set(rows.map((row) => row.category))].sort((left, right) =>
+      left.localeCompare(right)
+    ),
+    classTypes: [...new Set(rows.map((row) => row.classType))].sort((left, right) =>
+      left.localeCompare(right)
+    )
+  };
+}
+
+function getFilteredRollupDeals() {
+  const deals = state.dashboard?.deals ?? [];
+  return state.rollupDealFilter ? deals.filter((deal) => deal.id === state.rollupDealFilter) : deals;
 }
 
 async function loadCalculator(dealId, overrides = null) {
@@ -165,12 +296,55 @@ async function refreshDashboard() {
   state.dashboard = await api("/api/dashboard", { method: "GET" });
 
   if (state.dashboard.role === "manager") {
+    const dealIds = new Set(state.dashboard.deals.map((deal) => deal.id));
+
     if (
       !state.adminDealId ||
       !state.dashboard.deals.some((deal) => deal.id === state.adminDealId)
     ) {
       state.adminDealId = state.dashboard.deals[0]?.id ?? null;
     }
+
+    if (state.rollupDealFilter && !dealIds.has(state.rollupDealFilter)) {
+      state.rollupDealFilter = "";
+    }
+
+    const allocationRows = state.dashboard.admin.allocations;
+    const allocationOptions = getAllocationFilterOptions(allocationRows);
+
+    if (
+      state.allocationFilters.dealId &&
+      !allocationOptions.deals.some((deal) => deal.id === state.allocationFilters.dealId)
+    ) {
+      state.allocationFilters.dealId = "";
+    }
+
+    if (
+      state.allocationFilters.participantId &&
+      !allocationOptions.participants.some(
+        (participant) => participant.id === state.allocationFilters.participantId
+      )
+    ) {
+      state.allocationFilters.participantId = "";
+    }
+
+    if (
+      state.allocationFilters.category &&
+      !allocationOptions.categories.includes(state.allocationFilters.category)
+    ) {
+      state.allocationFilters.category = "";
+    }
+
+    if (
+      state.allocationFilters.classType &&
+      !allocationOptions.classTypes.includes(state.allocationFilters.classType)
+    ) {
+      state.allocationFilters.classType = "";
+    }
+
+    const filteredAllocationCount = applyAllocationFilters(allocationRows).length;
+    const totalPages = Math.max(1, Math.ceil(filteredAllocationCount / ALLOCATION_PAGE_SIZE));
+    state.allocationPage = Math.min(Math.max(state.allocationPage, 1), totalPages);
 
     const nextCalculatorDealId =
       state.calculatorSelectionId &&
@@ -188,6 +362,14 @@ async function refreshDashboard() {
     state.calculator = null;
     state.calculatorSelectionId = null;
     state.adminDealId = null;
+    state.rollupDealFilter = "";
+    state.allocationPage = 1;
+    state.allocationFilters = {
+      dealId: "",
+      participantId: "",
+      category: "",
+      classType: ""
+    };
   }
 }
 
@@ -199,14 +381,14 @@ function renderLogin() {
           <p class="eyebrow">Investor Portal + Promote Calculator</p>
           <h1>Deal visibility without exposing the whole cap table.</h1>
           <p>
-            Investors and contractor participants get a clean read-only dashboard:
-            their capital, preferred return, projected payout, and the project-level
-            signals that matter. Sponsor access includes manager controls backed by SQLite.
+            Investors and contractor participants get a clean dashboard for their
+            capital, preferred return, projected payout, profile details, and
+            payout instructions. Sponsor access includes manager controls backed by Postgres.
           </p>
           <ul class="feature-list">
             <li>Personal portfolio totals with active deal count and current pref accrual.</li>
             <li>Per-project ownership, payout breakdown, status, and timeline progress.</li>
-            <li>Manager-side user creation, deal allocations, and project updates saved to the database.</li>
+            <li>Manager-side user creation, deal allocations, profile capture, and first-login password resets.</li>
           </ul>
         </div>
         <aside class="login-panel">
@@ -266,6 +448,165 @@ function renderLogin() {
         </div>
       </section>
     </div>
+  `;
+}
+
+function renderPasswordResetGate() {
+  return `
+    <div class="shell">
+      <section class="panel password-gate">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Password Update Required</p>
+            <h2>${escapeHtml(state.session.name)}</h2>
+            <p class="section-copy">
+              This account was created with a temporary password. Change it now before continuing.
+            </p>
+          </div>
+          <div class="button-row">
+            <span class="read-only-tag">${escapeHtml(state.session.email)}</span>
+            <button class="button-secondary" id="logout-button" type="button">Log out</button>
+          </div>
+        </div>
+        ${renderMessage(state.messages.password)}
+        <form id="password-form">
+          <label>
+            Current password
+            <input type="password" name="currentPassword" autocomplete="current-password" required />
+          </label>
+          <div class="form-grid-2">
+            <label>
+              New password
+              <input type="password" name="newPassword" minlength="8" autocomplete="new-password" required />
+            </label>
+            <label>
+              Confirm new password
+              <input type="password" name="confirmPassword" minlength="8" autocomplete="new-password" required />
+            </label>
+          </div>
+          <button class="button-primary" type="submit">Update password</button>
+        </form>
+      </section>
+    </div>
+  `;
+}
+
+function renderProfilePanel() {
+  const { profile, viewer } = state.dashboard;
+
+  return `
+    <section class="panel">
+      <div class="section-head">
+        <div>
+          <h3>Profile & Payout Details</h3>
+          <p class="section-copy">
+            Update your contact information and payment instructions here. Deal-level positions remain read only.
+          </p>
+        </div>
+      </div>
+      <div class="summary-grid">
+        ${summaryItem("Portal role", titleCase(viewer.role))}
+        ${summaryItem("User category", titleCase(viewer.category ?? viewer.role))}
+        ${summaryItem("Driver's license", profile.driverLicenseNumber || "Not provided")}
+        ${summaryItem("Attached ID", profile.idCardFileName || "No file attached")}
+      </div>
+      ${renderMessage(state.messages.profile)}
+      <form id="profile-form">
+        <div class="form-grid-3">
+          <label>
+            First name
+            <input type="text" name="firstName" value="${inputValue(profile.firstName)}" minlength="2" required />
+          </label>
+          <label>
+            Middle name
+            <input type="text" name="middleName" value="${inputValue(profile.middleName)}" />
+          </label>
+          <label>
+            Last name
+            <input type="text" name="lastName" value="${inputValue(profile.lastName)}" minlength="2" required />
+          </label>
+        </div>
+        <div class="form-grid-2">
+          <label>
+            Email
+            <input type="email" name="email" value="${inputValue(profile.email)}" required />
+          </label>
+          <label>
+            Contact
+            <input type="text" name="contactPhone" value="${inputValue(profile.contactPhone)}" placeholder="Phone or best contact number" />
+          </label>
+        </div>
+        <div class="form-grid-2">
+          <label>
+            Current address
+            <textarea name="currentAddress" rows="3" placeholder="Current address">${escapeHtml(
+              profile.currentAddress
+            )}</textarea>
+          </label>
+          <label>
+            Mailing address
+            <textarea name="mailingAddress" rows="3" placeholder="Mailing address">${escapeHtml(
+              profile.mailingAddress
+            )}</textarea>
+          </label>
+        </div>
+        <div class="form-grid-2">
+          <label>
+            Preferred payout method
+            <select name="payoutMethod">
+              <option value="" ${!profile.payoutMethod ? "selected" : ""}>Select method</option>
+              <option value="bank" ${profile.payoutMethod === "bank" ? "selected" : ""}>Bank account</option>
+              <option value="zelle" ${profile.payoutMethod === "zelle" ? "selected" : ""}>Zelle</option>
+              <option value="cash_app" ${profile.payoutMethod === "cash_app" ? "selected" : ""}>Cash App</option>
+              <option value="other" ${profile.payoutMethod === "other" ? "selected" : ""}>Other</option>
+            </select>
+          </label>
+          <label>
+            Cash App handle
+            <input type="text" name="cashAppHandle" value="${inputValue(profile.cashAppHandle)}" placeholder="$yourhandle" />
+          </label>
+        </div>
+        <div class="form-grid-2">
+          <label>
+            Bank name
+            <input type="text" name="bankName" value="${inputValue(profile.bankName)}" />
+          </label>
+          <label>
+            Account name
+            <input type="text" name="bankAccountName" value="${inputValue(profile.bankAccountName)}" />
+          </label>
+        </div>
+        <div class="form-grid-2">
+          <label>
+            Routing number
+            <input type="text" name="bankRoutingNumber" value="${inputValue(
+              profile.bankRoutingNumber
+            )}" />
+          </label>
+          <label>
+            Account number
+            <input type="text" name="bankAccountNumber" value="${inputValue(
+              profile.bankAccountNumber
+            )}" />
+          </label>
+        </div>
+        <div class="form-grid-2">
+          <label>
+            Zelle details
+            <input type="text" name="zelleDetails" value="${inputValue(
+              profile.zelleDetails
+            )}" placeholder="Email or phone linked to Zelle" />
+          </label>
+          <label>
+            Payment notes
+            <textarea name="payoutNotes" rows="3" placeholder="Any payout instructions or notes">${escapeHtml(
+              profile.payoutNotes
+            )}</textarea>
+          </label>
+        </div>
+        <button class="button-primary" type="submit">Save profile</button>
+      </form>
+    </section>
   `;
 }
 
@@ -393,17 +734,19 @@ function renderInvestorDashboard() {
           )}</p>
         </div>
         <div class="button-row">
-          <span class="read-only-tag">Read only dashboard</span>
+          <span class="read-only-tag">Deal data remains read only</span>
           <button class="button-secondary" id="logout-button" type="button">Log out</button>
         </div>
       </section>
+
+      ${renderProfilePanel()}
 
       <section class="panel">
         <div class="section-head">
           <div>
             <h3>Personal Portfolio View</h3>
             <p class="section-copy">
-              Totals across all deals tied to your login. No editing, no visibility into other investor amounts.
+              Totals across all deals tied to your login. No visibility into other investor amounts.
             </p>
           </div>
         </div>
@@ -748,9 +1091,9 @@ function renderCreateUserPanel() {
   return `
     <article class="admin-card">
       <p class="eyebrow">Manager Control</p>
-      <h3>Add Investor Or Contractor User</h3>
+      <h3>Add Platform User</h3>
       <p class="section-copy">
-        Creates both the participant profile and login. New users are stored in SQLite immediately.
+        Creates the user profile, login, first-login password reset requirement, and credential notification.
       </p>
       ${renderMessage(state.messages.user)}
       <form id="user-form">
@@ -759,19 +1102,56 @@ function renderCreateUserPanel() {
           <select name="category" required>
             <option value="investor">Investor</option>
             <option value="contractor">Contractor participant</option>
+            <option value="manager">Manager</option>
           </select>
         </label>
+        <div class="form-grid-3">
+          <label>
+            First name
+            <input type="text" name="firstName" placeholder="Jane" minlength="2" required />
+          </label>
+          <label>
+            Middle name
+            <input type="text" name="middleName" placeholder="A." />
+          </label>
+          <label>
+            Last name
+            <input type="text" name="lastName" placeholder="Doe" minlength="2" required />
+          </label>
+        </div>
+        <div class="form-grid-2">
+          <label>
+            Email
+            <input type="email" name="email" placeholder="jane@example.com" required />
+          </label>
+          <label>
+            Contact
+            <input type="text" name="contactPhone" placeholder="Best phone number" />
+          </label>
+        </div>
+        <div class="form-grid-2">
+          <label>
+            Driver's license number
+            <input type="text" name="driverLicenseNumber" placeholder="D1234567" />
+          </label>
+          <label>
+            Temporary password
+            <input type="password" name="password" minlength="8" required />
+          </label>
+        </div>
+        <div class="form-grid-2">
+          <label>
+            Current address
+            <textarea name="currentAddress" rows="3" placeholder="Current address"></textarea>
+          </label>
+          <label>
+            Mailing address
+            <textarea name="mailingAddress" rows="3" placeholder="Mailing address"></textarea>
+          </label>
+        </div>
         <label>
-          Full name
-          <input type="text" name="name" placeholder="Jane Doe" minlength="2" required />
-        </label>
-        <label>
-          Email
-          <input type="email" name="email" placeholder="jane@example.com" required />
-        </label>
-        <label>
-          Temporary password
-          <input type="password" name="password" minlength="8" required />
+          Attach ID card
+          <input type="file" name="idCard" accept="image/*,.pdf" />
         </label>
         <button class="button-primary" type="submit">Create user</button>
       </form>
@@ -865,6 +1245,115 @@ function renderAllocationPanel() {
           </label>
         </div>
         <button class="button-primary" type="submit">Save allocation</button>
+      </form>
+    </article>
+  `;
+}
+
+function renderCreateDealPanel() {
+  const defaults = getCreateDealDefaults();
+
+  return `
+    <article class="admin-card">
+      <p class="eyebrow">Manager Control</p>
+      <h3>Create Project</h3>
+      <p class="section-copy">
+        Add a new deal to the database so it can be allocated to investors and contractors.
+      </p>
+      ${renderMessage(state.messages.dealCreate)}
+      <form id="create-deal-form">
+        <div class="form-grid-2">
+          <label>
+            Deal name
+            <input type="text" name="name" placeholder="237_Ville Development" required />
+          </label>
+          <label>
+            Location
+            <input type="text" name="location" placeholder="City, State" required />
+          </label>
+        </div>
+        <div class="form-grid-2">
+          <label>
+            Current phase
+            <input type="text" name="currentPhase" placeholder="Pre-construction" required />
+          </label>
+          <label>
+            Status
+            <select name="status" required>
+              <option value="under_construction">Under construction</option>
+              <option value="listed">Listed</option>
+              <option value="sold">Sold</option>
+            </select>
+          </label>
+        </div>
+        <div class="form-grid-2">
+          <label>
+            Total project cost
+            <input type="number" name="totalProjectCost" min="0" step="1000" required />
+          </label>
+          <label>
+            Debt
+            <input type="number" name="debt" min="0" step="1000" value="0" required />
+          </label>
+        </div>
+        <div class="form-grid-2">
+          <label>
+            Sale price
+            <input type="number" name="salePrice" min="0" step="1000" required />
+          </label>
+          <label>
+            Hold months
+            <input
+              type="number"
+              name="holdMonths"
+              min="1"
+              step="1"
+              value="${escapeHtml(String(defaults.holdMonths))}"
+              required
+            />
+          </label>
+        </div>
+        <div class="form-grid-2">
+          <label>
+            Pref rate
+            <input
+              type="number"
+              name="prefRate"
+              min="0"
+              max="0.3"
+              step="0.005"
+              value="${escapeHtml(String(defaults.prefRate))}"
+              required
+            />
+          </label>
+          <label>
+            Timeline progress
+            <input
+              type="number"
+              name="timelineProgress"
+              min="0"
+              max="100"
+              step="1"
+              value="${escapeHtml(String(defaults.timelineProgress))}"
+              required
+            />
+          </label>
+        </div>
+        <div class="form-grid-2">
+          <label>
+            Funded on
+            <input type="date" name="fundedOn" value="${escapeHtml(defaults.fundedOn)}" required />
+          </label>
+          <label>
+            Projected exit
+            <input type="date" name="projectedExitOn" />
+          </label>
+        </div>
+        <label>
+          Actual exit
+          <input type="date" name="actualExitOn" />
+        </label>
+        <button class="button-primary" type="submit">Create project</button>
       </form>
     </article>
   `;
@@ -1044,6 +1533,7 @@ function renderDealEditorPanel() {
 
 function renderUserDirectory() {
   const rows = state.dashboard.admin.users;
+  const activeManagerCount = rows.filter((row) => row.role === "manager" && row.isActive).length;
 
   return `
     <section class="panel">
@@ -1051,10 +1541,11 @@ function renderUserDirectory() {
         <div>
           <h3>User Directory</h3>
           <p class="section-copy">
-            Current login-enabled users. New manager-added accounts appear here after save.
+            Manage login access, status, and credential-delivery history without touching deal records.
           </p>
         </div>
       </div>
+      ${renderMessage(state.messages.directory)}
       <div class="table-wrap">
         <table>
           <thead>
@@ -1062,20 +1553,65 @@ function renderUserDirectory() {
               <th>Name</th>
               <th>Category</th>
               <th>Email</th>
+              <th>Contact</th>
               <th>Role</th>
+              <th>Status</th>
+              <th>Last login</th>
+              <th>Password reset</th>
+              <th>ID card</th>
+              <th>Credential notice</th>
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody>
             ${rows
               .map(
-                (row) => `
+                (row) => {
+                  const isSelf = row.id === state.session?.id;
+                  const protectsFinalManager =
+                    row.role === "manager" && row.isActive && activeManagerCount <= 1;
+
+                  return `
                   <tr>
                     <td>${escapeHtml(row.name)}</td>
                     <td>${escapeHtml(titleCase(row.category))}</td>
                     <td>${escapeHtml(row.email)}</td>
+                    <td>${escapeHtml(row.contactPhone || "—")}</td>
                     <td>${escapeHtml(titleCase(row.role))}</td>
+                    <td>${escapeHtml(row.isActive ? "Active" : "Disabled")}</td>
+                    <td>${escapeHtml(formatDateTime(row.lastLoginAt))}</td>
+                    <td>${escapeHtml(row.mustChangePassword ? "Required" : "Completed")}</td>
+                    <td>${escapeHtml(row.idCardFileName || "—")}</td>
+                    <td>${escapeHtml(
+                      row.notificationStatus
+                        ? `${titleCase(row.notificationStatus)}${row.notificationProvider ? ` · ${titleCase(row.notificationProvider)}` : ""}`
+                        : "—"
+                    )}</td>
+                    <td>
+                      <div class="table-actions">
+                        <button
+                          class="button-secondary button-inline"
+                          type="button"
+                          data-user-action="${row.isActive ? "disable" : "enable"}"
+                          data-user-id="${escapeHtml(row.id)}"
+                          ${isSelf || protectsFinalManager ? "disabled" : ""}
+                        >
+                          ${row.isActive ? "Disable" : "Re-enable"}
+                        </button>
+                        <button
+                          class="button-danger button-inline"
+                          type="button"
+                          data-user-action="delete"
+                          data-user-id="${escapeHtml(row.id)}"
+                          ${isSelf || protectsFinalManager ? "disabled" : ""}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </td>
                   </tr>
-                `
+                `;
+                }
               )
               .join("")}
           </tbody>
@@ -1087,6 +1623,14 @@ function renderUserDirectory() {
 
 function renderAllocationTable() {
   const rows = state.dashboard.admin.allocations;
+  const filteredRows = applyAllocationFilters(rows);
+  const filterOptions = getAllocationFilterOptions(rows);
+  const totalPages = Math.max(1, Math.ceil(filteredRows.length / ALLOCATION_PAGE_SIZE));
+  const currentPage = Math.min(Math.max(state.allocationPage, 1), totalPages);
+  const startIndex = filteredRows.length ? (currentPage - 1) * ALLOCATION_PAGE_SIZE : 0;
+  const pageRows = filteredRows.slice(startIndex, startIndex + ALLOCATION_PAGE_SIZE);
+  const showingFrom = filteredRows.length ? startIndex + 1 : 0;
+  const showingTo = Math.min(startIndex + ALLOCATION_PAGE_SIZE, filteredRows.length);
 
   return `
     <section class="panel">
@@ -1098,6 +1642,106 @@ function renderAllocationTable() {
           </p>
         </div>
       </div>
+      <div class="table-toolbar">
+        <div class="filter-grid filter-grid-4">
+          <label>
+            Deal
+            <select id="allocation-filter-deal">
+              <option value="">All deals</option>
+              ${filterOptions.deals
+                .map(
+                  (deal) => `
+                    <option value="${escapeHtml(deal.id)}" ${
+                      deal.id === state.allocationFilters.dealId ? "selected" : ""
+                    }>
+                      ${escapeHtml(deal.name)}
+                    </option>
+                  `
+                )
+                .join("")}
+            </select>
+          </label>
+          <label>
+            Participant
+            <select id="allocation-filter-participant">
+              <option value="">All participants</option>
+              ${filterOptions.participants
+                .map(
+                  (participant) => `
+                    <option value="${escapeHtml(participant.id)}" ${
+                      participant.id === state.allocationFilters.participantId ? "selected" : ""
+                    }>
+                      ${escapeHtml(participant.name)}
+                    </option>
+                  `
+                )
+                .join("")}
+            </select>
+          </label>
+          <label>
+            Category
+            <select id="allocation-filter-category">
+              <option value="">All categories</option>
+              ${filterOptions.categories
+                .map(
+                  (category) => `
+                    <option value="${escapeHtml(category)}" ${
+                      category === state.allocationFilters.category ? "selected" : ""
+                    }>
+                      ${escapeHtml(titleCase(category))}
+                    </option>
+                  `
+                )
+                .join("")}
+            </select>
+          </label>
+          <label>
+            Class
+            <select id="allocation-filter-class">
+              <option value="">All classes</option>
+              ${filterOptions.classTypes
+                .map(
+                  (classType) => `
+                    <option value="${escapeHtml(classType)}" ${
+                      classType === state.allocationFilters.classType ? "selected" : ""
+                    }>
+                      ${escapeHtml(classType)}
+                    </option>
+                  `
+                )
+                .join("")}
+            </select>
+          </label>
+        </div>
+        <div class="pagination-row">
+          <span class="read-only-tag">
+            Showing ${escapeHtml(String(showingFrom))}-${escapeHtml(String(showingTo))} of
+            ${escapeHtml(String(filteredRows.length))}
+          </span>
+          <div class="button-row">
+            <button
+              class="button-secondary button-inline"
+              id="allocation-page-prev"
+              type="button"
+              ${currentPage <= 1 ? "disabled" : ""}
+            >
+              Previous
+            </button>
+            <span class="read-only-tag">Page ${escapeHtml(String(currentPage))} of ${escapeHtml(String(totalPages))}</span>
+            <button
+              class="button-secondary button-inline"
+              id="allocation-page-next"
+              type="button"
+              ${currentPage >= totalPages ? "disabled" : ""}
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      </div>
+      ${
+        pageRows.length
+          ? `
       <div class="table-wrap">
         <table>
           <thead>
@@ -1115,7 +1759,7 @@ function renderAllocationTable() {
             </tr>
           </thead>
           <tbody>
-            ${rows
+            ${pageRows
               .map(
                 (row) => `
                   <tr>
@@ -1136,6 +1780,9 @@ function renderAllocationTable() {
           </tbody>
         </table>
       </div>
+      `
+          : '<div class="empty-state">No allocations match the current filters.</div>'
+      }
     </section>
   `;
 }
@@ -1147,12 +1794,13 @@ function renderManagerAdmin() {
         <div>
           <h3>Admin Console</h3>
           <p class="section-copy">
-            Manager-only controls for platform users, deal allocations, and project updates. Changes are persisted to SQLite.
+            Manager-only controls for platform users, new deals, deal allocations, and project updates.
           </p>
         </div>
       </div>
       <div class="admin-grid">
         ${renderCreateUserPanel()}
+        ${renderCreateDealPanel()}
         ${renderAllocationPanel()}
         ${renderDealEditorPanel()}
       </div>
@@ -1162,6 +1810,7 @@ function renderManagerAdmin() {
 
 function renderManagerDashboard() {
   const { viewer, overview, deals } = state.dashboard;
+  const rollupDeals = getFilteredRollupDeals();
 
   return `
     <div class="shell">
@@ -1197,6 +1846,7 @@ function renderManagerDashboard() {
         </div>
       </section>
 
+      ${renderProfilePanel()}
       ${renderManagerAdmin()}
       ${renderUserDirectory()}
       ${renderAllocationTable()}
@@ -1209,9 +1859,30 @@ function renderManagerDashboard() {
               Current forecast by deal, with active promote tier and class-level payout totals.
             </p>
           </div>
+          <label class="toolbar-field">
+            Deal filter
+            <select id="deal-rollup-filter">
+              <option value="">All deals</option>
+              ${deals
+                .map(
+                  (deal) => `
+                    <option value="${escapeHtml(deal.id)}" ${
+                      deal.id === state.rollupDealFilter ? "selected" : ""
+                    }>
+                      ${escapeHtml(deal.name)}
+                    </option>
+                  `
+                )
+                .join("")}
+            </select>
+          </label>
         </div>
         <div class="project-grid">
-          ${deals.map((deal) => renderManagerDeal(deal)).join("")}
+          ${
+            rollupDeals.length
+              ? rollupDeals.map((deal) => renderManagerDeal(deal)).join("")
+              : '<div class="empty-state">No deals match the selected rollup filter.</div>'
+          }
         </div>
       </section>
 
@@ -1243,6 +1914,11 @@ function render() {
     return;
   }
 
+  if (state.session.mustChangePassword) {
+    app.innerHTML = renderPasswordResetGate();
+    return;
+  }
+
   app.innerHTML =
     state.dashboard?.role === "manager" ? renderManagerDashboard() : renderInvestorDashboard();
 }
@@ -1255,13 +1931,21 @@ async function loadSession() {
     const session = await api("/api/session", { method: "GET" });
     state.session = session.user;
 
-    if (state.session) {
+    if (state.session && !state.session.mustChangePassword) {
       await refreshDashboard();
     } else {
       state.dashboard = null;
       state.calculator = null;
       state.calculatorSelectionId = null;
       state.adminDealId = null;
+      state.rollupDealFilter = "";
+      state.allocationPage = 1;
+      state.allocationFilters = {
+        dealId: "",
+        participantId: "",
+        category: "",
+        classType: ""
+      };
     }
   } catch (error) {
     state.loginError = error.message;
@@ -1270,6 +1954,14 @@ async function loadSession() {
     state.calculator = null;
     state.calculatorSelectionId = null;
     state.adminDealId = null;
+    state.rollupDealFilter = "";
+    state.allocationPage = 1;
+    state.allocationFilters = {
+      dealId: "",
+      participantId: "",
+      category: "",
+      classType: ""
+    };
   } finally {
     state.loading = false;
     render();
@@ -1303,6 +1995,37 @@ document.addEventListener("submit", async (event) => {
     return;
   }
 
+  if (event.target.id === "password-form") {
+    event.preventDefault();
+    const formData = new FormData(event.target);
+    const currentPassword = String(formData.get("currentPassword") ?? "");
+    const newPassword = String(formData.get("newPassword") ?? "");
+    const confirmPassword = String(formData.get("confirmPassword") ?? "");
+
+    if (newPassword !== confirmPassword) {
+      setMessage("password", "error", "New password and confirmation do not match.");
+      render();
+      return;
+    }
+
+    try {
+      await api("/api/profile/password", {
+        method: "POST",
+        body: JSON.stringify({
+          currentPassword,
+          newPassword
+        })
+      });
+      setMessage("password", "success", "Password updated. Loading dashboard...");
+      await loadSession();
+    } catch (error) {
+      setMessage("password", "error", error.message);
+      render();
+    }
+
+    return;
+  }
+
   if (event.target.id === "calculator-form") {
     event.preventDefault();
     const formData = new FormData(event.target);
@@ -1328,23 +2051,71 @@ document.addEventListener("submit", async (event) => {
     const formData = new FormData(event.target);
 
     try {
-      await api("/api/admin/users", {
+      const idCardFile = await readFileAsPayload(event.target.elements.idCard.files[0]);
+      const result = await api("/api/admin/users", {
         method: "POST",
         body: JSON.stringify({
           category: formData.get("category"),
-          name: formData.get("name"),
+          firstName: formData.get("firstName"),
+          middleName: formData.get("middleName"),
+          lastName: formData.get("lastName"),
           email: formData.get("email"),
-          password: formData.get("password")
+          contactPhone: formData.get("contactPhone"),
+          driverLicenseNumber: formData.get("driverLicenseNumber"),
+          currentAddress: formData.get("currentAddress"),
+          mailingAddress: formData.get("mailingAddress"),
+          password: formData.get("password"),
+          idCardFile
         })
       });
       await refreshDashboard();
-      setMessage("user", "success", "User created and saved to the database.");
+      setMessage(
+        "user",
+        "success",
+        `User created. ${formatNotificationStatus(result.notification)}`
+      );
       event.target.reset();
     } catch (error) {
       setMessage("user", "error", error.message);
     }
 
     render();
+    return;
+  }
+
+  if (event.target.id === "profile-form") {
+    event.preventDefault();
+    const formData = new FormData(event.target);
+
+    try {
+      await api("/api/profile", {
+        method: "PATCH",
+        body: JSON.stringify({
+          firstName: formData.get("firstName"),
+          middleName: formData.get("middleName"),
+          lastName: formData.get("lastName"),
+          email: formData.get("email"),
+          contactPhone: formData.get("contactPhone"),
+          currentAddress: formData.get("currentAddress"),
+          mailingAddress: formData.get("mailingAddress"),
+          payoutMethod: formData.get("payoutMethod"),
+          bankAccountName: formData.get("bankAccountName"),
+          bankName: formData.get("bankName"),
+          bankRoutingNumber: formData.get("bankRoutingNumber"),
+          bankAccountNumber: formData.get("bankAccountNumber"),
+          zelleDetails: formData.get("zelleDetails"),
+          cashAppHandle: formData.get("cashAppHandle"),
+          payoutNotes: formData.get("payoutNotes")
+        })
+      });
+      await loadSession();
+      setMessage("profile", "success", "Profile details saved.");
+      render();
+    } catch (error) {
+      setMessage("profile", "error", error.message);
+      render();
+    }
+
     return;
   }
 
@@ -1377,6 +2148,42 @@ document.addEventListener("submit", async (event) => {
     }
 
     render();
+    return;
+  }
+
+  if (event.target.id === "create-deal-form") {
+    event.preventDefault();
+    const formData = new FormData(event.target);
+
+    try {
+      const result = await api("/api/admin/deals", {
+        method: "POST",
+        body: JSON.stringify({
+          name: formData.get("name"),
+          location: formData.get("location"),
+          currentPhase: formData.get("currentPhase"),
+          status: formData.get("status"),
+          totalProjectCost: Number(formData.get("totalProjectCost")),
+          debt: Number(formData.get("debt")),
+          salePrice: Number(formData.get("salePrice")),
+          holdMonths: Number(formData.get("holdMonths")),
+          prefRate: Number(formData.get("prefRate")),
+          timelineProgress: Number(formData.get("timelineProgress")),
+          fundedOn: formData.get("fundedOn"),
+          projectedExitOn: formData.get("projectedExitOn"),
+          actualExitOn: formData.get("actualExitOn")
+        })
+      });
+      state.adminDealId = result.deal.id;
+      state.rollupDealFilter = result.deal.id;
+      await refreshDashboard();
+      setMessage("dealCreate", "success", "Project created and ready for allocations.");
+      render();
+    } catch (error) {
+      setMessage("dealCreate", "error", error.message);
+      render();
+    }
+
     return;
   }
 
@@ -1423,6 +2230,40 @@ document.addEventListener("change", async (event) => {
     return;
   }
 
+  if (event.target.id === "deal-rollup-filter") {
+    state.rollupDealFilter = event.target.value;
+    render();
+    return;
+  }
+
+  if (event.target.id === "allocation-filter-deal") {
+    state.allocationFilters.dealId = event.target.value;
+    state.allocationPage = 1;
+    render();
+    return;
+  }
+
+  if (event.target.id === "allocation-filter-participant") {
+    state.allocationFilters.participantId = event.target.value;
+    state.allocationPage = 1;
+    render();
+    return;
+  }
+
+  if (event.target.id === "allocation-filter-category") {
+    state.allocationFilters.category = event.target.value;
+    state.allocationPage = 1;
+    render();
+    return;
+  }
+
+  if (event.target.id === "allocation-filter-class") {
+    state.allocationFilters.classType = event.target.value;
+    state.allocationPage = 1;
+    render();
+    return;
+  }
+
   if (event.target.id === "calculator-deal-select") {
     try {
       await loadCalculator(event.target.value);
@@ -1432,6 +2273,65 @@ document.addEventListener("change", async (event) => {
 });
 
 document.addEventListener("click", async (event) => {
+  const actionButton = event.target.closest("[data-user-action]");
+
+  if (actionButton) {
+    const action = actionButton.dataset.userAction;
+    const userId = actionButton.dataset.userId;
+
+    if (!userId) {
+      return;
+    }
+
+    try {
+      if (action === "delete") {
+        const confirmed = window.confirm(
+          "Delete this user account? Login access will be removed and the action cannot be undone."
+        );
+
+        if (!confirmed) {
+          return;
+        }
+
+        await api(`/api/admin/users/${encodeURIComponent(userId)}`, {
+          method: "DELETE"
+        });
+        await refreshDashboard();
+        setMessage("directory", "success", "User account deleted.");
+      } else {
+        await api(`/api/admin/users/${encodeURIComponent(userId)}/status`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            isActive: action === "enable"
+          })
+        });
+        await refreshDashboard();
+        setMessage(
+          "directory",
+          "success",
+          action === "enable" ? "User account re-enabled." : "User account disabled."
+        );
+      }
+    } catch (error) {
+      setMessage("directory", "error", error.message);
+    }
+
+    render();
+    return;
+  }
+
+  if (event.target.id === "allocation-page-prev") {
+    state.allocationPage = Math.max(1, state.allocationPage - 1);
+    render();
+    return;
+  }
+
+  if (event.target.id === "allocation-page-next") {
+    state.allocationPage += 1;
+    render();
+    return;
+  }
+
   if (event.target.id === "logout-button") {
     await api("/api/logout", { method: "POST", body: JSON.stringify({}) });
     state.session = null;
@@ -1439,6 +2339,14 @@ document.addEventListener("click", async (event) => {
     state.calculator = null;
     state.calculatorSelectionId = null;
     state.adminDealId = null;
+    state.rollupDealFilter = "";
+    state.allocationPage = 1;
+    state.allocationFilters = {
+      dealId: "",
+      participantId: "",
+      category: "",
+      classType: ""
+    };
     state.loginError = "";
     clearMessages();
     render();

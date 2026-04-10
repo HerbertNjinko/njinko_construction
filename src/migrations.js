@@ -12,7 +12,8 @@ const REQUIRED_TABLES = [
   "promote_tiers",
   "deal_timeline_items",
   "positions",
-  "contractor_participation"
+  "contractor_participation",
+  "email_notifications"
 ];
 
 function listMigrationFiles() {

@@ -187,9 +187,34 @@ function calculateCurrentPref(position, deal, asOfDate) {
   return roundCurrency(position.contributionAmount * deal.prefRate * (monthsAccrued / 12));
 }
 
+function buildProfilePayload(user, participant) {
+  return {
+    firstName: participant?.firstName ?? "",
+    middleName: participant?.middleName ?? "",
+    lastName: participant?.lastName ?? "",
+    fullName: participant?.name ?? user.name,
+    email: user.email,
+    contactPhone: participant?.contactPhone ?? "",
+    currentAddress: participant?.currentAddress ?? "",
+    mailingAddress: participant?.mailingAddress ?? "",
+    driverLicenseNumber: participant?.driverLicenseNumber ?? "",
+    idCardFileName: participant?.idCardFileName ?? "",
+    hasIdCard: Boolean(participant?.hasIdCard),
+    payoutMethod: participant?.payoutMethod ?? "",
+    bankAccountName: participant?.bankAccountName ?? "",
+    bankName: participant?.bankName ?? "",
+    bankRoutingNumber: participant?.bankRoutingNumber ?? "",
+    bankAccountNumber: participant?.bankAccountNumber ?? "",
+    zelleDetails: participant?.zelleDetails ?? "",
+    cashAppHandle: participant?.cashAppHandle ?? "",
+    payoutNotes: participant?.payoutNotes ?? ""
+  };
+}
+
 export function buildInvestorDashboard(user, data = seedData) {
   const participantMap = getParticipantMap(data);
   const dealMap = new Map(data.deals.map((deal) => [deal.id, deal]));
+  const participant = participantMap.get(user.participantId);
   const visiblePositions = data.positions.filter(
     (position) => position.participantId === user.participantId
   );
@@ -259,6 +284,7 @@ export function buildInvestorDashboard(user, data = seedData) {
       role: user.role,
       category: participantMap.get(user.participantId)?.category ?? "investor"
     },
+    profile: buildProfilePayload(user, participant),
     portfolio: {
       totalInvested,
       totalReturned,
@@ -275,6 +301,7 @@ export function buildManagerDashboard(user, data = seedData) {
   const contractorMap = new Map(
     data.contractors.map((item) => [`${item.dealId}:${item.participantId}`, item])
   );
+  const participant = participantMap.get(user.participantId);
 
   const deals = data.deals.map((deal) => {
     const dealPositions = data.positions.filter((position) => position.dealId === deal.id);
@@ -361,14 +388,28 @@ export function buildManagerDashboard(user, data = seedData) {
       id: account.id,
       participantId: account.participantId,
       name: account.name,
+      firstName: account.firstName ?? "",
+      middleName: account.middleName ?? "",
+      lastName: account.lastName ?? "",
       email: account.email,
       role: account.role,
-      category: participantMap.get(account.participantId)?.category ?? "investor"
+      category: participantMap.get(account.participantId)?.category ?? "investor",
+      contactPhone: account.contactPhone ?? "",
+      currentAddress: account.currentAddress ?? "",
+      mailingAddress: account.mailingAddress ?? "",
+      driverLicenseNumber: account.driverLicenseNumber ?? "",
+      idCardFileName: account.idCardFileName ?? "",
+      isActive: Boolean(account.isActive),
+      mustChangePassword: Boolean(account.mustChangePassword),
+      lastLoginAt: account.lastLoginAt ?? null,
+      notificationStatus: account.notificationStatus ?? null,
+      notificationProvider: account.notificationProvider ?? null,
+      notificationLocalPath: account.notificationLocalPath ?? null
     }))
     .sort((left, right) => left.name.localeCompare(right.name));
 
   const adminParticipants = data.participants
-    .filter((participant) => participant.category !== "sponsor")
+    .filter((participant) => !["sponsor", "manager"].includes(participant.category))
     .map((participant) => {
       const linkedUser = userMap.get(participant.id);
 
@@ -377,7 +418,9 @@ export function buildManagerDashboard(user, data = seedData) {
         name: participant.name,
         category: participant.category,
         hasUser: Boolean(linkedUser),
-        email: linkedUser?.email ?? null
+        email: linkedUser?.email ?? null,
+        contactPhone: participant.contactPhone ?? "",
+        idCardFileName: participant.idCardFileName ?? ""
       };
     })
     .sort((left, right) => left.name.localeCompare(right.name));
@@ -414,8 +457,10 @@ export function buildManagerDashboard(user, data = seedData) {
     viewer: {
       name: user.name,
       email: user.email,
-      role: user.role
+      role: user.role,
+      category: participant?.category ?? "manager"
     },
+    profile: buildProfilePayload(user, participant),
     overview: {
       totalDeals: deals.length,
       activeDeals: deals.filter((deal) => deal.status !== "sold").length,

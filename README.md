@@ -5,16 +5,15 @@ Database-backed investor dashboard and sponsor-side deal calculator for:
 - investor returns by deal
 - sponsor promote IRR trigger visibility
 - contractor deferred compensation tracked as Class C participation
-- manager-side user creation, deal allocation, and project updates
+- manager-side user creation, deal allocation, project updates, and investor profile capture
 
 ## Run locally
 
 ```bash
-export PGHOST=127.0.0.1
-export PGPORT=5432
-export PGUSER=postgres
-export PGPASSWORD='your-password'
-export PGDATABASE=investors
+cp .env.example .env
+# update .env with your local Postgres password
+# add SMTP_* if you want live credential emails
+# change PORT in .env if 3000 is already in use
 npm run migrate
 npm run seed
 npm start
@@ -23,7 +22,10 @@ npm start
 The app runs on `http://localhost:3000`.
 
 If the database already contains data, `npm run seed` will stop instead of overwriting it. Use `npm run seed -- --force` only when you intentionally want to replace the current contents with the demo dataset.
-If you see `Missing Postgres setting: PGPASSWORD`, start the app from the same shell where you exported the Postgres variables, or use `DATABASE_URL`.
+The npm scripts automatically load variables from `.env`. The local `.env` file is ignored by git; use `.env.example` as the template.
+If you prefer not to use `.env`, you can still provide `DATABASE_URL` or the standard `PGHOST` / `PGPORT` / `PGUSER` / `PGPASSWORD` / `PGDATABASE` variables from the shell.
+If no manager account exists when the app starts, it will create the initial manager from the `DEFAULT_MANAGER_*` values in `.env`.
+If `SMTP_HOST`, `SMTP_USER`, and `SMTP_PASS` are set, new-user credential emails are sent through SMTP. If SMTP is unavailable, the app falls back to the local outbox. Resend remains optional as a secondary provider when SMTP is not configured.
 
 ## Demo logins
 
@@ -38,12 +40,16 @@ These accounts exist only after running `npm run seed`.
 
 - Cookie-based login with per-user dashboard access
 - Postgres persistence using the `investors` database
+- Automatic bootstrap of the first manager account from `.env` when the database has no manager user
 - Personal investor portfolio totals and per-project breakdowns
 - Limited project summary for investors without exposing the full cap table
+- Self-service profile editing for names, address, contact info, and payout instructions
+- First-login password reset requirement for manager-created users
 - Sponsor calculator to plug in sale price, hold months, and pref rate
 - Contractor tracking table for deferred compensation and Class C participation
 - Manager admin console to:
-  - add investor and contractor users
+  - add manager, investor, and contractor users
+  - capture driver's license number and attach an ID card at user creation
   - add deal allocations / Class C participation
   - update project records and save changes to the database
 
@@ -58,17 +64,20 @@ These accounts exist only after running `npm run seed`.
 ### Core tables
 
 - `participants`: investors, contractors, sponsor entities
-- `users`: login credentials tied one-to-one to participants
+- `users`: login credentials, email, first-login password reset state
 - `deals`: project-level financial and status fields
 - `promote_tiers`: promote hurdle structure per deal
 - `deal_timeline_items`: visible milestone timeline per deal
 - `positions`: Class A / Class C capital participation by deal and participant
 - `contractor_participation`: deferred labor tracking for contractor participants
+- `email_notifications`: credential email delivery and local-outbox audit trail
 
 ## Notes
 
 - Seed data lives in [`src/data.js`](/home/herbertabingwa/njinko_construction/src/data.js) and is loaded only by [`npm run seed`](#run-locally).
 - Migration execution is implemented in [`src/migrations.js`](/home/herbertabingwa/njinko_construction/src/migrations.js).
 - Database access is implemented in [`src/database.js`](/home/herbertabingwa/njinko_construction/src/database.js).
+- Credential email delivery and local outbox fallback are implemented in [`src/notifications.js`](/home/herbertabingwa/njinko_construction/src/notifications.js).
+- Initial manager bootstrap is handled during server startup in [`src/server.js`](/home/herbertabingwa/njinko_construction/src/server.js) and [`src/database.js`](/home/herbertabingwa/njinko_construction/src/database.js).
 - The app uses Node's built-in HTTP server plus the [`pg`](https://www.npmjs.com/package/pg) driver for Postgres.
 - This is still a prototype, not production-grade auth, authorization, or accounting infrastructure.

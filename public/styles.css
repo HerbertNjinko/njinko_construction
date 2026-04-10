@@ -196,12 +196,14 @@ label {
 }
 
 input,
+textarea,
 select,
 button {
   font: inherit;
 }
 
 input,
+textarea,
 select {
   width: 100%;
   padding: 0.95rem 1rem;
@@ -212,9 +214,15 @@ select {
 }
 
 input:focus,
+textarea:focus,
 select:focus {
   outline: 2px solid rgba(13, 110, 99, 0.22);
   border-color: rgba(13, 110, 99, 0.36);
+}
+
+textarea {
+  resize: vertical;
+  min-height: 7rem;
 }
 
 button {
@@ -229,6 +237,13 @@ button:hover {
   transform: translateY(-1px);
 }
 
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
 .button-primary {
   background: linear-gradient(135deg, var(--accent), #0a4b44);
   color: #fff9f2;
@@ -239,6 +254,17 @@ button:hover {
   color: var(--ink);
   background: rgba(255, 255, 255, 0.78);
   border: 1px solid rgba(31, 26, 23, 0.1);
+}
+
+.button-danger {
+  color: #fff7f1;
+  background: linear-gradient(135deg, #a73c2d, #7d2318);
+  box-shadow: 0 12px 24px rgba(125, 35, 24, 0.18);
+}
+
+.button-inline {
+  padding: 0.6rem 0.85rem;
+  font-size: 0.88rem;
 }
 
 .button-row {
@@ -285,6 +311,11 @@ button:hover {
   gap: 1rem;
 }
 
+.filter-grid {
+  display: grid;
+  gap: 0.9rem;
+}
+
 .credentials-grid {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
@@ -296,6 +327,16 @@ button:hover {
 
 .form-grid-2 {
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.filter-grid-4 {
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.form-grid-3 {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
 }
 
 .credential-card {
@@ -335,6 +376,11 @@ button:hover {
 .panel-inline {
   margin-top: 1rem;
   padding: 1rem;
+}
+
+.password-gate {
+  max-width: 760px;
+  margin: 0 auto;
 }
 
 .app-header {
@@ -419,6 +465,10 @@ button:hover {
   align-items: end;
   gap: 1rem;
   margin-bottom: 1rem;
+}
+
+.toolbar-field {
+  min-width: min(100%, 260px);
 }
 
 .section-head h3 {
@@ -568,6 +618,24 @@ button:hover {
   border-radius: 20px;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.66);
+}
+
+.table-toolbar,
+.pagination-row,
+.table-actions {
+  display: flex;
+  gap: 0.85rem;
+}
+
+.table-toolbar {
+  flex-direction: column;
+  margin-bottom: 1rem;
+}
+
+.pagination-row,
+.table-actions {
+  flex-wrap: wrap;
+  align-items: center;
 }
 
 .table-top-gap {

@@ -2,6 +2,7 @@ import { randomBytes, randomUUID, scryptSync } from "node:crypto";
 
 import { seedData } from "./data.js";
 import { assertDatabaseReady } from "./migrations.js";
+import { sendCredentialNotification } from "./notifications.js";
 import { pool, queryAll, queryOne, withTransaction } from "./postgres.js";
 
 function nowTimestamp() {
@@ -14,6 +15,18 @@ function todayStamp() {
 
 function normalizeEmail(email) {
   return String(email).trim().toLowerCase();
+}
+
+function normalizeOptionalText(value) {
+  const normalized = String(value ?? "").trim();
+  return normalized || null;
+}
+
+function normalizeConfigValue(value) {
+  return String(value ?? "")
+    .trim()
+    .replace(/\s+#.*$/, "")
+    .trim();
 }
 
 function roundNumber(value) {
@@ -34,10 +47,174 @@ function hashPassword(password) {
   };
 }
 
+function splitName(name) {
+  const parts = String(name ?? "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  if (!parts.length) {
+    return {
+      firstName: "",
+      middleName: "",
+      lastName: ""
+    };
+  }
+
+  if (parts.length === 1) {
+    return {
+      firstName: parts[0],
+      middleName: "",
+      lastName: ""
+    };
+  }
+
+  return {
+    firstName: parts[0],
+    middleName: parts.slice(1, -1).join(" "),
+    lastName: parts.at(-1)
+  };
+}
+
+function buildFullName(firstName, middleName, lastName, fallbackName = "") {
+  const parts = [firstName, middleName, lastName]
+    .map((value) => String(value ?? "").trim())
+    .filter(Boolean);
+
+  return parts.join(" ") || String(fallbackName ?? "").trim();
+}
+
+function normalizeIdCardFile(file) {
+  if (!file || typeof file !== "object") {
+    return null;
+  }
+
+  const fileName = normalizeOptionalText(file.name);
+  const mimeType = normalizeOptionalText(file.type);
+  const dataUrl = normalizeOptionalText(file.dataUrl);
+  const size = Number(file.size ?? 0);
+
+  if (!fileName || !mimeType || !dataUrl) {
+    throw new Error("ID card uploads must include a file name, mime type, and file data.");
+  }
+
+  if (!dataUrl.startsWith("data:")) {
+    throw new Error("ID card uploads must be sent as a data URL.");
+  }
+
+  if (!Number.isFinite(size) || size <= 0 || size > 3_000_000) {
+    throw new Error("ID card uploads must be smaller than 3 MB.");
+  }
+
+  return {
+    fileName,
+    mimeType,
+    dataUrl
+  };
+}
+
+function normalizeCategory(category) {
+  return String(category ?? "").trim();
+}
+
+function normalizePersonInput(input) {
+  const firstName = String(input.firstName ?? "").trim();
+  const middleName = String(input.middleName ?? "").trim();
+  const lastName = String(input.lastName ?? "").trim();
+  const email = normalizeEmail(input.email ?? "");
+  const password = String(input.password ?? "");
+  const contactPhone = normalizeOptionalText(input.contactPhone ?? input.contact);
+  const currentAddress = normalizeOptionalText(input.currentAddress);
+  const mailingAddress = normalizeOptionalText(input.mailingAddress);
+  const driverLicenseNumber = normalizeOptionalText(input.driverLicenseNumber);
+  const payoutMethod = normalizeOptionalText(input.payoutMethod);
+  const bankAccountName = normalizeOptionalText(input.bankAccountName);
+  const bankName = normalizeOptionalText(input.bankName);
+  const bankRoutingNumber = normalizeOptionalText(input.bankRoutingNumber);
+  const bankAccountNumber = normalizeOptionalText(input.bankAccountNumber);
+  const zelleDetails = normalizeOptionalText(input.zelleDetails);
+  const cashAppHandle = normalizeOptionalText(input.cashAppHandle);
+  const payoutNotes = normalizeOptionalText(input.payoutNotes);
+  const idCardFile = normalizeIdCardFile(input.idCardFile);
+
+  return {
+    firstName,
+    middleName,
+    lastName,
+    fullName: buildFullName(firstName, middleName, lastName),
+    email,
+    password,
+    contactPhone,
+    currentAddress,
+    mailingAddress,
+    driverLicenseNumber,
+    payoutMethod,
+    bankAccountName,
+    bankName,
+    bankRoutingNumber,
+    bankAccountNumber,
+    zelleDetails,
+    cashAppHandle,
+    payoutNotes,
+    idCardFile
+  };
+}
+
+function validateUserProfileForCreation(profile, category) {
+  if (!["investor", "contractor", "manager"].includes(category)) {
+    throw new Error("User category must be investor, contractor, or manager.");
+  }
+
+  if (profile.firstName.length < 2) {
+    throw new Error("First name must be at least 2 characters.");
+  }
+
+  if (profile.lastName.length < 2) {
+    throw new Error("Last name must be at least 2 characters.");
+  }
+
+  if (!profile.email.includes("@")) {
+    throw new Error("A valid email is required.");
+  }
+
+  if (profile.password.length < 8) {
+    throw new Error("Temporary password must be at least 8 characters.");
+  }
+}
+
+function mapParticipantRow(row) {
+  const fallback = splitName(row.name);
+
+  return {
+    id: row.id,
+    name: row.name,
+    category: row.category,
+    firstName: row.firstName ?? fallback.firstName,
+    middleName: row.middleName ?? fallback.middleName,
+    lastName: row.lastName ?? fallback.lastName,
+    driverLicenseNumber: row.driverLicenseNumber ?? "",
+    idCardFileName: row.idCardFileName ?? "",
+    hasIdCard: Boolean(row.hasIdCard ?? row.idCardFileName),
+    currentAddress: row.currentAddress ?? "",
+    mailingAddress: row.mailingAddress ?? "",
+    contactPhone: row.contactPhone ?? "",
+    payoutMethod: row.payoutMethod ?? "",
+    bankAccountName: row.bankAccountName ?? "",
+    bankName: row.bankName ?? "",
+    bankRoutingNumber: row.bankRoutingNumber ?? "",
+    bankAccountNumber: row.bankAccountNumber ?? "",
+    zelleDetails: row.zelleDetails ?? "",
+    cashAppHandle: row.cashAppHandle ?? "",
+    payoutNotes: row.payoutNotes ?? ""
+  };
+}
+
 function mapUserRow(row) {
   if (!row) {
     return null;
   }
+
+  const fallback = splitName(row.name);
 
   return {
     id: row.id,
@@ -46,9 +223,22 @@ function mapUserRow(row) {
     name: row.name,
     email: row.email,
     category: row.category,
+    firstName: row.firstName ?? fallback.firstName,
+    middleName: row.middleName ?? fallback.middleName,
+    lastName: row.lastName ?? fallback.lastName,
+    currentAddress: row.currentAddress ?? "",
+    mailingAddress: row.mailingAddress ?? "",
+    contactPhone: row.contactPhone ?? "",
+    driverLicenseNumber: row.driverLicenseNumber ?? "",
+    idCardFileName: row.idCardFileName ?? "",
     passwordSalt: row.passwordSalt,
     passwordHash: row.passwordHash,
-    isActive: Boolean(row.isActive)
+    isActive: Boolean(row.isActive),
+    mustChangePassword: Boolean(row.mustChangePassword),
+    lastLoginAt: row.lastLoginAt ?? null,
+    notificationStatus: row.notificationStatus ?? null,
+    notificationProvider: row.notificationProvider ?? null,
+    notificationLocalPath: row.notificationLocalPath ?? null
   };
 }
 
@@ -97,10 +287,11 @@ async function insertSeedData(executor) {
           password_salt,
           password_hash,
           is_active,
+          must_change_password,
           created_at,
           updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       `,
       [
         user.id,
@@ -110,6 +301,7 @@ async function insertSeedData(executor) {
         user.passwordSalt,
         user.passwordHash,
         1,
+        0,
         timestamp,
         timestamp
       ]
@@ -313,6 +505,7 @@ export async function seedDatabase({ force = false } = {}) {
     if (force) {
       await client.query(`
         TRUNCATE TABLE
+          email_notifications,
           contractor_participation,
           positions,
           deal_timeline_items,
@@ -334,21 +527,73 @@ export async function seedDatabase({ force = false } = {}) {
   };
 }
 
+const USER_SELECT_FRAGMENT = `
+  SELECT
+    users.id AS id,
+    users.participant_id AS "participantId",
+    users.role AS role,
+    participants.name AS name,
+    participants.category AS category,
+    participants.first_name AS "firstName",
+    participants.middle_name AS "middleName",
+    participants.last_name AS "lastName",
+    participants.driver_license_number AS "driverLicenseNumber",
+    participants.id_card_file_name AS "idCardFileName",
+    participants.current_address AS "currentAddress",
+    participants.mailing_address AS "mailingAddress",
+    participants.contact_phone AS "contactPhone",
+    users.email AS email,
+    users.password_salt AS "passwordSalt",
+    users.password_hash AS "passwordHash",
+    users.is_active AS "isActive",
+    users.must_change_password AS "mustChangePassword",
+    users.last_login_at AS "lastLoginAt",
+    notification.status AS "notificationStatus",
+    notification.provider AS "notificationProvider",
+    notification.local_path AS "notificationLocalPath"
+  FROM users
+  JOIN participants ON participants.id = users.participant_id
+  LEFT JOIN LATERAL (
+    SELECT status, provider, local_path
+    FROM email_notifications
+    WHERE user_id = users.id
+    ORDER BY created_at DESC
+    LIMIT 1
+  ) notification ON TRUE
+`;
+
+async function getUserAccountById(userId, { includeInactive = false } = {}) {
+  const row = await queryOne(
+    `
+      ${USER_SELECT_FRAGMENT}
+      WHERE users.id = $1
+      ${includeInactive ? "" : "AND users.is_active = 1"}
+    `,
+    [userId]
+  );
+
+  return mapUserRow(row);
+}
+
+async function countActiveManagers(executor = pool) {
+  const row = await queryOne(
+    `
+      SELECT COUNT(*)::int AS count
+      FROM users
+      WHERE role = 'manager'
+        AND is_active = 1
+    `,
+    [],
+    executor
+  );
+
+  return Number(row?.count ?? 0);
+}
+
 export async function getUserByEmail(email) {
   const row = await queryOne(
     `
-      SELECT
-        users.id AS id,
-        users.participant_id AS "participantId",
-        users.role AS role,
-        participants.name AS name,
-        participants.category AS category,
-        users.email AS email,
-        users.password_salt AS "passwordSalt",
-        users.password_hash AS "passwordHash",
-        users.is_active AS "isActive"
-      FROM users
-      JOIN participants ON participants.id = users.participant_id
+      ${USER_SELECT_FRAGMENT}
       WHERE LOWER(users.email) = $1
         AND users.is_active = 1
     `,
@@ -359,57 +604,41 @@ export async function getUserByEmail(email) {
 }
 
 export async function getUserById(userId) {
-  const row = await queryOne(
-    `
-      SELECT
-        users.id AS id,
-        users.participant_id AS "participantId",
-        users.role AS role,
-        participants.name AS name,
-        participants.category AS category,
-        users.email AS email,
-        users.password_salt AS "passwordSalt",
-        users.password_hash AS "passwordHash",
-        users.is_active AS "isActive"
-      FROM users
-      JOIN participants ON participants.id = users.participant_id
-      WHERE users.id = $1
-        AND users.is_active = 1
-    `,
-    [userId]
-  );
-
-  return mapUserRow(row);
+  return getUserAccountById(userId, { includeInactive: false });
 }
 
 export async function getAppDataSnapshot() {
   const participants = (await queryAll(
     `
-      SELECT id, name, category
+      SELECT
+        id,
+        name,
+        category,
+        first_name AS "firstName",
+        middle_name AS "middleName",
+        last_name AS "lastName",
+        driver_license_number AS "driverLicenseNumber",
+        id_card_file_name AS "idCardFileName",
+        current_address AS "currentAddress",
+        mailing_address AS "mailingAddress",
+        contact_phone AS "contactPhone",
+        payout_method AS "payoutMethod",
+        bank_account_name AS "bankAccountName",
+        bank_name AS "bankName",
+        bank_routing_number AS "bankRoutingNumber",
+        bank_account_number AS "bankAccountNumber",
+        zelle_details AS "zelleDetails",
+        cash_app_handle AS "cashAppHandle",
+        payout_notes AS "payoutNotes",
+        (id_card_file_name IS NOT NULL) AS "hasIdCard"
       FROM participants
       ORDER BY name
     `
-  )).map((row) => ({
-    id: row.id,
-    name: row.name,
-    category: row.category
-  }));
+  )).map((row) => mapParticipantRow(row));
 
   const users = (await queryAll(
     `
-      SELECT
-        users.id AS id,
-        users.participant_id AS "participantId",
-        users.role AS role,
-        participants.name AS name,
-        participants.category AS category,
-        users.email AS email,
-        users.password_salt AS "passwordSalt",
-        users.password_hash AS "passwordHash",
-        users.is_active AS "isActive"
-      FROM users
-      JOIN participants ON participants.id = users.participant_id
-      WHERE users.is_active = 1
+      ${USER_SELECT_FRAGMENT}
       ORDER BY participants.name
     `
   )).map((row) => mapUserRow(row));
@@ -548,46 +777,72 @@ export async function getAppDataSnapshot() {
   };
 }
 
-export async function createManagedUser({ category, name, email, password }) {
-  const normalizedCategory = String(category).trim();
-  const normalizedName = String(name).trim();
-  const normalizedEmail = normalizeEmail(email);
-  const normalizedPassword = String(password);
+async function createUserRecord(
+  input,
+  { mustChangePassword = true, sendNotification = true } = {}
+) {
+  const normalizedCategory = normalizeCategory(input.category);
+  const profile = normalizePersonInput(input);
+  validateUserProfileForCreation(profile, normalizedCategory);
 
-  if (!["investor", "contractor"].includes(normalizedCategory)) {
-    throw new Error("User category must be investor or contractor.");
-  }
-
-  if (normalizedName.length < 2) {
-    throw new Error("Name must be at least 2 characters.");
-  }
-
-  if (!normalizedEmail.includes("@")) {
-    throw new Error("A valid email is required.");
-  }
-
-  if (normalizedPassword.length < 8) {
-    throw new Error("Password must be at least 8 characters.");
-  }
-
-  const existingUser = await getUserByEmail(normalizedEmail);
+  const existingUser = await queryOne(
+    `
+      SELECT id
+      FROM users
+      WHERE LOWER(email) = $1
+    `,
+    [profile.email]
+  );
 
   if (existingUser) {
     throw new Error("A user with that email already exists.");
   }
 
-  const passwordRecord = hashPassword(normalizedPassword);
+  const passwordRecord = hashPassword(profile.password);
   const timestamp = nowTimestamp();
   const participantId = createId("participant");
   const userId = createId("user");
+  const role = normalizedCategory === "manager" ? "manager" : "investor";
 
   await withTransaction(async (client) => {
     await client.query(
       `
-        INSERT INTO participants (id, name, category, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO participants (
+          id,
+          name,
+          category,
+          first_name,
+          middle_name,
+          last_name,
+          driver_license_number,
+          id_card_file_name,
+          id_card_mime_type,
+          id_card_data_url,
+          current_address,
+          mailing_address,
+          contact_phone,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
       `,
-      [participantId, normalizedName, normalizedCategory, timestamp, timestamp]
+      [
+        participantId,
+        profile.fullName,
+        normalizedCategory,
+        profile.firstName,
+        profile.middleName || null,
+        profile.lastName,
+        profile.driverLicenseNumber,
+        profile.idCardFile?.fileName ?? null,
+        profile.idCardFile?.mimeType ?? null,
+        profile.idCardFile?.dataUrl ?? null,
+        profile.currentAddress,
+        profile.mailingAddress,
+        profile.contactPhone,
+        timestamp,
+        timestamp
+      ]
     );
 
     await client.query(
@@ -600,24 +855,272 @@ export async function createManagedUser({ category, name, email, password }) {
           password_salt,
           password_hash,
           is_active,
+          must_change_password,
           created_at,
           updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       `,
       [
         userId,
         participantId,
-        "investor",
-        normalizedEmail,
+        role,
+        profile.email,
         passwordRecord.salt,
         passwordRecord.hash,
         1,
+        mustChangePassword ? 1 : 0,
         timestamp,
         timestamp
       ]
     );
   });
+
+  const user = await getUserById(userId);
+  let notification;
+
+  if (sendNotification) {
+    try {
+      notification = await sendCredentialNotification({
+        userId,
+        participantId,
+        fullName: profile.fullName,
+        email: profile.email,
+        role,
+        temporaryPassword: profile.password
+      });
+    } catch (error) {
+      notification = {
+        status: "failed",
+        provider: "notification_error",
+        localPath: null,
+        errorMessage: error.message
+      };
+    }
+  } else {
+    notification = null;
+  }
+
+  return {
+    user,
+    notification
+  };
+}
+
+export async function createManagedUser(input) {
+  return createUserRecord(input, {
+    mustChangePassword: true,
+    sendNotification: true
+  });
+}
+
+export async function ensureInitialManagerUser() {
+  await assertDatabaseReady();
+
+  const existingManager = await queryOne(
+    `
+      SELECT id
+      FROM users
+      WHERE role = 'manager'
+        AND is_active = 1
+      LIMIT 1
+    `
+  );
+
+  if (existingManager) {
+    return {
+      created: false,
+      user: await getUserById(existingManager.id),
+      notification: null
+    };
+  }
+
+  const email = normalizeConfigValue(process.env.DEFAULT_MANAGER_EMAIL);
+  const password = normalizeConfigValue(process.env.DEFAULT_MANAGER_PASSWORD);
+  const firstName = normalizeConfigValue(process.env.DEFAULT_MANAGER_FIRST_NAME);
+  const lastName = normalizeConfigValue(process.env.DEFAULT_MANAGER_LAST_NAME);
+  const middleName = normalizeConfigValue(process.env.DEFAULT_MANAGER_MIDDLE_NAME);
+  const contactPhone = normalizeConfigValue(process.env.DEFAULT_MANAGER_PHONE);
+  const address = normalizeConfigValue(process.env.DEFAULT_MANAGER_ADDRESS);
+  const missing = [];
+
+  if (!email) {
+    missing.push("DEFAULT_MANAGER_EMAIL");
+  }
+
+  if (!password) {
+    missing.push("DEFAULT_MANAGER_PASSWORD");
+  }
+
+  if (!firstName) {
+    missing.push("DEFAULT_MANAGER_FIRST_NAME");
+  }
+
+  if (!lastName) {
+    missing.push("DEFAULT_MANAGER_LAST_NAME");
+  }
+
+  if (missing.length) {
+    throw new Error(
+      `No active manager account exists. Set ${missing.join(", ")} in .env so the initial manager can be created.`
+    );
+  }
+
+  const createdUser = await createUserRecord(
+    {
+      category: "manager",
+      firstName,
+      middleName,
+      lastName,
+      email,
+      password,
+      contactPhone,
+      currentAddress: address,
+      mailingAddress: address
+    },
+    {
+      mustChangePassword: false,
+      sendNotification: true
+    }
+  );
+
+  return {
+    created: true,
+    ...createdUser
+  };
+}
+
+export async function markUserLogin(userId) {
+  await pool.query(
+    `
+      UPDATE users
+      SET last_login_at = $1
+      WHERE id = $2
+    `,
+    [nowTimestamp(), userId]
+  );
+}
+
+export async function updateOwnProfile(userId, input) {
+  const currentUser = await getUserById(userId);
+
+  if (!currentUser) {
+    throw new Error("User not found.");
+  }
+
+  const profile = normalizePersonInput(input);
+  const payoutMethod = profile.payoutMethod;
+
+  if (profile.firstName.length < 2) {
+    throw new Error("First name must be at least 2 characters.");
+  }
+
+  if (profile.lastName.length < 2) {
+    throw new Error("Last name must be at least 2 characters.");
+  }
+
+  if (!profile.email.includes("@")) {
+    throw new Error("A valid email is required.");
+  }
+
+  if (payoutMethod && !["bank", "zelle", "cash_app", "other"].includes(payoutMethod)) {
+    throw new Error("Preferred payout method is invalid.");
+  }
+
+  const existingUser = await queryOne(
+    `
+      SELECT id
+      FROM users
+      WHERE LOWER(email) = $1
+        AND id <> $2
+    `,
+    [profile.email, userId]
+  );
+
+  if (existingUser) {
+    throw new Error("That email address is already in use.");
+  }
+
+  const timestamp = nowTimestamp();
+
+  await withTransaction(async (client) => {
+    await client.query(
+      `
+        UPDATE participants
+        SET
+          name = $1,
+          first_name = $2,
+          middle_name = $3,
+          last_name = $4,
+          current_address = $5,
+          mailing_address = $6,
+          contact_phone = $7,
+          payout_method = $8,
+          bank_account_name = $9,
+          bank_name = $10,
+          bank_routing_number = $11,
+          bank_account_number = $12,
+          zelle_details = $13,
+          cash_app_handle = $14,
+          payout_notes = $15,
+          updated_at = $16
+        WHERE id = $17
+      `,
+      [
+        profile.fullName,
+        profile.firstName,
+        profile.middleName || null,
+        profile.lastName,
+        profile.currentAddress,
+        profile.mailingAddress,
+        profile.contactPhone,
+        payoutMethod,
+        profile.bankAccountName,
+        profile.bankName,
+        profile.bankRoutingNumber,
+        profile.bankAccountNumber,
+        profile.zelleDetails,
+        profile.cashAppHandle,
+        profile.payoutNotes,
+        timestamp,
+        currentUser.participantId
+      ]
+    );
+
+    await client.query(
+      `
+        UPDATE users
+        SET email = $1, updated_at = $2
+        WHERE id = $3
+      `,
+      [profile.email, timestamp, userId]
+    );
+  });
+
+  return getUserById(userId);
+}
+
+export async function updateUserPassword(userId, newPassword) {
+  const normalizedPassword = String(newPassword ?? "");
+
+  if (normalizedPassword.length < 8) {
+    throw new Error("New password must be at least 8 characters.");
+  }
+
+  const passwordRecord = hashPassword(normalizedPassword);
+
+  await pool.query(
+    `
+      UPDATE users
+      SET
+        password_salt = $1,
+        password_hash = $2,
+        must_change_password = 0,
+        updated_at = $3
+      WHERE id = $4
+    `,
+    [passwordRecord.salt, passwordRecord.hash, nowTimestamp(), userId]
+  );
 
   return getUserById(userId);
 }
@@ -673,6 +1176,10 @@ export async function createDealAllocation(input) {
 
   if (!participant) {
     throw new Error("Participant not found.");
+  }
+
+  if (!["investor", "contractor"].includes(participant.category)) {
+    throw new Error("Only investor and contractor participants can be allocated to deals.");
   }
 
   const existingPosition = await queryOne(
@@ -788,26 +1295,7 @@ export async function createDealAllocation(input) {
   });
 }
 
-export async function updateDeal(dealId, input) {
-  const id = String(dealId ?? "").trim();
-
-  if (!id) {
-    throw new Error("Deal id is required.");
-  }
-
-  const existingDeal = await queryOne(
-    `
-      SELECT id
-      FROM deals
-      WHERE id = $1
-    `,
-    [id]
-  );
-
-  if (!existingDeal) {
-    throw new Error("Deal not found.");
-  }
-
+function normalizeDealInput(input) {
   const name = String(input.name ?? "").trim();
   const location = String(input.location ?? "").trim();
   const currentPhase = String(input.currentPhase ?? "").trim();
@@ -854,6 +1342,130 @@ export async function updateDeal(dealId, input) {
     throw new Error("Timeline progress must be between 0 and 100.");
   }
 
+  return {
+    name,
+    location,
+    currentPhase,
+    status,
+    fundedOn,
+    projectedExitOn: projectedExitOn || null,
+    actualExitOn: actualExitOn || null,
+    debt: roundNumber(debt),
+    totalProjectCost: roundNumber(totalProjectCost),
+    salePrice: roundNumber(salePrice),
+    holdMonths: Math.round(holdMonths),
+    prefRate: roundNumber(prefRate),
+    timelineProgress: Math.round(timelineProgress)
+  };
+}
+
+export async function createDeal(input) {
+  const deal = normalizeDealInput(input);
+  const existingDeal = await queryOne(
+    `
+      SELECT id
+      FROM deals
+      WHERE LOWER(name) = LOWER($1)
+    `,
+    [deal.name]
+  );
+
+  if (existingDeal) {
+    throw new Error("A deal with that name already exists.");
+  }
+
+  const timestamp = nowTimestamp();
+  const dealId = createId("deal");
+
+  await pool.query(
+    `
+      INSERT INTO deals (
+        id,
+        name,
+        location,
+        total_equity,
+        debt,
+        total_project_cost,
+        sale_price,
+        hold_months,
+        pref_rate,
+        status,
+        current_phase,
+        funded_on,
+        projected_exit_on,
+        actual_exit_on,
+        timeline_progress,
+        created_at,
+        updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+    `,
+    [
+      dealId,
+      deal.name,
+      deal.location,
+      0,
+      deal.debt,
+      deal.totalProjectCost,
+      deal.salePrice,
+      deal.holdMonths,
+      deal.prefRate,
+      deal.status,
+      deal.currentPhase,
+      deal.fundedOn,
+      deal.projectedExitOn,
+      deal.actualExitOn,
+      deal.timelineProgress,
+      timestamp,
+      timestamp
+    ]
+  );
+
+  return queryOne(
+    `
+      SELECT id, name
+      FROM deals
+      WHERE id = $1
+    `,
+    [dealId]
+  );
+}
+
+export async function updateDeal(dealId, input) {
+  const id = String(dealId ?? "").trim();
+
+  if (!id) {
+    throw new Error("Deal id is required.");
+  }
+
+  const existingDeal = await queryOne(
+    `
+      SELECT id
+      FROM deals
+      WHERE id = $1
+    `,
+    [id]
+  );
+
+  if (!existingDeal) {
+    throw new Error("Deal not found.");
+  }
+
+  const deal = normalizeDealInput(input);
+  const duplicateDeal = await queryOne(
+    `
+      SELECT id
+      FROM deals
+      WHERE LOWER(name) = LOWER($1)
+        AND id <> $2
+    `,
+    [deal.name, id]
+  );
+
+  if (duplicateDeal) {
+    throw new Error("A deal with that name already exists.");
+  }
+
   await pool.query(
     `
       UPDATE deals
@@ -875,21 +1487,87 @@ export async function updateDeal(dealId, input) {
       WHERE id = $15
     `,
     [
-      name,
-      location,
-      roundNumber(debt),
-      roundNumber(totalProjectCost),
-      roundNumber(salePrice),
-      Math.round(holdMonths),
-      prefRate,
-      status,
-      currentPhase,
-      fundedOn,
-      projectedExitOn || null,
-      actualExitOn || null,
-      Math.round(timelineProgress),
+      deal.name,
+      deal.location,
+      deal.debt,
+      deal.totalProjectCost,
+      deal.salePrice,
+      deal.holdMonths,
+      deal.prefRate,
+      deal.status,
+      deal.currentPhase,
+      deal.fundedOn,
+      deal.projectedExitOn,
+      deal.actualExitOn,
+      deal.timelineProgress,
       nowTimestamp(),
       id
     ]
   );
+}
+
+export async function setUserAccountActive(userId, isActive, actingUserId) {
+  const targetUser = await getUserAccountById(userId, { includeInactive: true });
+
+  if (!targetUser) {
+    throw new Error("User not found.");
+  }
+
+  if (targetUser.id === actingUserId) {
+    throw new Error("You cannot change the status of your own account.");
+  }
+
+  const nextActive = Boolean(isActive);
+
+  if (!nextActive && targetUser.role === "manager") {
+    const activeManagers = await countActiveManagers();
+
+    if (targetUser.isActive && activeManagers <= 1) {
+      throw new Error("At least one active manager account must remain.");
+    }
+  }
+
+  await pool.query(
+    `
+      UPDATE users
+      SET is_active = $1, updated_at = $2
+      WHERE id = $3
+    `,
+    [nextActive ? 1 : 0, nowTimestamp(), userId]
+  );
+
+  return getUserAccountById(userId, { includeInactive: true });
+}
+
+export async function deleteUserAccount(userId, actingUserId) {
+  const targetUser = await getUserAccountById(userId, { includeInactive: true });
+
+  if (!targetUser) {
+    throw new Error("User not found.");
+  }
+
+  if (targetUser.id === actingUserId) {
+    throw new Error("You cannot delete your own account.");
+  }
+
+  if (targetUser.role === "manager" && targetUser.isActive) {
+    const activeManagers = await countActiveManagers();
+
+    if (activeManagers <= 1) {
+      throw new Error("At least one active manager account must remain.");
+    }
+  }
+
+  await pool.query(
+    `
+      DELETE FROM users
+      WHERE id = $1
+    `,
+    [userId]
+  );
+
+  return {
+    ok: true,
+    deletedUserId: userId
+  };
 }
