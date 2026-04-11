@@ -39,12 +39,23 @@ CREATE TABLE IF NOT EXISTS users (
   FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS password_reset_tokens (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  token_hash TEXT NOT NULL UNIQUE,
+  expires_at TIMESTAMPTZ NOT NULL,
+  used_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS deals (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
   location TEXT NOT NULL,
   total_equity REAL NOT NULL DEFAULT 0,
   debt REAL NOT NULL DEFAULT 0,
+  tax_expense REAL NOT NULL DEFAULT 0,
   debt_interest_rate REAL NOT NULL DEFAULT 0,
   total_interest_paid REAL NOT NULL DEFAULT 0,
   total_project_cost REAL NOT NULL DEFAULT 0,
@@ -104,6 +115,33 @@ CREATE TABLE IF NOT EXISTS positions (
   UNIQUE (deal_id, participant_id)
 );
 
+CREATE TABLE IF NOT EXISTS distribution_elections (
+  id TEXT PRIMARY KEY,
+  deal_id TEXT NOT NULL,
+  participant_id TEXT NOT NULL,
+  election_mode TEXT NOT NULL CHECK (
+    election_mode IN ('payout_all', 'reinvest_all', 'split_percentage', 'split_amount')
+  ),
+  reinvest_percent REAL,
+  reinvest_amount REAL,
+  rollover_target_deal_id TEXT,
+  notes TEXT,
+  submitted_by_user_id TEXT,
+  submitted_by_role TEXT CHECK (submitted_by_role IN ('investor', 'manager')),
+  reviewed_by_user_id TEXT,
+  reviewed_at TEXT,
+  manager_override INTEGER NOT NULL DEFAULT 0 CHECK (manager_override IN (0, 1)),
+  override_notes TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (deal_id) REFERENCES deals(id) ON DELETE CASCADE,
+  FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE,
+  FOREIGN KEY (rollover_target_deal_id) REFERENCES deals(id) ON DELETE SET NULL,
+  FOREIGN KEY (submitted_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+  FOREIGN KEY (reviewed_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+  UNIQUE (deal_id, participant_id)
+);
+
 CREATE TABLE IF NOT EXISTS contractor_participation (
   id TEXT PRIMARY KEY,
   deal_id TEXT NOT NULL,
@@ -139,6 +177,22 @@ CREATE TABLE IF NOT EXISTS email_notifications (
   FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS company_resources (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  resource_type TEXT NOT NULL CHECK (resource_type IN ('bylaw_document', 'announcement')),
+  summary_text TEXT,
+  body_text TEXT,
+  file_name TEXT,
+  file_mime_type TEXT,
+  file_data_url TEXT,
+  published_at TEXT NOT NULL,
+  created_by_user_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
 CREATE TABLE IF NOT EXISTS deal_issues (
   id TEXT PRIMARY KEY,
   deal_id TEXT NOT NULL,
@@ -166,11 +220,19 @@ CREATE TABLE IF NOT EXISTS deal_issue_votes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user_id
+  ON password_reset_tokens(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_expires_at
+  ON password_reset_tokens(expires_at);
 CREATE INDEX IF NOT EXISTS idx_positions_deal_id ON positions(deal_id);
 CREATE INDEX IF NOT EXISTS idx_positions_participant_id ON positions(participant_id);
+CREATE INDEX IF NOT EXISTS idx_distribution_elections_deal_id
+  ON distribution_elections(deal_id, participant_id);
 CREATE INDEX IF NOT EXISTS idx_contractor_deal_id ON contractor_participation(deal_id);
 CREATE INDEX IF NOT EXISTS idx_timeline_deal_id ON deal_timeline_items(deal_id);
 CREATE INDEX IF NOT EXISTS idx_promote_tiers_deal_id ON promote_tiers(deal_id);
 CREATE INDEX IF NOT EXISTS idx_email_notifications_user_id ON email_notifications(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_company_resources_published_at
+  ON company_resources(published_at DESC, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_deal_issues_deal_id ON deal_issues(deal_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_deal_issue_votes_issue_id ON deal_issue_votes(issue_id);

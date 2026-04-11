@@ -8,18 +8,24 @@ import { assertDatabaseReady } from "./migrations.js";
 import { closeDatabasePool } from "./postgres.js";
 import {
   castDealIssueVote,
+  createCompanyResource,
   createDeal,
   createDealAllocation,
   createDealIssue,
   createManagedUser,
+  deleteCompanyResource,
   deleteDeal,
   deleteUserAccount,
   ensureInitialManagerUser,
   getAppDataSnapshot,
+  getCompanyResourceDownload,
   getUserByEmail,
   getUserById,
   markUserLogin,
+  requestPasswordReset,
+  resetPasswordWithToken,
   setUserAccountActive,
+  upsertDistributionElection,
   updateOwnProfile,
   updateDeal,
   updateUserPassword
@@ -112,6 +118,35 @@ function verifyPassword(user, password) {
   const actual = scryptSync(password, user.passwordSalt, 64);
 
   return expected.length === actual.length && timingSafeEqual(expected, actual);
+}
+
+function buildAttachmentDisposition(fileName) {
+  const safeFileName = String(fileName ?? "download")
+    .replaceAll('"', "")
+    .replaceAll("\r", "")
+    .replaceAll("\n", "");
+
+  return `attachment; filename="${safeFileName}"`;
+}
+
+function decodeDataUrl(dataUrl) {
+  const match = String(dataUrl ?? "").match(/^data:([^;,]+)?(;base64)?,([\s\S]+)$/);
+
+  if (!match) {
+    throw new Error("Stored file payload is invalid.");
+  }
+
+  const mimeType = match[1] || "application/octet-stream";
+  const isBase64 = Boolean(match[2]);
+  const payload = match[3] || "";
+  const buffer = isBase64
+    ? Buffer.from(payload, "base64")
+    : Buffer.from(decodeURIComponent(payload), "utf8");
+
+  return {
+    mimeType,
+    buffer
+  };
 }
 
 function createSession(userId) {
@@ -289,6 +324,60 @@ const server = createServer(async (request, response) => {
     const issueVoteMatch = url.pathname.match(/^\/api\/issues\/([^/]+)\/vote$/);
     const userStatusMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)\/status$/);
     const userDeleteMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)$/);
+    const resourceDeleteMatch = url.pathname.match(/^\/api\/admin\/resources\/([^/]+)$/);
+    const resourceDownloadMatch = url.pathname.match(/^\/api\/resources\/([^/]+)\/download$/);
+    const adminDistributionElectionMatch = url.pathname.match(
+      /^\/api\/admin\/deals\/([^/]+)\/distribution-elections\/([^/]+)$/
+    );
+    const distributionElectionMatch = url.pathname.match(
+      /^\/api\/deals\/([^/]+)\/distribution-election$/
+    );
+
+    if (method === "POST" && url.pathname === "/api/password/forgot") {
+      const body = await readJsonBody(request);
+
+      if (!body || typeof body.email !== "string") {
+        sendJson(response, 400, { error: "A valid email is required." });
+        return;
+      }
+
+      try {
+        await requestPasswordReset(body.email);
+        sendJson(response, 200, {
+          ok: true,
+          message:
+            "If an active account matches that email, a password reset link has been sent."
+        });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/password/reset") {
+      const body = await readJsonBody(request);
+
+      if (
+        !body ||
+        typeof body.token !== "string" ||
+        typeof body.newPassword !== "string"
+      ) {
+        sendJson(response, 400, {
+          error: "A valid reset token and new password are required."
+        });
+        return;
+      }
+
+      try {
+        await resetPasswordWithToken(body.token, body.newPassword);
+        sendJson(response, 200, { ok: true });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
 
     if (method === "POST" && url.pathname === "/api/login") {
       const body = await readJsonBody(request);
@@ -362,6 +451,32 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    if (method === "GET" && resourceDownloadMatch) {
+      const user = await requireUnlockedUser(request, response);
+
+      if (!user) {
+        return;
+      }
+
+      try {
+        const resource = await getCompanyResourceDownload(
+          decodeURIComponent(resourceDownloadMatch[1])
+        );
+        const decoded = decodeDataUrl(resource.fileDataUrl);
+
+        response.writeHead(200, {
+          "Content-Type": resource.fileMimeType || decoded.mimeType,
+          "Content-Disposition": buildAttachmentDisposition(resource.fileName),
+          "Cache-Control": "private, max-age=0, must-revalidate"
+        });
+        response.end(decoded.buffer);
+      } catch (error) {
+        sendJson(response, 404, { error: error.message });
+      }
+
+      return;
+    }
+
     if (method === "POST" && url.pathname === "/api/calculator") {
       const user = await requireUnlockedUser(request, response);
 
@@ -387,7 +502,8 @@ const server = createServer(async (request, response) => {
         {
           salePrice: body.salePrice,
           holdMonths: body.holdMonths,
-          prefRate: body.prefRate
+          prefRate: body.prefRate,
+          taxExpense: body.taxExpense
         },
         snapshot
       );
@@ -460,6 +576,41 @@ const server = createServer(async (request, response) => {
       try {
         const updatedUser = await updateOwnProfile(user.id, body);
         sendJson(response, 200, { user: stripUserSecrets(updatedUser) });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "PUT" && distributionElectionMatch) {
+      const user = await requireUnlockedUser(request, response);
+
+      if (!user) {
+        return;
+      }
+
+      if (user.role === "manager") {
+        sendJson(response, 403, {
+          error: "Managers cannot save investor distribution elections."
+        });
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const election = await upsertDistributionElection(
+          decodeURIComponent(distributionElectionMatch[1]),
+          user.id,
+          body
+        );
+        sendJson(response, 200, { election });
       } catch (error) {
         sendJson(response, 400, { error: error.message });
       }
@@ -542,6 +693,30 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    if (method === "POST" && url.pathname === "/api/admin/resources") {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const resource = await createCompanyResource(body, manager.id);
+        sendJson(response, 201, { resource });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
     if (method === "POST" && url.pathname === "/api/admin/issues") {
       const manager = await requireManager(request, response);
 
@@ -559,6 +734,37 @@ const server = createServer(async (request, response) => {
       try {
         const result = await createDealIssue(body, manager.id);
         sendJson(response, 201, result);
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "PUT" && adminDistributionElectionMatch) {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const election = await upsertDistributionElection(
+          decodeURIComponent(adminDistributionElectionMatch[1]),
+          manager.id,
+          {
+            ...body,
+            participantId: decodeURIComponent(adminDistributionElectionMatch[2])
+          }
+        );
+        sendJson(response, 200, { election });
       } catch (error) {
         sendJson(response, 400, { error: error.message });
       }
@@ -608,6 +814,23 @@ const server = createServer(async (request, response) => {
 
       try {
         await deleteDeal(decodeURIComponent(dealUpdateMatch[1]));
+        sendJson(response, 200, { ok: true });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "DELETE" && resourceDeleteMatch) {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      try {
+        await deleteCompanyResource(decodeURIComponent(resourceDeleteMatch[1]));
         sendJson(response, 200, { ok: true });
       } catch (error) {
         sendJson(response, 400, { error: error.message });

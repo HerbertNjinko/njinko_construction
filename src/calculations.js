@@ -71,12 +71,13 @@ export function calculateWaterfall({ deal, positions, overrides = {} }) {
   const holdMonths = resolveNumber(overrides.holdMonths, deal.holdMonths);
   const prefRate = resolveNumber(overrides.prefRate, deal.prefRate);
   const debt = resolveNumber(overrides.debt, deal.debt);
+  const taxExpense = roundCurrency(Math.max(0, resolveNumber(overrides.taxExpense, deal.taxExpense)));
   const promoteTiers = (deal.promoteTiers ?? []).filter((tier) => tier.isEnabled !== false);
 
   const totalEquity = roundCurrency(
     positions.reduce((sum, position) => sum + position.contributionAmount, 0)
   );
-  const distributableEquity = roundCurrency(Math.max(0, salePrice - debt));
+  const distributableEquity = roundCurrency(Math.max(0, salePrice - debt - taxExpense));
   const capitalPool = roundCurrency(Math.min(distributableEquity, totalEquity));
   const prefTargets = positions.map((position) => ({
     positionId: position.id,
@@ -144,6 +145,7 @@ export function calculateWaterfall({ deal, positions, overrides = {} }) {
   return {
     salePrice,
     debt,
+    taxExpense,
     holdMonths,
     prefRate,
     totalEquity,
@@ -157,6 +159,10 @@ export function calculateWaterfall({ deal, positions, overrides = {} }) {
     participantResults,
     classBreakdown,
     waterfallSteps: [
+      {
+        label: "Tax expense",
+        amount: taxExpense
+      },
       {
         label: "Capital returned",
         amount: capitalPool
@@ -183,6 +189,10 @@ function getParticipantMap(data) {
 
 function getPositionResultMap(participantResults) {
   return new Map(participantResults.map((row) => [row.positionId, row]));
+}
+
+function getUserMapById(data) {
+  return new Map((data.users ?? []).map((user) => [user.id, user]));
 }
 
 function calculateCurrentPref(position, deal, asOfDate) {
@@ -213,6 +223,59 @@ function buildProfilePayload(user, participant) {
     zelleDetails: participant?.zelleDetails ?? "",
     cashAppHandle: participant?.cashAppHandle ?? "",
     payoutNotes: participant?.payoutNotes ?? ""
+  };
+}
+
+function getDistributionElectionMap(data) {
+  return new Map(
+    (data.distributionElections ?? []).map((election) => [
+      `${election.dealId}:${election.participantId}`,
+      election
+    ])
+  );
+}
+
+function buildDistributionPlan({ deal, position, participant, result, election, dealMap }) {
+  const totalPayout = roundCurrency(result?.totalPayout ?? 0);
+  const actualPayoutAmount = roundCurrency(Math.max(0, position?.distributionsToDate ?? 0));
+  let reinvestedAmount = 0;
+
+  if (election?.electionMode === "reinvest_all") {
+    reinvestedAmount = totalPayout;
+  } else if (election?.electionMode === "split_percentage") {
+    reinvestedAmount = roundCurrency(totalPayout * (election.reinvestPercent ?? 0));
+  } else if (election?.electionMode === "split_amount") {
+    reinvestedAmount = roundCurrency(election.reinvestAmount ?? 0);
+  }
+
+  reinvestedAmount = roundCurrency(Math.max(0, Math.min(reinvestedAmount, totalPayout)));
+
+  return {
+    hasElection: Boolean(election),
+    canSetDistributionElection: deal.status === "sold" && totalPayout > 0,
+    electionMode: election?.electionMode ?? null,
+    reinvestPercent: election?.reinvestPercent ?? null,
+    requestedReinvestAmount: election?.reinvestAmount ?? null,
+    actualPayoutAmount,
+    reinvestedAmount,
+    pendingDistributionAmount: roundCurrency(
+      Math.max(totalPayout - actualPayoutAmount - reinvestedAmount, 0)
+    ),
+    rolloverTargetDealId: election?.rolloverTargetDealId ?? null,
+    rolloverTargetDealName: election?.rolloverTargetDealId
+      ? dealMap.get(election.rolloverTargetDealId)?.name ?? null
+      : null,
+    notes: election?.notes ?? "",
+    submittedByUserId: election?.submittedByUserId ?? null,
+    submittedByRole: election?.submittedByRole ?? null,
+    reviewedByUserId: election?.reviewedByUserId ?? null,
+    reviewedAt: election?.reviewedAt ?? null,
+    managerOverride: Boolean(election?.managerOverride),
+    overrideNotes: election?.overrideNotes ?? "",
+    createdAt: election?.createdAt ?? null,
+    updatedAt: election?.updatedAt ?? null,
+    payoutMethod: participant?.payoutMethod ?? "",
+    totalPayout
   };
 }
 
@@ -298,10 +361,10 @@ function buildGovernanceIssues(data, viewerParticipantId, { includeAll = false }
       const isEligibleToVote = myInvestment > 0;
       let status = "open";
 
-      if (eligibleInvestment > 0) {
+      if (isClosed && eligibleInvestment > 0) {
         if (yesPct >= issue.approvalThreshold) {
           status = "passed";
-        } else if (yesPct + pendingPct < issue.approvalThreshold) {
+        } else {
           status = "failed";
         }
       }
@@ -358,7 +421,7 @@ function buildGovernanceIssues(data, viewerParticipantId, { includeAll = false }
         pendingPct,
         status,
         isEligibleToVote,
-        canVote: isEligibleToVote && status === "open" && !isClosed,
+        canVote: isEligibleToVote && !isClosed,
         investorVotes,
         myVote,
         myWeightPct: eligibleInvestment > 0 ? myInvestment / eligibleInvestment : 0,
@@ -371,9 +434,16 @@ function buildGovernanceIssues(data, viewerParticipantId, { includeAll = false }
 export function buildInvestorDashboard(user, data = seedData) {
   const participantMap = getParticipantMap(data);
   const dealMap = new Map(data.deals.map((deal) => [deal.id, deal]));
+  const distributionElectionMap = getDistributionElectionMap(data);
   const participant = participantMap.get(user.participantId);
   const governanceIssues = buildGovernanceIssues(data, user.participantId);
   const issuesByDeal = new Map();
+  const reinvestmentTargets = data.deals
+    .filter((deal) => deal.status !== "sold")
+    .map((deal) => ({
+      id: deal.id,
+      name: deal.name
+    }));
 
   for (const issue of governanceIssues) {
     if (!issuesByDeal.has(issue.dealId)) {
@@ -392,6 +462,14 @@ export function buildInvestorDashboard(user, data = seedData) {
     const dealPositions = data.positions.filter((item) => item.dealId === deal.id);
     const waterfall = calculateWaterfall({ deal, positions: dealPositions });
     const result = getPositionResultMap(waterfall.participantResults).get(position.id);
+    const distributionPlan = buildDistributionPlan({
+      deal,
+      position,
+      participant,
+      result,
+      election: distributionElectionMap.get(`${position.dealId}:${position.participantId}`) ?? null,
+      dealMap
+    });
     const exitLabel = deal.status === "sold" ? "Sale price" : "Projected sale price";
 
     return {
@@ -414,7 +492,11 @@ export function buildInvestorDashboard(user, data = seedData) {
         estimatedTotalReturn: result.totalPayout,
         capitalReturned: result.capitalReturned,
         profitEarned: roundCurrency(result.prefEarned + result.profitShare),
-        totalPayout: result.totalPayout
+        totalPayout: result.totalPayout,
+        actualPayoutAmount: distributionPlan.actualPayoutAmount,
+        reinvestedAmount: distributionPlan.reinvestedAmount,
+        pendingDistributionAmount: distributionPlan.pendingDistributionAmount,
+        distributionElection: distributionPlan
       },
       projectSummary: {
         totalProjectCost: deal.totalProjectCost,
@@ -422,6 +504,7 @@ export function buildInvestorDashboard(user, data = seedData) {
         salePriceLabel: exitLabel,
         totalEquity: waterfall.totalEquity,
         debt: deal.debt,
+        taxExpense: deal.taxExpense ?? 0,
         debtInterestRate: deal.debtInterestRate ?? 0,
         totalInterestPaid: deal.totalInterestPaid ?? 0,
         holdMonths: deal.holdMonths,
@@ -429,6 +512,7 @@ export function buildInvestorDashboard(user, data = seedData) {
         fundedOn: deal.fundedOn,
         exitOn: deal.actualExitOn ?? deal.projectedExitOn
       },
+      reinvestmentTargets: reinvestmentTargets.filter((item) => item.id !== deal.id),
       privacyNote:
         "Other investor contributions, bank balances, and internal cost detail remain hidden."
     };
@@ -440,14 +524,14 @@ export function buildInvestorDashboard(user, data = seedData) {
   const totalReturned = roundCurrency(
     projects
       .filter((project) => project.status === "sold")
-      .reduce((sum, project) => sum + project.personalPosition.totalPayout, 0)
+      .reduce((sum, project) => sum + project.personalPosition.profitEarned, 0)
   );
   const activeInvestments = projects.filter((project) => project.status !== "sold").length;
   const currentPrefEarned = roundCurrency(
     projects.reduce((sum, project) => sum + project.personalPosition.prefEarned, 0)
   );
   const totalAmountPayout = roundCurrency(
-    projects.reduce((sum, project) => sum + project.personalPosition.totalPayout, 0)
+    visiblePositions.reduce((sum, position) => sum + (position.distributionsToDate ?? 0), 0)
   );
 
   return {
@@ -469,6 +553,7 @@ export function buildInvestorDashboard(user, data = seedData) {
     governance: {
       issues: governanceIssues
     },
+    companyResources: data.companyResources ?? [],
     projects
   };
 }
@@ -476,9 +561,11 @@ export function buildInvestorDashboard(user, data = seedData) {
 export function buildManagerDashboard(user, data = seedData) {
   const participantMap = getParticipantMap(data);
   const userMap = new Map(data.users.map((item) => [item.participantId, item]));
+  const userMapById = getUserMapById(data);
   const contractorMap = new Map(
     data.contractors.map((item) => [`${item.dealId}:${item.participantId}`, item])
   );
+  const distributionElectionMap = getDistributionElectionMap(data);
   const participant = participantMap.get(user.participantId);
   const governanceIssues = buildGovernanceIssues(data, user.participantId, {
     includeAll: true
@@ -505,6 +592,7 @@ export function buildManagerDashboard(user, data = seedData) {
       statusLabel: statusLabel(deal.status),
       totalEquity: waterfall.totalEquity,
       debt: deal.debt,
+      taxExpense: deal.taxExpense ?? 0,
       debtInterestRate: deal.debtInterestRate ?? 0,
       totalInterestPaid: deal.totalInterestPaid ?? 0,
       totalProjectCost: deal.totalProjectCost,
@@ -645,6 +733,97 @@ export function buildManagerDashboard(user, data = seedData) {
       return dealCompare !== 0 ? dealCompare : left.participantName.localeCompare(right.participantName);
     });
 
+  const distributionReviews = data.positions
+    .map((position) => {
+      const deal = data.deals.find((item) => item.id === position.dealId);
+      const participantRecord = participantMap.get(position.participantId);
+
+      if (!deal || deal.status !== "sold" || participantRecord?.category !== "investor") {
+        return null;
+      }
+
+      const dealPositions = data.positions.filter((item) => item.dealId === deal.id);
+      const waterfall = calculateWaterfall({ deal, positions: dealPositions });
+      const result = waterfall.participantResults.find((item) => item.positionId === position.id);
+
+      if (!result || result.totalPayout <= 0) {
+        return null;
+      }
+
+      const distribution = buildDistributionPlan({
+        deal,
+        position,
+        participant: participantRecord,
+        result,
+        election: distributionElectionMap.get(`${position.dealId}:${position.participantId}`) ?? null,
+        dealMap: new Map(data.deals.map((item) => [item.id, item]))
+      });
+      const linkedUser = userMap.get(position.participantId);
+      const submittedBy = distribution.submittedByUserId
+        ? userMapById.get(distribution.submittedByUserId)
+        : null;
+      const reviewedBy = distribution.reviewedByUserId
+        ? userMapById.get(distribution.reviewedByUserId)
+        : null;
+      const needsReview =
+        !distribution.hasElection ||
+        (distribution.submittedByRole === "investor" && !distribution.reviewedAt);
+      let reviewStatus = "No election";
+
+      if (!distribution.hasElection) {
+        reviewStatus = "No election";
+      } else if (distribution.managerOverride) {
+        reviewStatus = "Manager override";
+      } else if (distribution.reviewedAt) {
+        reviewStatus = "Reviewed";
+      } else if (distribution.submittedByRole === "investor") {
+        reviewStatus = "Pending review";
+      } else {
+        reviewStatus = "Backfilled";
+      }
+
+      return {
+        dealId: deal.id,
+        dealName: deal.name,
+        participantId: position.participantId,
+        participantName: participantRecord?.name ?? "Investor",
+        participantEmail: linkedUser?.email ?? "",
+        payoutMethod: participantRecord?.payoutMethod ?? "",
+        totalPayout: result.totalPayout,
+        capitalReturned: result.capitalReturned,
+        profitReturned: roundCurrency(result.prefEarned + result.profitShare),
+        actualPayoutAmount: distribution.actualPayoutAmount,
+        reinvestedAmount: distribution.reinvestedAmount,
+        pendingDistributionAmount: distribution.pendingDistributionAmount,
+        electionMode: distribution.electionMode,
+        reinvestPercent: distribution.reinvestPercent,
+        requestedReinvestAmount: distribution.requestedReinvestAmount,
+        rolloverTargetDealId: distribution.rolloverTargetDealId,
+        rolloverTargetDealName: distribution.rolloverTargetDealName,
+        notes: distribution.notes,
+        submittedByRole: distribution.submittedByRole,
+        submittedByName: submittedBy?.name ?? null,
+        reviewedByName: reviewedBy?.name ?? null,
+        reviewedAt: distribution.reviewedAt,
+        managerOverride: distribution.managerOverride,
+        overrideNotes: distribution.overrideNotes,
+        updatedAt: distribution.updatedAt,
+        reviewStatus,
+        needsReview,
+        reinvestmentTargets: data.deals
+          .filter((item) => item.status !== "sold" && item.id !== deal.id)
+          .map((item) => ({ id: item.id, name: item.name }))
+      };
+    })
+    .filter(Boolean)
+    .sort((left, right) => {
+      if (left.needsReview !== right.needsReview) {
+        return left.needsReview ? -1 : 1;
+      }
+
+      return String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? ""));
+    });
+
   return {
     role: user.role,
     viewer: {
@@ -665,11 +844,13 @@ export function buildManagerDashboard(user, data = seedData) {
     admin: {
       users: adminUsers,
       participants: adminParticipants,
-      allocations: adminAllocations
+      allocations: adminAllocations,
+      distributionReviews
     },
     governance: {
       issues: governanceIssues
     },
+    companyResources: data.companyResources ?? [],
     calculator: {
       deals: deals.map((deal) => ({
         id: deal.id,
@@ -677,7 +858,8 @@ export function buildManagerDashboard(user, data = seedData) {
         salePrice: deal.salePrice,
         holdMonths: deal.holdMonths,
         prefRate: deal.prefRate,
-        debt: deal.debt
+        debt: deal.debt,
+        taxExpense: deal.taxExpense ?? 0
       }))
     }
   };
@@ -713,11 +895,13 @@ export function calculateScenarioForDeal(dealId, overrides = {}, data = seedData
       salePrice: waterfall.salePrice,
       holdMonths: waterfall.holdMonths,
       prefRate: waterfall.prefRate,
-      debt: waterfall.debt
+      debt: waterfall.debt,
+      taxExpense: waterfall.taxExpense
     },
     outputs: {
       projectIrr: waterfall.projectIrr,
       distributableEquity: waterfall.distributableEquity,
+      taxExpense: waterfall.taxExpense,
       sponsorPromote: waterfall.sponsorPromote,
       investorProfitPool: waterfall.investorProfitPool,
       activeTier: waterfall.activeTier,

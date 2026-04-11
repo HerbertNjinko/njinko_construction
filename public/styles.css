@@ -71,6 +71,11 @@ body {
   gap: 1.25rem;
 }
 
+.login-shell {
+  min-height: calc(100vh - 5rem);
+  align-content: center;
+}
+
 .hero,
 .panel,
 .deal-card,
@@ -91,11 +96,22 @@ body {
   grid-template-columns: minmax(0, 1.25fr) minmax(280px, 0.75fr);
 }
 
+.login-hero {
+  min-height: 42rem;
+}
+
 .hero-copy {
   padding: 2.25rem;
   background:
     linear-gradient(135deg, rgba(13, 110, 99, 0.12), transparent 50%),
     linear-gradient(160deg, rgba(183, 129, 36, 0.12), transparent 55%);
+}
+
+.login-hero .hero-copy {
+  display: grid;
+  align-content: center;
+  gap: 1.15rem;
+  padding: 3rem;
 }
 
 .eyebrow {
@@ -138,6 +154,39 @@ h1 {
   font-size: 1.02rem;
 }
 
+.login-hero .hero-copy p {
+  margin-top: 0;
+}
+
+.hero-kicker {
+  max-width: 32rem;
+  color: var(--accent);
+  font-size: 0.98rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.login-brand-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+  margin-top: 0.5rem;
+}
+
+.brand-stat {
+  padding: 1rem 1.1rem;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.54);
+  border: 1px solid rgba(31, 26, 23, 0.08);
+}
+
+.brand-stat strong {
+  display: block;
+  margin-top: 0.4rem;
+  font-size: 1rem;
+  line-height: 1.4;
+}
+
 .feature-list,
 .inline-list {
   padding: 0;
@@ -170,6 +219,8 @@ h1 {
   padding: 2rem;
   background: rgba(255, 252, 249, 0.92);
   border-left: 1px solid var(--line);
+  display: grid;
+  align-content: center;
 }
 
 .login-panel h2 {
@@ -180,6 +231,34 @@ h1 {
   margin-top: 0.5rem;
   color: var(--muted);
   line-height: 1.6;
+}
+
+.auth-links {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-top: 0.85rem;
+}
+
+.text-link {
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+  box-shadow: none;
+}
+
+.text-link:hover {
+  transform: none;
+  color: #084f49;
+}
+
+.login-assistance {
+  margin-top: 1rem;
+  font-size: 0.92rem;
 }
 
 form {
@@ -344,6 +423,10 @@ button:disabled {
 
 .filter-grid-4 {
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.filter-grid-2 {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
 }
 
 .form-grid-3 {
@@ -876,17 +959,209 @@ td {
   line-height: 1.5;
 }
 
+.resource-grid {
+  display: grid;
+  gap: 1rem;
+}
+
+.resource-card {
+  padding: 1rem 1.1rem;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.62);
+  border: 1px solid rgba(31, 26, 23, 0.08);
+}
+
+.resource-body-copy {
+  margin-top: 0.85rem;
+  white-space: pre-wrap;
+  color: var(--ink);
+  line-height: 1.65;
+}
+
+.resource-actions {
+  margin-top: 1rem;
+}
+
+.resource-download-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  padding: 0.6rem 0.85rem;
+  text-decoration: none;
+  transition: transform 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
+}
+
+.resource-download-link:hover {
+  transform: translateY(-1px);
+}
+
+.manager-layout {
+  display: grid;
+  grid-template-columns: minmax(240px, 280px) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.manager-nav-panel {
+  position: sticky;
+  top: 1rem;
+}
+
+.manager-nav-list {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.manager-nav-button {
+  width: 100%;
+  display: grid;
+  gap: 0.25rem;
+  text-align: left;
+  border-radius: 18px;
+  border: 1px solid rgba(31, 26, 23, 0.1);
+  background: rgba(255, 255, 255, 0.55);
+  padding: 0.95rem 1rem;
+  cursor: pointer;
+  transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
+}
+
+.manager-nav-button:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 16px 30px rgba(16, 48, 43, 0.08);
+}
+
+.manager-nav-button.active {
+  border-color: rgba(17, 95, 84, 0.28);
+  background: linear-gradient(180deg, rgba(233, 241, 237, 0.95), rgba(255, 255, 255, 0.72));
+  box-shadow: 0 18px 34px rgba(16, 48, 43, 0.12);
+}
+
+.manager-nav-label {
+  font-size: 0.96rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.manager-nav-copy {
+  font-size: 0.86rem;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+.manager-page-column {
+  display: grid;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.manager-page-intro {
+  padding: 1.15rem 1.25rem;
+}
+
+.distribution-form {
+  margin-top: 1rem;
+}
+
+.distribution-review-list {
+  display: grid;
+  gap: 1rem;
+}
+
+.distribution-review-card {
+  border-radius: 22px;
+  border: 1px solid rgba(31, 26, 23, 0.08);
+  background: rgba(255, 255, 255, 0.62);
+  overflow: hidden;
+}
+
+.distribution-review-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.1rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.distribution-review-toolbar {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.8rem;
+}
+
+.distribution-review-body {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem 1.1rem 1.1rem;
+}
+
+.distribution-review-meta {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.9rem 1rem;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px solid var(--line);
+}
+
+.distribution-review-meta p {
+  margin: 0;
+}
+
+.review-status-pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.74rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border: 1px solid transparent;
+}
+
+.review-status-pill.pending {
+  background: rgba(206, 156, 31, 0.12);
+  color: #8b6407;
+  border-color: rgba(206, 156, 31, 0.22);
+}
+
+.review-status-pill.reviewed {
+  background: rgba(15, 92, 80, 0.1);
+  color: #0f5c50;
+  border-color: rgba(15, 92, 80, 0.18);
+}
+
+.review-status-pill.override {
+  background: rgba(19, 70, 132, 0.1);
+  color: #134684;
+  border-color: rgba(19, 70, 132, 0.18);
+}
+
 @media (max-width: 900px) {
+  .manager-layout,
   .hero,
   .calculator-layout {
     grid-template-columns: 1fr;
   }
 
+  .login-hero {
+    min-height: auto;
+  }
+
   .login-panel,
+  .manager-nav-panel,
   .calculator-form {
     border-left: 0;
     border-right: 0;
     border-top: 1px solid var(--line);
+  }
+
+  .manager-nav-panel {
+    position: static;
+  }
+
+  .manager-nav-list {
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   }
 }
 
@@ -901,9 +1176,15 @@ td {
   .panel,
   .deal-head,
   .deal-body,
+  .distribution-review-head,
+  .distribution-review-body,
   .calculator-form,
   .calculator-results {
     padding: 1.15rem;
+  }
+
+  .login-hero .hero-copy {
+    padding: 1.5rem 1.15rem;
   }
 
   .section-head,
@@ -914,6 +1195,12 @@ td {
   .section-tools {
     width: 100%;
     justify-content: flex-start;
+  }
+
+  .distribution-review-head,
+  .distribution-review-toolbar {
+    flex-direction: column;
+    align-items: flex-start;
   }
 
   h1 {

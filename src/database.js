@@ -1,9 +1,17 @@
-import { randomBytes, randomUUID, scryptSync } from "node:crypto";
+import { createHash, randomBytes, randomUUID, scryptSync } from "node:crypto";
 
+import { calculateWaterfall } from "./calculations.js";
 import { seedData } from "./data.js";
 import { assertDatabaseReady } from "./migrations.js";
-import { sendCredentialNotification, sendIssueCreatedNotification } from "./notifications.js";
+import {
+  sendCredentialNotification,
+  sendDistributionElectionAlertNotification,
+  sendIssueCreatedNotification,
+  sendPasswordResetNotification
+} from "./notifications.js";
 import { pool, queryAll, queryOne, withTransaction } from "./postgres.js";
+
+const PASSWORD_RESET_TTL_MINUTES = 60;
 
 function nowTimestamp() {
   return new Date().toISOString();
@@ -35,6 +43,16 @@ function roundNumber(value) {
 
 function createId(prefix) {
   return `${prefix}-${randomUUID()}`;
+}
+
+function hashResetToken(token) {
+  return createHash("sha256").update(String(token ?? "")).digest("hex");
+}
+
+function buildPasswordResetUrl(token) {
+  const appUrl = normalizeConfigValue(process.env.APP_URL) || `http://localhost:${process.env.PORT ?? 3000}`;
+  const separator = appUrl.includes("?") ? "&" : "?";
+  return `${appUrl}${separator}resetToken=${encodeURIComponent(token)}`;
 }
 
 function hashPassword(password) {
@@ -104,6 +122,35 @@ function normalizeIdCardFile(file) {
 
   if (!Number.isFinite(size) || size <= 0 || size > 3_000_000) {
     throw new Error("ID card uploads must be smaller than 3 MB.");
+  }
+
+  return {
+    fileName,
+    mimeType,
+    dataUrl
+  };
+}
+
+function normalizeResourceFile(file) {
+  if (!file || typeof file !== "object") {
+    return null;
+  }
+
+  const fileName = normalizeOptionalText(file.name);
+  const mimeType = normalizeOptionalText(file.type);
+  const dataUrl = normalizeOptionalText(file.dataUrl);
+  const size = Number(file.size ?? 0);
+
+  if (!fileName || !mimeType || !dataUrl) {
+    throw new Error("Uploads must include a file name, mime type, and file data.");
+  }
+
+  if (!dataUrl.startsWith("data:")) {
+    throw new Error("Uploads must be sent as a data URL.");
+  }
+
+  if (!Number.isFinite(size) || size <= 0 || size > 10_000_000) {
+    throw new Error("Uploads must be smaller than 10 MB.");
   }
 
   return {
@@ -317,6 +364,7 @@ async function insertSeedData(executor) {
           location,
           total_equity,
           debt,
+          tax_expense,
           debt_interest_rate,
           total_interest_paid,
           total_project_cost,
@@ -332,7 +380,7 @@ async function insertSeedData(executor) {
           created_at,
           updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
       `,
       [
         deal.id,
@@ -340,6 +388,7 @@ async function insertSeedData(executor) {
         deal.location,
         deal.totalEquity,
         deal.debt,
+        deal.taxExpense ?? 0,
         deal.debtInterestRate ?? 0,
         deal.totalInterestPaid ?? 0,
         deal.totalProjectCost,
@@ -484,6 +533,86 @@ async function insertSeedData(executor) {
     );
   }
 
+  for (const resource of seedData.companyResources ?? []) {
+    await executor.query(
+      `
+        INSERT INTO company_resources (
+          id,
+          title,
+          resource_type,
+          summary_text,
+          body_text,
+          file_name,
+          file_mime_type,
+          file_data_url,
+          published_at,
+          created_by_user_id,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      `,
+      [
+        resource.id,
+        resource.title,
+        resource.resourceType,
+        resource.summary ?? null,
+        resource.bodyText ?? null,
+        resource.fileName || null,
+        resource.fileMimeType || null,
+        resource.fileDataUrl || null,
+        resource.publishedAt ?? timestamp,
+        seedData.users.find((user) => user.role === "manager")?.id ?? null,
+        timestamp,
+        timestamp
+      ]
+    );
+  }
+
+  for (const election of seedData.distributionElections ?? []) {
+    await executor.query(
+      `
+        INSERT INTO distribution_elections (
+          id,
+          deal_id,
+          participant_id,
+          election_mode,
+          reinvest_percent,
+          reinvest_amount,
+          rollover_target_deal_id,
+          notes,
+          submitted_by_user_id,
+          submitted_by_role,
+          reviewed_by_user_id,
+          reviewed_at,
+          manager_override,
+          override_notes,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+      `,
+      [
+        election.id,
+        election.dealId,
+        election.participantId,
+        election.electionMode,
+        election.reinvestPercent,
+        election.reinvestAmount,
+        election.rolloverTargetDealId ?? null,
+        election.notes ?? null,
+        election.submittedByUserId ?? null,
+        election.submittedByRole ?? null,
+        election.reviewedByUserId ?? null,
+        election.reviewedAt ?? null,
+        election.managerOverride ? 1 : 0,
+        election.overrideNotes ?? null,
+        timestamp,
+        timestamp
+      ]
+    );
+  }
+
   for (const deal of seedData.deals) {
     await syncDealEquity(deal.id, executor);
   }
@@ -514,7 +643,9 @@ export async function seedDatabase({ force = false } = {}) {
           deal_issue_votes,
           deal_issues,
           email_notifications,
+          company_resources,
           contractor_participation,
+          distribution_elections,
           positions,
           deal_timeline_items,
           promote_tiers,
@@ -598,6 +729,25 @@ async function countActiveManagers(executor = pool) {
   return Number(row?.count ?? 0);
 }
 
+async function getActiveManagerRecipients({ excludeUserId = null } = {}) {
+  return queryAll(
+    `
+      SELECT
+        users.id AS "userId",
+        users.participant_id AS "participantId",
+        users.email AS email,
+        participants.name AS "fullName"
+      FROM users
+      JOIN participants ON participants.id = users.participant_id
+      WHERE users.role = 'manager'
+        AND users.is_active = 1
+        AND ($1::text IS NULL OR users.id <> $1)
+      ORDER BY participants.name
+    `,
+    [excludeUserId]
+  );
+}
+
 export async function getUserByEmail(email) {
   const row = await queryOne(
     `
@@ -659,6 +809,7 @@ export async function getAppDataSnapshot() {
         location,
         total_equity AS "totalEquity",
         debt,
+        tax_expense AS "taxExpense",
         debt_interest_rate AS "debtInterestRate",
         total_interest_paid AS "totalInterestPaid",
         total_project_cost AS "totalProjectCost",
@@ -678,6 +829,7 @@ export async function getAppDataSnapshot() {
     ...row,
     totalEquity: Number(row.totalEquity),
     debt: Number(row.debt),
+    taxExpense: Number(row.taxExpense),
     debtInterestRate: Number(row.debtInterestRate),
     totalInterestPaid: Number(row.totalInterestPaid),
     totalProjectCost: Number(row.totalProjectCost),
@@ -781,6 +933,63 @@ export async function getAppDataSnapshot() {
     hybrid: Boolean(row.hybrid)
   }));
 
+  const distributionElections = (await queryAll(
+    `
+      SELECT
+        id,
+        deal_id AS "dealId",
+        participant_id AS "participantId",
+        election_mode AS "electionMode",
+        reinvest_percent AS "reinvestPercent",
+        reinvest_amount AS "reinvestAmount",
+        rollover_target_deal_id AS "rolloverTargetDealId",
+        notes,
+        submitted_by_user_id AS "submittedByUserId",
+        submitted_by_role AS "submittedByRole",
+        reviewed_by_user_id AS "reviewedByUserId",
+        reviewed_at AS "reviewedAt",
+        manager_override AS "managerOverride",
+        override_notes AS "overrideNotes",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM distribution_elections
+      ORDER BY updated_at DESC, id
+    `
+  )).map((row) => ({
+    ...row,
+    reinvestPercent:
+      row.reinvestPercent === null || row.reinvestPercent === undefined
+        ? null
+        : Number(row.reinvestPercent),
+    reinvestAmount:
+      row.reinvestAmount === null || row.reinvestAmount === undefined
+        ? null
+        : Number(row.reinvestAmount),
+    managerOverride: Boolean(row.managerOverride)
+  }));
+
+  const companyResources = (await queryAll(
+    `
+      SELECT
+        id,
+        title,
+        resource_type AS "resourceType",
+        summary_text AS "summaryText",
+        body_text AS "bodyText",
+        file_name AS "fileName",
+        file_mime_type AS "fileMimeType",
+        (file_name IS NOT NULL AND file_data_url IS NOT NULL) AS "hasFile",
+        published_at AS "publishedAt",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM company_resources
+      ORDER BY published_at DESC, created_at DESC, id DESC
+    `
+  )).map((row) => ({
+    ...row,
+    hasFile: Boolean(row.hasFile)
+  }));
+
   const dealIssues = (await queryAll(
     `
       SELECT
@@ -822,6 +1031,8 @@ export async function getAppDataSnapshot() {
     deals,
     positions,
     contractors,
+    distributionElections,
+    companyResources,
     dealIssues,
     issueVotes
   };
@@ -1059,7 +1270,8 @@ export async function updateOwnProfile(userId, input) {
   }
 
   const profile = normalizePersonInput(input);
-  const payoutMethod = profile.payoutMethod;
+  const isManager = currentUser.role === "manager";
+  const payoutMethod = isManager ? null : profile.payoutMethod;
 
   if (profile.firstName.length < 2) {
     throw new Error("First name must be at least 2 characters.");
@@ -1125,13 +1337,13 @@ export async function updateOwnProfile(userId, input) {
         profile.mailingAddress,
         profile.contactPhone,
         payoutMethod,
-        profile.bankAccountName,
-        profile.bankName,
-        profile.bankRoutingNumber,
-        profile.bankAccountNumber,
-        profile.zelleDetails,
-        profile.cashAppHandle,
-        profile.payoutNotes,
+        isManager ? null : profile.bankAccountName,
+        isManager ? null : profile.bankName,
+        isManager ? null : profile.bankRoutingNumber,
+        isManager ? null : profile.bankAccountNumber,
+        isManager ? null : profile.zelleDetails,
+        isManager ? null : profile.cashAppHandle,
+        isManager ? null : profile.payoutNotes,
         timestamp,
         currentUser.participantId
       ]
@@ -1173,6 +1385,135 @@ export async function updateUserPassword(userId, newPassword) {
   );
 
   return getUserById(userId);
+}
+
+export async function requestPasswordReset(email) {
+  const normalizedEmail = normalizeEmail(email);
+
+  if (!normalizedEmail.includes("@")) {
+    throw new Error("A valid email is required.");
+  }
+
+  const user = await getUserByEmail(normalizedEmail);
+
+  if (!user) {
+    return {
+      requested: true,
+      notification: null
+    };
+  }
+
+  const rawToken = randomBytes(32).toString("hex");
+  const tokenHash = hashResetToken(rawToken);
+  const tokenId = createId("reset");
+  const createdAt = new Date();
+  const expiresAt = new Date(createdAt.getTime() + PASSWORD_RESET_TTL_MINUTES * 60 * 1000);
+
+  await withTransaction(async (client) => {
+    await client.query(
+      `
+        UPDATE password_reset_tokens
+        SET used_at = $1
+        WHERE user_id = $2
+          AND used_at IS NULL
+      `,
+      [createdAt.toISOString(), user.id]
+    );
+
+    await client.query(
+      `
+        INSERT INTO password_reset_tokens (
+          id,
+          user_id,
+          token_hash,
+          expires_at,
+          created_at
+        )
+        VALUES ($1, $2, $3, $4, $5)
+      `,
+      [tokenId, user.id, tokenHash, expiresAt.toISOString(), createdAt.toISOString()]
+    );
+  });
+
+  const notification = await sendPasswordResetNotification({
+    userId: user.id,
+    participantId: user.participantId,
+    fullName: user.name,
+    email: user.email,
+    resetUrl: buildPasswordResetUrl(rawToken),
+    expiresInMinutes: PASSWORD_RESET_TTL_MINUTES
+  });
+
+  return {
+    requested: true,
+    notification
+  };
+}
+
+export async function resetPasswordWithToken(token, newPassword) {
+  const normalizedToken = String(token ?? "").trim();
+  const normalizedPassword = String(newPassword ?? "");
+
+  if (!normalizedToken) {
+    throw new Error("A valid password reset token is required.");
+  }
+
+  if (normalizedPassword.length < 8) {
+    throw new Error("New password must be at least 8 characters.");
+  }
+
+  const tokenHash = hashResetToken(normalizedToken);
+  const resetRecord = await queryOne(
+    `
+      SELECT
+        password_reset_tokens.id AS id,
+        password_reset_tokens.user_id AS "userId",
+        users.is_active AS "isActive"
+      FROM password_reset_tokens
+      JOIN users ON users.id = password_reset_tokens.user_id
+      WHERE password_reset_tokens.token_hash = $1
+        AND password_reset_tokens.used_at IS NULL
+        AND password_reset_tokens.expires_at > NOW()
+      LIMIT 1
+    `,
+    [tokenHash]
+  );
+
+  if (!resetRecord || !Boolean(resetRecord.isActive)) {
+    throw new Error("This password reset link is invalid or has expired.");
+  }
+
+  const passwordRecord = hashPassword(normalizedPassword);
+  const usedAt = nowTimestamp();
+
+  await withTransaction(async (client) => {
+    await client.query(
+      `
+        UPDATE users
+        SET
+          password_salt = $1,
+          password_hash = $2,
+          must_change_password = 0,
+          updated_at = $3
+        WHERE id = $4
+      `,
+      [passwordRecord.salt, passwordRecord.hash, usedAt, resetRecord.userId]
+    );
+
+    await client.query(
+      `
+        UPDATE password_reset_tokens
+        SET used_at = $1
+        WHERE user_id = $2
+          AND used_at IS NULL
+      `,
+      [usedAt, resetRecord.userId]
+    );
+  });
+
+  return {
+    ok: true
+  };
 }
 
 export async function createDealAllocation(input) {
@@ -1354,6 +1695,7 @@ function normalizeDealInput(input) {
   const projectedExitOn = String(input.projectedExitOn ?? "").trim();
   const actualExitOn = String(input.actualExitOn ?? "").trim();
   const debt = Number(input.debt);
+  const taxExpense = Number(input.taxExpense ?? 0);
   const debtInterestRate = Number(input.debtInterestRate ?? 0);
   const totalInterestPaid = Number(input.totalInterestPaid ?? 0);
   const totalProjectCost = Number(input.totalProjectCost);
@@ -1372,6 +1714,10 @@ function normalizeDealInput(input) {
 
   if (!Number.isFinite(debt) || debt < 0) {
     throw new Error("Debt must be zero or greater.");
+  }
+
+  if (!Number.isFinite(taxExpense) || taxExpense < 0) {
+    throw new Error("Tax expense must be zero or greater.");
   }
 
   if (!Number.isFinite(debtInterestRate) || debtInterestRate < 0 || debtInterestRate > 1) {
@@ -1411,6 +1757,7 @@ function normalizeDealInput(input) {
     projectedExitOn: projectedExitOn || null,
     actualExitOn: actualExitOn || null,
     debt: roundNumber(debt),
+    taxExpense: roundNumber(taxExpense),
     debtInterestRate: roundNumber(debtInterestRate),
     totalInterestPaid: roundNumber(totalInterestPaid),
     totalProjectCost: roundNumber(totalProjectCost),
@@ -1469,6 +1816,85 @@ function normalizeVoteChoice(value) {
   }
 
   return voteChoice;
+}
+
+function normalizeCompanyResourceInput(input) {
+  const title = String(input.title ?? "").trim();
+  const resourceType = String(input.resourceType ?? "").trim();
+  const summaryText = normalizeOptionalText(input.summaryText ?? input.summary);
+  const bodyText = normalizeOptionalText(input.bodyText);
+  const resourceFile = normalizeResourceFile(input.resourceFile);
+
+  if (!title) {
+    throw new Error("A resource title is required.");
+  }
+
+  if (!["bylaw_document", "announcement"].includes(resourceType)) {
+    throw new Error("Resource type must be either bylaw document or announcement.");
+  }
+
+  if (resourceType === "bylaw_document" && !resourceFile) {
+    throw new Error("Bylaw documents must include an uploaded file.");
+  }
+
+  if (resourceType === "announcement" && !summaryText && !bodyText && !resourceFile) {
+    throw new Error("Announcements must include text or an attachment.");
+  }
+
+  return {
+    title,
+    resourceType,
+    summaryText,
+    bodyText,
+    resourceFile
+  };
+}
+
+function normalizeDistributionElectionInput(input) {
+  const electionMode = String(input.electionMode ?? "").trim();
+  const targetDealId = normalizeOptionalText(input.targetDealId);
+  const notes = normalizeOptionalText(input.notes);
+  const rawPercent = String(input.reinvestPercent ?? "").trim();
+  const rawAmount = String(input.reinvestAmount ?? "").trim();
+  const reinvestPercent =
+    rawPercent === "" ? null : roundNumber(Number(rawPercent));
+  const reinvestAmount =
+    rawAmount === "" ? null : roundNumber(Number(rawAmount));
+
+  if (
+    !["payout_all", "reinvest_all", "split_percentage", "split_amount"].includes(electionMode)
+  ) {
+    throw new Error("Choose a valid distribution instruction.");
+  }
+
+  if (electionMode === "split_percentage") {
+    if (
+      reinvestPercent === null ||
+      !Number.isFinite(reinvestPercent) ||
+      reinvestPercent < 0 ||
+      reinvestPercent > 1
+    ) {
+      throw new Error("Reinvestment percentage must be between 0 and 1.");
+    }
+  }
+
+  if (electionMode === "split_amount") {
+    if (
+      reinvestAmount === null ||
+      !Number.isFinite(reinvestAmount) ||
+      reinvestAmount < 0
+    ) {
+      throw new Error("Reinvestment amount must be zero or greater.");
+    }
+  }
+
+  return {
+    electionMode,
+    reinvestPercent,
+    reinvestAmount,
+    targetDealId,
+    notes
+  };
 }
 
 function normalizeTimelineItems(items) {
@@ -1674,6 +2100,7 @@ export async function createDeal(input) {
           location,
           total_equity,
           debt,
+          tax_expense,
           debt_interest_rate,
           total_interest_paid,
           total_project_cost,
@@ -1708,7 +2135,8 @@ export async function createDeal(input) {
           $16,
           $17,
           $18,
-          $19
+          $19,
+          $20
         )
       `,
       [
@@ -1717,6 +2145,7 @@ export async function createDeal(input) {
         deal.location,
         0,
         deal.debt,
+        deal.taxExpense,
         deal.debtInterestRate,
         deal.totalInterestPaid,
         deal.totalProjectCost,
@@ -1798,25 +2227,27 @@ export async function updateDeal(dealId, input) {
           name = $1,
           location = $2,
           debt = $3,
-          debt_interest_rate = $4,
-          total_interest_paid = $5,
-          total_project_cost = $6,
-          sale_price = $7,
-          hold_months = $8,
-          pref_rate = $9,
-          status = $10,
-          current_phase = $11,
-          funded_on = $12,
-          projected_exit_on = $13,
-          actual_exit_on = $14,
-          timeline_progress = $15,
-          updated_at = $16
-        WHERE id = $17
+          tax_expense = $4,
+          debt_interest_rate = $5,
+          total_interest_paid = $6,
+          total_project_cost = $7,
+          sale_price = $8,
+          hold_months = $9,
+          pref_rate = $10,
+          status = $11,
+          current_phase = $12,
+          funded_on = $13,
+          projected_exit_on = $14,
+          actual_exit_on = $15,
+          timeline_progress = $16,
+          updated_at = $17
+        WHERE id = $18
       `,
       [
         deal.name,
         deal.location,
         deal.debt,
+        deal.taxExpense,
         deal.debtInterestRate,
         deal.totalInterestPaid,
         deal.totalProjectCost,
@@ -1842,6 +2273,420 @@ export async function updateDeal(dealId, input) {
       await replacePromoteTiers(id, promoteTiers, client);
     }
   });
+}
+
+export async function createCompanyResource(input, createdByUserId) {
+  const resource = normalizeCompanyResourceInput(input);
+  const resourceId = createId("resource");
+  const timestamp = nowTimestamp();
+
+  await pool.query(
+    `
+      INSERT INTO company_resources (
+        id,
+        title,
+        resource_type,
+        summary_text,
+        body_text,
+        file_name,
+        file_mime_type,
+        file_data_url,
+        published_at,
+        created_by_user_id,
+        created_at,
+        updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+    `,
+    [
+      resourceId,
+      resource.title,
+      resource.resourceType,
+      resource.summaryText,
+      resource.bodyText,
+      resource.resourceFile?.fileName ?? null,
+      resource.resourceFile?.mimeType ?? null,
+      resource.resourceFile?.dataUrl ?? null,
+      timestamp,
+      createdByUserId,
+      timestamp,
+      timestamp
+    ]
+  );
+
+  return {
+    id: resourceId,
+    title: resource.title,
+    resourceType: resource.resourceType
+  };
+}
+
+export async function getCompanyResourceDownload(resourceId) {
+  const normalizedResourceId = String(resourceId ?? "").trim();
+
+  if (!normalizedResourceId) {
+    throw new Error("Resource id is required.");
+  }
+
+  const resource = await queryOne(
+    `
+      SELECT
+        id,
+        title,
+        file_name AS "fileName",
+        file_mime_type AS "fileMimeType",
+        file_data_url AS "fileDataUrl"
+      FROM company_resources
+      WHERE id = $1
+    `,
+    [normalizedResourceId]
+  );
+
+  if (!resource) {
+    throw new Error("Resource not found.");
+  }
+
+  if (!resource.fileName || !resource.fileDataUrl) {
+    throw new Error("This resource does not have a downloadable file.");
+  }
+
+  return resource;
+}
+
+export async function deleteCompanyResource(resourceId) {
+  const normalizedResourceId = String(resourceId ?? "").trim();
+
+  if (!normalizedResourceId) {
+    throw new Error("Resource id is required.");
+  }
+
+  const existing = await queryOne(
+    `
+      SELECT id
+      FROM company_resources
+      WHERE id = $1
+    `,
+    [normalizedResourceId]
+  );
+
+  if (!existing) {
+    throw new Error("Resource not found.");
+  }
+
+  await pool.query(
+    `
+      DELETE FROM company_resources
+      WHERE id = $1
+    `,
+    [normalizedResourceId]
+  );
+
+  return {
+    ok: true,
+    deletedResourceId: normalizedResourceId
+  };
+}
+
+function participantHasPayoutInstructions(participant) {
+  return Boolean(
+    participant?.payoutMethod ||
+      participant?.bankAccountName ||
+      participant?.bankName ||
+      participant?.bankRoutingNumber ||
+      participant?.bankAccountNumber ||
+      participant?.zelleDetails ||
+      participant?.cashAppHandle ||
+      participant?.payoutNotes
+  );
+}
+
+export async function upsertDistributionElection(dealId, userId, input) {
+  const normalizedDealId = String(dealId ?? "").trim();
+
+  if (!normalizedDealId) {
+    throw new Error("Deal id is required.");
+  }
+
+  const user = await getUserById(userId);
+
+  if (!user) {
+    throw new Error("User not found.");
+  }
+
+  const isManagerActing = user.role === "manager";
+  const targetParticipantId = String(
+    input?.participantId ?? user.participantId ?? ""
+  ).trim();
+
+  if (!targetParticipantId) {
+    throw new Error("Participant id is required.");
+  }
+
+  if (!isManagerActing && targetParticipantId !== user.participantId) {
+    throw new Error("You can only save elections for your own investor position.");
+  }
+
+  const election = normalizeDistributionElectionInput(input);
+  const overrideNotes = normalizeOptionalText(input?.overrideNotes);
+  const snapshot = await getAppDataSnapshot();
+  const deal = snapshot.deals.find((item) => item.id === normalizedDealId);
+
+  if (!deal) {
+    throw new Error("Deal not found.");
+  }
+
+  if (deal.status !== "sold") {
+    throw new Error("Reinvestment elections can only be saved after the project has sold.");
+  }
+
+  const participant = snapshot.participants.find((item) => item.id === targetParticipantId);
+  const position = snapshot.positions.find(
+    (item) => item.dealId === normalizedDealId && item.participantId === targetParticipantId
+  );
+
+  if (!position || position.contributionAmount <= 0) {
+    throw new Error("You do not have an eligible position in this deal.");
+  }
+
+  if (participant?.category !== "investor") {
+    throw new Error("Distribution elections are only supported for investor positions.");
+  }
+
+  const dealPositions = snapshot.positions.filter((item) => item.dealId === normalizedDealId);
+  const waterfall = calculateWaterfall({ deal, positions: dealPositions });
+  const positionResult = waterfall.participantResults.find(
+    (item) => item.positionId === position.id
+  );
+
+  if (!positionResult || positionResult.totalPayout <= 0) {
+    throw new Error("No exited proceeds are available for this position.");
+  }
+
+  const totalPayout = roundNumber(positionResult.totalPayout);
+  let reinvestAmount = 0;
+
+  if (election.electionMode === "reinvest_all") {
+    reinvestAmount = totalPayout;
+  } else if (election.electionMode === "split_percentage") {
+    reinvestAmount = roundNumber(totalPayout * (election.reinvestPercent ?? 0));
+  } else if (election.electionMode === "split_amount") {
+    reinvestAmount = roundNumber(election.reinvestAmount ?? 0);
+  }
+
+  if (!Number.isFinite(reinvestAmount) || reinvestAmount < 0 || reinvestAmount > totalPayout) {
+    throw new Error("Reinvestment amount must stay within the available exited proceeds.");
+  }
+
+  const cashPayoutAmount = roundNumber(totalPayout - reinvestAmount);
+  const rolloverTargetDealId = reinvestAmount > 0 ? election.targetDealId : null;
+
+  if (rolloverTargetDealId) {
+    const rolloverTarget = snapshot.deals.find((item) => item.id === rolloverTargetDealId);
+
+    if (!rolloverTarget) {
+      throw new Error("Choose a valid target project for reinvestment.");
+    }
+
+    if (rolloverTarget.id === normalizedDealId) {
+      throw new Error("Reinvestment target must be a different project.");
+    }
+
+    if (rolloverTarget.status === "sold") {
+      throw new Error("Reinvestment target must still be an active project.");
+    }
+  }
+
+  if (
+    !isManagerActing &&
+    cashPayoutAmount > 0 &&
+    !participantHasPayoutInstructions(participant)
+  ) {
+    throw new Error(
+      "Save your payout method or payout instructions in Profile & Payout Details before requesting a cash payout."
+    );
+  }
+
+  const existingElection = await queryOne(
+    `
+      SELECT
+        id,
+        election_mode AS "electionMode",
+        reinvest_percent AS "reinvestPercent",
+        reinvest_amount AS "reinvestAmount",
+        rollover_target_deal_id AS "rolloverTargetDealId",
+        notes,
+        submitted_by_user_id AS "submittedByUserId",
+        submitted_by_role AS "submittedByRole"
+      FROM distribution_elections
+      WHERE deal_id = $1
+        AND participant_id = $2
+    `,
+    [normalizedDealId, targetParticipantId]
+  );
+
+  const timestamp = nowTimestamp();
+  const hasInstructionChange =
+    !existingElection ||
+    existingElection.electionMode !== election.electionMode ||
+    Number(existingElection.reinvestPercent ?? 0) !== Number(election.reinvestPercent ?? 0) ||
+    Number(existingElection.reinvestAmount ?? 0) !==
+      Number(election.electionMode === "split_amount" ? reinvestAmount : 0) ||
+    String(existingElection.rolloverTargetDealId ?? "") !== String(rolloverTargetDealId ?? "") ||
+    String(existingElection.notes ?? "") !== String(election.notes ?? "");
+  const submissionUserId = isManagerActing
+    ? existingElection?.submittedByUserId ?? user.id
+    : user.id;
+  const submissionRole = isManagerActing
+    ? existingElection?.submittedByRole ?? "manager"
+    : "investor";
+  const reviewUserId = isManagerActing ? user.id : null;
+  const reviewAt = isManagerActing ? timestamp : null;
+  const managerOverride =
+    isManagerActing && (existingElection?.submittedByRole === "manager" || !existingElection || hasInstructionChange)
+      ? 1
+      : 0;
+
+  await withTransaction(async (client) => {
+    if (existingElection) {
+      await client.query(
+        `
+          UPDATE distribution_elections
+          SET
+            election_mode = $1,
+            reinvest_percent = $2,
+            reinvest_amount = $3,
+            rollover_target_deal_id = $4,
+            notes = $5,
+            submitted_by_user_id = $6,
+            submitted_by_role = $7,
+            reviewed_by_user_id = $8,
+            reviewed_at = $9,
+            manager_override = $10,
+            override_notes = $11,
+            updated_at = $12
+          WHERE id = $13
+        `,
+        [
+          election.electionMode,
+          election.electionMode === "split_percentage" ? election.reinvestPercent : null,
+          election.electionMode === "split_amount" ? reinvestAmount : null,
+          rolloverTargetDealId,
+          election.notes,
+          submissionUserId,
+          submissionRole,
+          reviewUserId,
+          reviewAt,
+          managerOverride,
+          isManagerActing ? overrideNotes : null,
+          timestamp,
+          existingElection.id
+        ]
+      );
+    } else {
+      await client.query(
+        `
+          INSERT INTO distribution_elections (
+            id,
+            deal_id,
+            participant_id,
+            election_mode,
+            reinvest_percent,
+            reinvest_amount,
+            rollover_target_deal_id,
+            notes,
+            submitted_by_user_id,
+            submitted_by_role,
+            reviewed_by_user_id,
+            reviewed_at,
+            manager_override,
+            override_notes,
+            created_at,
+            updated_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        `,
+        [
+          createId("distribution"),
+          normalizedDealId,
+          targetParticipantId,
+          election.electionMode,
+          election.electionMode === "split_percentage" ? election.reinvestPercent : null,
+          election.electionMode === "split_amount" ? reinvestAmount : null,
+          rolloverTargetDealId,
+          election.notes,
+          submissionUserId,
+          submissionRole,
+          reviewUserId,
+          reviewAt,
+          managerOverride,
+          isManagerActing ? overrideNotes : null,
+          timestamp,
+          timestamp
+        ]
+      );
+    }
+
+    await client.query(
+      `
+        UPDATE positions
+        SET
+          distributions_to_date = $1,
+          updated_at = $2
+        WHERE id = $3
+      `,
+      [cashPayoutAmount, timestamp, position.id]
+    );
+  });
+
+  let notifications = [];
+
+  if (!isManagerActing) {
+    const managerRecipients = await getActiveManagerRecipients();
+
+    notifications = await Promise.all(
+      managerRecipients.map(async (managerRecipient) => {
+        try {
+          return await sendDistributionElectionAlertNotification({
+            userId: managerRecipient.userId,
+            participantId: managerRecipient.participantId,
+            managerName: managerRecipient.fullName,
+            email: managerRecipient.email,
+            investorName: participant?.name ?? "Investor",
+            dealName: deal.name,
+            electionMode: election.electionMode,
+            cashPayoutAmount,
+            reinvestAmount,
+            rolloverTargetDealName: rolloverTargetDealId
+              ? snapshot.deals.find((item) => item.id === rolloverTargetDealId)?.name ?? null
+              : null,
+            notes: election.notes,
+            submittedAt: timestamp
+          });
+        } catch (error) {
+          return {
+            status: "failed",
+            provider: "notification_error",
+            localPath: null,
+            errorMessage: error.message,
+            recipientEmail: managerRecipient.email
+          };
+        }
+      })
+    );
+  }
+
+  return {
+    dealId: normalizedDealId,
+    participantId: targetParticipantId,
+    electionMode: election.electionMode,
+    totalPayout,
+    reinvestAmount,
+    cashPayoutAmount,
+    rolloverTargetDealId,
+    managerOverride: Boolean(managerOverride),
+    reviewedAt: reviewAt,
+    notifications
+  };
 }
 
 export async function createDealIssue(input, createdByUserId) {

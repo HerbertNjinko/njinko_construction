@@ -8,12 +8,15 @@ const MIGRATIONS_TABLE = "schema_migrations";
 const REQUIRED_TABLES = [
   "participants",
   "users",
+  "password_reset_tokens",
   "deals",
   "promote_tiers",
   "deal_timeline_items",
   "positions",
   "contractor_participation",
   "email_notifications",
+  "company_resources",
+  "distribution_elections",
   "deal_issues",
   "deal_issue_votes"
 ];

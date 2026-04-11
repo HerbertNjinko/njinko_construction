@@ -128,6 +128,7 @@ export const seedData = {
       location: "Charlotte, NC",
       totalEquity: 400000,
       debt: 750000,
+      taxExpense: 28000,
       debtInterestRate: 0.1025,
       totalInterestPaid: 68500,
       totalProjectCost: 1150000,
@@ -174,6 +175,7 @@ export const seedData = {
       location: "Greensboro, NC",
       totalEquity: 300000,
       debt: 560000,
+      taxExpense: 18000,
       debtInterestRate: 0.0975,
       totalInterestPaid: 44200,
       totalProjectCost: 860000,
@@ -220,6 +222,7 @@ export const seedData = {
       location: "Durham, NC",
       totalEquity: 250000,
       debt: 430000,
+      taxExpense: 22000,
       debtInterestRate: 0.09,
       totalInterestPaid: 31800,
       totalProjectCost: 680000,
@@ -254,6 +257,83 @@ export const seedData = {
           status: "complete"
         }
       ]
+    }
+  ],
+  companyResources: [
+    {
+      id: "resource-bylaw-sample",
+      title: "Njinko Company Bylaws",
+      resourceType: "bylaw_document",
+      summary:
+        "Reference governance document covering operating procedures, approvals, and investor communications.",
+      bodyText: "",
+      fileName: "njinko-company-bylaws.txt",
+      fileMimeType: "text/plain",
+      fileDataUrl:
+        "data:text/plain;base64,TmppbmtvIERldmVsb3BtZW50IEdyb3VwIExMQyBCeWxhd3Mgc2FtcGxlIGRvY3VtZW50LgoKVGhpcyBzYW1wbGUgZmlsZSBzaG93cyBob3cgcHVibGlzaGVkIGNvbXBhbnkgZG9jdW1lbnRzIGNhbiBiZSBkb3dubG9hZGVkIGluIHRoZSBpbnZlc3RvciBwb3J0YWwu",
+      publishedAt: "2026-03-05T14:00:00.000Z"
+    },
+    {
+      id: "resource-announcement-q2",
+      title: "April Portfolio Update",
+      resourceType: "announcement",
+      summary: "Project milestones, loan status, and upcoming investor votes across active deals.",
+      bodyText:
+        "Framing is underway at 237_Ville Development, Oak Ridge Townhomes remains listed, and no lender defaults are outstanding. Review new voting items in the governance section before the posted close dates.",
+      fileName: "",
+      fileMimeType: "",
+      fileDataUrl: "",
+      publishedAt: "2026-04-02T16:30:00.000Z"
+    }
+  ],
+  distributionElections: [
+    {
+      id: "distribution-maple-sarah",
+      dealId: "maple-flats-conversion",
+      participantId: "participant-sarah",
+      electionMode: "split_percentage",
+      reinvestPercent: 0.5,
+      reinvestAmount: null,
+      rolloverTargetDealId: "237-ville-development",
+      notes: "Roll half of the Maple exit into the next Charlotte deal.",
+      submittedByUserId: "user-sarah",
+      submittedByRole: "investor",
+      reviewedByUserId: null,
+      reviewedAt: null,
+      managerOverride: false,
+      overrideNotes: null
+    },
+    {
+      id: "distribution-maple-david",
+      dealId: "maple-flats-conversion",
+      participantId: "participant-david",
+      electionMode: "payout_all",
+      reinvestPercent: null,
+      reinvestAmount: null,
+      rolloverTargetDealId: null,
+      notes: "Send the full exited balance using saved payout details.",
+      submittedByUserId: "user-david",
+      submittedByRole: "investor",
+      reviewedByUserId: "user-manager",
+      reviewedAt: "2026-04-08T15:30:00.000Z",
+      managerOverride: false,
+      overrideNotes: "Reviewed and approved for payout."
+    },
+    {
+      id: "distribution-maple-olivia",
+      dealId: "maple-flats-conversion",
+      participantId: "participant-olivia",
+      electionMode: "reinvest_all",
+      reinvestPercent: null,
+      reinvestAmount: null,
+      rolloverTargetDealId: "oak-ridge-townhomes",
+      notes: "Move the entire exited balance into the next active project.",
+      submittedByUserId: "user-manager",
+      submittedByRole: "manager",
+      reviewedByUserId: "user-manager",
+      reviewedAt: "2026-04-09T10:15:00.000Z",
+      managerOverride: true,
+      overrideNotes: "Backfilled by manager from signed rollover instruction."
     }
   ],
   positions: [
@@ -345,7 +425,7 @@ export const seedData = {
       classType: "Class A",
       contributionType: "Cash equity",
       contributionAmount: 40000,
-      distributionsToDate: 0
+      distributionsToDate: 32381.49
     },
     {
       id: "position-maple-david",
@@ -354,7 +434,7 @@ export const seedData = {
       classType: "Class A",
       contributionType: "Cash equity",
       contributionAmount: 50000,
-      distributionsToDate: 0
+      distributionsToDate: 80953.73
     },
     {
       id: "position-maple-olivia",
