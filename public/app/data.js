@@ -113,6 +113,34 @@ export function applyDistributionReviewFilters(rows) {
   });
 }
 
+export function applyInvestorProjectFilters(rows) {
+  return rows.filter((row) => {
+    if (state.investorProjectFilters.dealId && row.id !== state.investorProjectFilters.dealId) {
+      return false;
+    }
+
+    if (state.investorProjectFilters.status && row.status !== state.investorProjectFilters.status) {
+      return false;
+    }
+
+    return true;
+  });
+}
+
+export function applyInvestorIssueFilters(rows) {
+  return rows.filter((row) => {
+    if (state.investorIssueFilters.dealId && row.dealId !== state.investorIssueFilters.dealId) {
+      return false;
+    }
+
+    if (state.investorIssueFilters.status && row.status !== state.investorIssueFilters.status) {
+      return false;
+    }
+
+    return true;
+  });
+}
+
 export function getAllocationFilterOptions(rows) {
   const deals = [
     ...new Map(rows.map((row) => [row.dealId, { id: row.dealId, name: row.dealName }])).values()
@@ -162,6 +190,34 @@ export function getDistributionReviewFilterOptions(rows) {
   return {
     deals,
     participants
+  };
+}
+
+export function getInvestorProjectFilterOptions(rows) {
+  const deals = [
+    ...new Map(rows.map((row) => [row.id, { id: row.id, name: row.name }])).values()
+  ].sort((left, right) => left.name.localeCompare(right.name));
+  const statuses = [...new Set(rows.map((row) => row.status))].sort((left, right) =>
+    left.localeCompare(right)
+  );
+
+  return {
+    deals,
+    statuses
+  };
+}
+
+export function getInvestorIssueFilterOptions(rows) {
+  const deals = [
+    ...new Map(rows.map((row) => [row.dealId, { id: row.dealId, name: row.dealName }])).values()
+  ].sort((left, right) => left.name.localeCompare(right.name));
+  const statuses = [...new Set(rows.map((row) => row.status))].sort((left, right) =>
+    left.localeCompare(right)
+  );
+
+  return {
+    deals,
+    statuses
   };
 }
 

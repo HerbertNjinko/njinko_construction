@@ -180,7 +180,11 @@ CREATE TABLE IF NOT EXISTS email_notifications (
 CREATE TABLE IF NOT EXISTS company_resources (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
-  resource_type TEXT NOT NULL CHECK (resource_type IN ('bylaw_document', 'announcement')),
+  deal_id TEXT,
+  resource_type TEXT NOT NULL CHECK (
+    resource_type IN ('bylaw_document', 'announcement', 'project_balance_sheet')
+    AND (resource_type <> 'project_balance_sheet' OR deal_id IS NOT NULL)
+  ),
   summary_text TEXT,
   body_text TEXT,
   file_name TEXT,
@@ -190,6 +194,7 @@ CREATE TABLE IF NOT EXISTS company_resources (
   created_by_user_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
+  FOREIGN KEY (deal_id) REFERENCES deals(id) ON DELETE CASCADE,
   FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL
 );
 
@@ -219,6 +224,23 @@ CREATE TABLE IF NOT EXISTS deal_issue_votes (
   UNIQUE (issue_id, participant_id)
 );
 
+CREATE TABLE IF NOT EXISTS archived_records (
+  id TEXT PRIMARY KEY,
+  entity_type TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  source_table TEXT NOT NULL,
+  display_name TEXT,
+  related_deal_id TEXT,
+  related_participant_id TEXT,
+  deleted_by_user_id TEXT,
+  deleted_by_role TEXT,
+  deleted_by_email TEXT,
+  deleted_by_name TEXT,
+  deleted_at TEXT NOT NULL,
+  payload_json JSONB NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user_id
   ON password_reset_tokens(user_id, created_at DESC);
@@ -234,5 +256,12 @@ CREATE INDEX IF NOT EXISTS idx_promote_tiers_deal_id ON promote_tiers(deal_id);
 CREATE INDEX IF NOT EXISTS idx_email_notifications_user_id ON email_notifications(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_company_resources_published_at
   ON company_resources(published_at DESC, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_company_resources_deal_id
+  ON company_resources(deal_id, published_at DESC, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_deal_issues_deal_id ON deal_issues(deal_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_deal_issue_votes_issue_id ON deal_issue_votes(issue_id);
+CREATE INDEX IF NOT EXISTS idx_archived_records_entity_type
+  ON archived_records(entity_type, deleted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_archived_records_entity_id
+  ON archived_records(entity_id, deleted_at DESC);

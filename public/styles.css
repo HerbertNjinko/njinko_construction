@@ -964,6 +964,16 @@ td {
   gap: 1rem;
 }
 
+.resource-library-stack {
+  display: grid;
+  gap: 1rem;
+}
+
+.resource-library-section {
+  display: grid;
+  gap: 0.85rem;
+}
+
 .resource-card {
   padding: 1rem 1.1rem;
   border-radius: 20px;

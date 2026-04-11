@@ -25,6 +25,8 @@ import {
   applyAllocationFilters,
   applyContractorFilters,
   applyDistributionReviewFilters,
+  applyInvestorIssueFilters,
+  applyInvestorProjectFilters,
   applyUserFilters,
   buildContractorProjectRollups,
   getAllocationFilterOptions,
@@ -34,6 +36,8 @@ import {
   getDistributionReviewFilterOptions,
   getDefaultVoteCloseDate,
   getFilteredRollupDeals,
+  getInvestorIssueFilterOptions,
+  getInvestorProjectFilterOptions,
   getManagerEditableDeal,
   getUserFilterOptions
 } from "./data.js";
@@ -521,6 +525,8 @@ function renderInvestorIssueCard(issue) {
 
 function renderInvestorGovernancePanel() {
   const issues = state.dashboard.governance?.issues ?? [];
+  const filteredIssues = applyInvestorIssueFilters(issues);
+  const filterOptions = getInvestorIssueFilterOptions(issues);
 
   return renderCollapsibleSection({
     sectionId: "investor-governance",
@@ -529,11 +535,54 @@ function renderInvestorGovernancePanel() {
       "Your approval power is weighted by your invested percentage in each deal, and you can change your vote until the close date.",
     message: renderMessage(state.messages.vote),
     body: `
+      <div class="table-toolbar">
+        <div class="filter-grid filter-grid-2">
+          <label>
+            Project
+            <select id="investor-issue-filter-deal">
+              <option value="">All projects</option>
+              ${filterOptions.deals
+                .map(
+                  (deal) => `
+                    <option value="${escapeHtml(deal.id)}" ${
+                      deal.id === state.investorIssueFilters.dealId ? "selected" : ""
+                    }>
+                      ${escapeHtml(deal.name)}
+                    </option>
+                  `
+                )
+                .join("")}
+            </select>
+          </label>
+          <label>
+            Vote status
+            <select id="investor-issue-filter-status">
+              <option value="">All voting statuses</option>
+              ${filterOptions.statuses
+                .map(
+                  (status) => `
+                    <option value="${escapeHtml(status)}" ${
+                      status === state.investorIssueFilters.status ? "selected" : ""
+                    }>
+                      ${escapeHtml(titleCase(status))}
+                    </option>
+                  `
+                )
+                .join("")}
+            </select>
+          </label>
+        </div>
+        <span class="read-only-tag">
+          Showing ${escapeHtml(String(filteredIssues.length))} of ${escapeHtml(String(issues.length))}
+        </span>
+      </div>
       <div class="issue-grid">
         ${
-          issues.length
-            ? issues.map((issue) => renderInvestorIssueCard(issue)).join("")
-            : '<div class="empty-state">No active voting items are tied to your eligible investor positions.</div>'
+          filteredIssues.length
+            ? filteredIssues.map((issue) => renderInvestorIssueCard(issue)).join("")
+            : issues.length
+              ? '<div class="empty-state">No voting issues match the current project and status filters.</div>'
+              : '<div class="empty-state">No voting items are tied to your eligible investor positions.</div>'
         }
       </div>
     `
@@ -541,13 +590,23 @@ function renderInvestorGovernancePanel() {
 }
 
 function resourceTypeLabel(resourceType) {
-  return resourceType === "bylaw_document" ? "Bylaw document" : "Announcement";
+  const labels = {
+    bylaw_document: "Bylaw document",
+    announcement: "Announcement",
+    project_balance_sheet: "Project balance sheet"
+  };
+
+  return labels[resourceType] ?? "Resource";
 }
 
 function renderCompanyResourceCard(resource, { showAdminActions = false } = {}) {
   const downloadHref = resource.hasFile
     ? `/api/resources/${encodeURIComponent(resource.id)}/download`
     : "";
+  const downloadLabel =
+    resource.resourceType === "project_balance_sheet"
+      ? `Download ${resource.dealName || "balance sheet"}`
+      : `Download ${resource.fileName || "file"}`;
 
   return `
     <article class="resource-card">
@@ -555,6 +614,11 @@ function renderCompanyResourceCard(resource, { showAdminActions = false } = {}) 
         <div>
           <div class="mini-head">
             <span class="class-pill">${escapeHtml(resourceTypeLabel(resource.resourceType))}</span>
+            ${
+              resource.dealName
+                ? `<span class="read-only-tag">${escapeHtml(resource.dealName)}</span>`
+                : ""
+            }
             <span class="read-only-tag">${escapeHtml(formatDateTime(resource.publishedAt))}</span>
           </div>
           <h4>${escapeHtml(resource.title)}</h4>
@@ -579,7 +643,7 @@ function renderCompanyResourceCard(resource, { showAdminActions = false } = {}) 
                 href="${escapeHtml(downloadHref)}"
                 download="${escapeHtml(resource.fileName || resource.title)}"
               >
-                Download ${escapeHtml(resource.fileName || "file")}
+                ${escapeHtml(downloadLabel)}
               </a>
             `
             : '<span class="read-only-tag">No attachment</span>'
@@ -605,22 +669,64 @@ function renderCompanyResourceCard(resource, { showAdminActions = false } = {}) 
 
 function renderCompanyLibraryPanel({ showAdminActions = false } = {}) {
   const resources = state.dashboard.companyResources ?? [];
+  const balanceSheets = resources.filter(
+    (resource) => resource.resourceType === "project_balance_sheet"
+  );
+  const generalResources = resources.filter(
+    (resource) => resource.resourceType !== "project_balance_sheet"
+  );
 
   return renderCollapsibleSection({
     sectionId: `${state.dashboard.role}-company-library`,
     title: "Company Library",
     copy:
-      "Published company bylaw documents and announcements stay available here for review or download at any time.",
+      "Published bylaws, announcements, and project balance sheets stay available here for review or download at any time.",
     message: showAdminActions ? renderMessage(state.messages.resource) : "",
     body: `
-      <div class="resource-grid">
-        ${
-          resources.length
-            ? resources
-                .map((resource) => renderCompanyResourceCard(resource, { showAdminActions }))
-                .join("")
-            : '<div class="empty-state">No company documents or announcements have been published yet.</div>'
-        }
+      <div class="metrics-grid">
+        ${metricCard("Balance sheets", String(balanceSheets.length))}
+        ${metricCard("Company resources", String(generalResources.length))}
+        ${metricCard("Total published items", String(resources.length))}
+      </div>
+      <div class="resource-library-stack">
+        <section class="resource-library-section">
+          <div class="section-head">
+            <div>
+              <h4>Project Balance Sheets</h4>
+              <p class="section-copy">
+                Deal-specific balance sheets published for investor review and download.
+              </p>
+            </div>
+          </div>
+          <div class="resource-grid">
+            ${
+              balanceSheets.length
+                ? balanceSheets
+                    .map((resource) => renderCompanyResourceCard(resource, { showAdminActions }))
+                    .join("")
+                : '<div class="empty-state">No project balance sheets have been published yet.</div>'
+            }
+          </div>
+        </section>
+        <section class="resource-library-section">
+          <div class="section-head">
+            <div>
+              <h4>Company Documents & Announcements</h4>
+              <p class="section-copy">
+                Governance documents and general company updates available in the portal.
+              </p>
+            </div>
+          </div>
+          <div class="resource-grid">
+            ${
+              generalResources.length
+                ? generalResources
+                    .map((resource) => renderCompanyResourceCard(resource, { showAdminActions }))
+                    .join("")
+                : '<div class="empty-state">No company documents or announcements have been published yet.</div>'
+            }
+          </div>
+        </section>
       </div>
     `
   });
@@ -629,9 +735,9 @@ function renderCompanyLibraryPanel({ showAdminActions = false } = {}) {
 function renderCompanyLibraryAdminPanel() {
   return renderCollapsibleSection({
     sectionId: "admin-company-library",
-    title: "Company Documents & Announcements",
+    title: "Company Documents, Announcements & Balance Sheets",
     copy:
-      "Upload company bylaws and post announcements that investors can access or download from their dashboard.",
+      "Upload company bylaws, publish announcements, and attach project balance sheets that investors can access or download from their dashboard.",
     panelClass: "admin-card",
     body: `
       <p class="eyebrow">Manager Control</p>
@@ -642,6 +748,7 @@ function renderCompanyLibraryAdminPanel() {
             <select name="resourceType" required>
               <option value="bylaw_document">Bylaw document</option>
               <option value="announcement">Announcement</option>
+              <option value="project_balance_sheet">Project balance sheet</option>
             </select>
           </label>
           <label>
@@ -649,6 +756,19 @@ function renderCompanyLibraryAdminPanel() {
             <input type="text" name="title" placeholder="Company bylaws" required />
           </label>
         </div>
+        <label>
+          Linked project
+          <select name="dealId">
+            <option value="">No project selected</option>
+            ${(state.dashboard?.deals ?? [])
+              .map(
+                (deal) => `
+                  <option value="${escapeHtml(deal.id)}">${escapeHtml(deal.name)}</option>
+                `
+              )
+              .join("")}
+          </select>
+        </label>
         <label>
           Summary
           <textarea
@@ -670,7 +790,7 @@ function renderCompanyLibraryAdminPanel() {
           <input type="file" name="resourceFile" accept=".pdf,.doc,.docx,.txt,image/*" />
         </label>
         <p class="helper-copy">
-          Bylaw documents require a file. Announcements can include text, an attachment, or both.
+          Bylaw documents require a file. Announcements can include text, an attachment, or both. Project balance sheets must include a file and be linked to a project.
         </p>
         <button class="button-primary" type="submit">Publish resource</button>
       </form>
@@ -1184,6 +1304,8 @@ function renderInvestorProject(project) {
 
 function renderInvestorDashboard() {
   const { viewer, portfolio, projects } = state.dashboard;
+  const filteredProjects = applyInvestorProjectFilters(projects);
+  const projectFilterOptions = getInvestorProjectFilterOptions(projects);
 
   return `
     <div class="shell">
@@ -1228,11 +1350,54 @@ function renderInvestorDashboard() {
         copy:
           "Each deal shows your amount invested, ownership, returns breakdown, project status, and timeline.",
         body: `
+          <div class="table-toolbar">
+            <div class="filter-grid filter-grid-2">
+              <label>
+                Project
+                <select id="investor-project-filter-deal">
+                  <option value="">All projects</option>
+                  ${projectFilterOptions.deals
+                    .map(
+                      (deal) => `
+                        <option value="${escapeHtml(deal.id)}" ${
+                          deal.id === state.investorProjectFilters.dealId ? "selected" : ""
+                        }>
+                          ${escapeHtml(deal.name)}
+                        </option>
+                      `
+                    )
+                    .join("")}
+                </select>
+              </label>
+              <label>
+                Project status
+                <select id="investor-project-filter-status">
+                  <option value="">All statuses</option>
+                  ${projectFilterOptions.statuses
+                    .map(
+                      (status) => `
+                        <option value="${escapeHtml(status)}" ${
+                          status === state.investorProjectFilters.status ? "selected" : ""
+                        }>
+                          ${escapeHtml(titleCase(status))}
+                        </option>
+                      `
+                    )
+                    .join("")}
+                </select>
+              </label>
+            </div>
+            <span class="read-only-tag">
+              Showing ${escapeHtml(String(filteredProjects.length))} of ${escapeHtml(String(projects.length))}
+            </span>
+          </div>
           <div class="deal-grid">
             ${
-              projects.length
-                ? projects.map((project) => renderInvestorProject(project)).join("")
-                : '<div class="empty-state">No positions are linked to this login.</div>'
+              filteredProjects.length
+                ? filteredProjects.map((project) => renderInvestorProject(project)).join("")
+                : projects.length
+                  ? '<div class="empty-state">No project breakdowns match the current project and status filters.</div>'
+                  : '<div class="empty-state">No positions are linked to this login.</div>'
             }
           </div>
         `

@@ -7,6 +7,8 @@ import {
   SESSION_IDLE_TIMEOUT_MS,
   createInitialAllocationFilters,
   createInitialDistributionReviewFilters,
+  createInitialInvestorIssueFilters,
+  createInitialInvestorProjectFilters,
   createInitialUserFilters,
   sessionRuntime,
   state
@@ -21,6 +23,8 @@ import {
   getCalculatorPreset,
   getContractorFilterOptions,
   getDistributionReviewFilterOptions,
+  getInvestorIssueFilterOptions,
+  getInvestorProjectFilterOptions,
   getUserFilterOptions
 } from "./data.js";
 import { render } from "./renderers.js";
@@ -64,6 +68,8 @@ export function resetDashboardState() {
   state.allocationPage = 1;
   state.allocationFilters = createInitialAllocationFilters();
   state.distributionReviewFilters = createInitialDistributionReviewFilters();
+  state.investorProjectFilters = createInitialInvestorProjectFilters();
+  state.investorIssueFilters = createInitialInvestorIssueFilters();
   state.userFilters = createInitialUserFilters();
 }
 
@@ -313,6 +319,42 @@ export async function refreshDashboard() {
     state.allocationFilters = createInitialAllocationFilters();
     state.distributionReviewFilters = createInitialDistributionReviewFilters();
     state.userFilters = createInitialUserFilters();
+
+    const investorProjectOptions = getInvestorProjectFilterOptions(state.dashboard.projects ?? []);
+
+    if (
+      state.investorProjectFilters.dealId &&
+      !investorProjectOptions.deals.some(
+        (deal) => deal.id === state.investorProjectFilters.dealId
+      )
+    ) {
+      state.investorProjectFilters.dealId = "";
+    }
+
+    if (
+      state.investorProjectFilters.status &&
+      !investorProjectOptions.statuses.includes(state.investorProjectFilters.status)
+    ) {
+      state.investorProjectFilters.status = "";
+    }
+
+    const investorIssueOptions = getInvestorIssueFilterOptions(
+      state.dashboard.governance?.issues ?? []
+    );
+
+    if (
+      state.investorIssueFilters.dealId &&
+      !investorIssueOptions.deals.some((deal) => deal.id === state.investorIssueFilters.dealId)
+    ) {
+      state.investorIssueFilters.dealId = "";
+    }
+
+    if (
+      state.investorIssueFilters.status &&
+      !investorIssueOptions.statuses.includes(state.investorIssueFilters.status)
+    ) {
+      state.investorIssueFilters.status = "";
+    }
   }
 }
 

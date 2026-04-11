@@ -813,7 +813,7 @@ const server = createServer(async (request, response) => {
       }
 
       try {
-        await deleteDeal(decodeURIComponent(dealUpdateMatch[1]));
+        await deleteDeal(decodeURIComponent(dealUpdateMatch[1]), manager.id);
         sendJson(response, 200, { ok: true });
       } catch (error) {
         sendJson(response, 400, { error: error.message });
@@ -830,7 +830,7 @@ const server = createServer(async (request, response) => {
       }
 
       try {
-        await deleteCompanyResource(decodeURIComponent(resourceDeleteMatch[1]));
+        await deleteCompanyResource(decodeURIComponent(resourceDeleteMatch[1]), manager.id);
         sendJson(response, 200, { ok: true });
       } catch (error) {
         sendJson(response, 400, { error: error.message });

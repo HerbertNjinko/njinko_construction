@@ -18,7 +18,8 @@ const REQUIRED_TABLES = [
   "company_resources",
   "distribution_elections",
   "deal_issues",
-  "deal_issue_votes"
+  "deal_issue_votes",
+  "archived_records"
 ];
 
 function listMigrationFiles() {

@@ -277,6 +277,7 @@ export function setupEventListeners() {
           method: "POST",
           body: JSON.stringify({
             title: formData.get("title"),
+            dealId: formData.get("dealId"),
             resourceType: formData.get("resourceType"),
             summaryText: formData.get("summaryText"),
             bodyText: formData.get("bodyText"),
@@ -552,6 +553,30 @@ export function setupEventListeners() {
 
     if (event.target.id === "distribution-review-filter-participant") {
       state.distributionReviewFilters.participantId = event.target.value;
+      render();
+      return;
+    }
+
+    if (event.target.id === "investor-project-filter-deal") {
+      state.investorProjectFilters.dealId = event.target.value;
+      render();
+      return;
+    }
+
+    if (event.target.id === "investor-project-filter-status") {
+      state.investorProjectFilters.status = event.target.value;
+      render();
+      return;
+    }
+
+    if (event.target.id === "investor-issue-filter-deal") {
+      state.investorIssueFilters.dealId = event.target.value;
+      render();
+      return;
+    }
+
+    if (event.target.id === "investor-issue-filter-status") {
+      state.investorIssueFilters.status = event.target.value;
       render();
       return;
     }

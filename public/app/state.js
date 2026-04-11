@@ -40,6 +40,20 @@ export function createInitialDistributionReviewFilters() {
   };
 }
 
+export function createInitialInvestorProjectFilters() {
+  return {
+    dealId: "",
+    status: ""
+  };
+}
+
+export function createInitialInvestorIssueFilters() {
+  return {
+    dealId: "",
+    status: ""
+  };
+}
+
 export function createInitialMessages() {
   return {
     user: null,
@@ -70,6 +84,8 @@ export const state = {
   allocationPage: 1,
   allocationFilters: createInitialAllocationFilters(),
   distributionReviewFilters: createInitialDistributionReviewFilters(),
+  investorProjectFilters: createInitialInvestorProjectFilters(),
+  investorIssueFilters: createInitialInvestorIssueFilters(),
   userFilters: createInitialUserFilters(),
   authMode: initialPasswordResetToken ? "reset" : "login",
   passwordResetToken: initialPasswordResetToken || null,

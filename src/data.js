@@ -263,6 +263,7 @@ export const seedData = {
     {
       id: "resource-bylaw-sample",
       title: "Njinko Company Bylaws",
+      dealId: null,
       resourceType: "bylaw_document",
       summary:
         "Reference governance document covering operating procedures, approvals, and investor communications.",
@@ -276,6 +277,7 @@ export const seedData = {
     {
       id: "resource-announcement-q2",
       title: "April Portfolio Update",
+      dealId: null,
       resourceType: "announcement",
       summary: "Project milestones, loan status, and upcoming investor votes across active deals.",
       bodyText:
@@ -284,6 +286,19 @@ export const seedData = {
       fileMimeType: "",
       fileDataUrl: "",
       publishedAt: "2026-04-02T16:30:00.000Z"
+    },
+    {
+      id: "resource-balance-oak-ridge",
+      title: "Oak Ridge Townhomes Balance Sheet",
+      dealId: "oak-ridge-townhomes",
+      resourceType: "project_balance_sheet",
+      summary: "Quarter-end balance sheet package for Oak Ridge Townhomes.",
+      bodyText: "",
+      fileName: "oak-ridge-townhomes-balance-sheet.txt",
+      fileMimeType: "text/plain",
+      fileDataUrl:
+        "data:text/plain;base64,T2FrIFJpZGdlIFRvd25ob21lcyBCYWxhbmNlIFNoZWV0CkFzIG9mIDIwMjYtMDMtMzEKQ2FzaDogJDE0OCwwMDAKQWNjb3VudHMgUmVjZWl2YWJsZTogJDExLDAwMApDb25zdHJ1Y3Rpb24gSW4gUHJvZ3Jlc3M6ICQ2ODIsMDAwCkRlYnQ6ICQ1NjAsMDAwCk1lbWJlciBFcXVpdHk6ICQzMDEsMDAw",
+      publishedAt: "2026-04-05T12:00:00.000Z"
     }
   ],
   distributionElections: [

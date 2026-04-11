@@ -12,6 +12,7 @@ import {
 import { pool, queryAll, queryOne, withTransaction } from "./postgres.js";
 
 const PASSWORD_RESET_TTL_MINUTES = 60;
+const RESOURCE_UPLOAD_MAX_BYTES = 100 * 1024 * 1024;
 
 function nowTimestamp() {
   return new Date().toISOString();
@@ -43,6 +44,29 @@ function roundNumber(value) {
 
 function createId(prefix) {
   return `${prefix}-${randomUUID()}`;
+}
+
+async function getArchiveActorSnapshot(userId, executor = pool) {
+  const normalizedUserId = String(userId ?? "").trim();
+
+  if (!normalizedUserId) {
+    return null;
+  }
+
+  return queryOne(
+    `
+      SELECT
+        users.id AS id,
+        users.role AS role,
+        users.email AS email,
+        participants.name AS name
+      FROM users
+      LEFT JOIN participants ON participants.id = users.participant_id
+      WHERE users.id = $1
+    `,
+    [normalizedUserId],
+    executor
+  );
 }
 
 function hashResetToken(token) {
@@ -149,8 +173,8 @@ function normalizeResourceFile(file) {
     throw new Error("Uploads must be sent as a data URL.");
   }
 
-  if (!Number.isFinite(size) || size <= 0 || size > 10_000_000) {
-    throw new Error("Uploads must be smaller than 10 MB.");
+  if (!Number.isFinite(size) || size <= 0 || size > RESOURCE_UPLOAD_MAX_BYTES) {
+    throw new Error("Uploads must be smaller than 100 MB.");
   }
 
   return {
@@ -539,6 +563,7 @@ async function insertSeedData(executor) {
         INSERT INTO company_resources (
           id,
           title,
+          deal_id,
           resource_type,
           summary_text,
           body_text,
@@ -550,11 +575,12 @@ async function insertSeedData(executor) {
           created_at,
           updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
       `,
       [
         resource.id,
         resource.title,
+        resource.dealId ?? null,
         resource.resourceType,
         resource.summary ?? null,
         resource.bodyText ?? null,
@@ -971,19 +997,22 @@ export async function getAppDataSnapshot() {
   const companyResources = (await queryAll(
     `
       SELECT
-        id,
-        title,
-        resource_type AS "resourceType",
-        summary_text AS "summaryText",
-        body_text AS "bodyText",
-        file_name AS "fileName",
-        file_mime_type AS "fileMimeType",
-        (file_name IS NOT NULL AND file_data_url IS NOT NULL) AS "hasFile",
-        published_at AS "publishedAt",
-        created_at AS "createdAt",
-        updated_at AS "updatedAt"
+        company_resources.id AS id,
+        company_resources.title AS title,
+        company_resources.deal_id AS "dealId",
+        deals.name AS "dealName",
+        company_resources.resource_type AS "resourceType",
+        company_resources.summary_text AS "summaryText",
+        company_resources.body_text AS "bodyText",
+        company_resources.file_name AS "fileName",
+        company_resources.file_mime_type AS "fileMimeType",
+        (company_resources.file_name IS NOT NULL AND company_resources.file_data_url IS NOT NULL) AS "hasFile",
+        company_resources.published_at AS "publishedAt",
+        company_resources.created_at AS "createdAt",
+        company_resources.updated_at AS "updatedAt"
       FROM company_resources
-      ORDER BY published_at DESC, created_at DESC, id DESC
+      LEFT JOIN deals ON deals.id = company_resources.deal_id
+      ORDER BY company_resources.published_at DESC, company_resources.created_at DESC, company_resources.id DESC
     `
   )).map((row) => ({
     ...row,
@@ -1821,6 +1850,7 @@ function normalizeVoteChoice(value) {
 function normalizeCompanyResourceInput(input) {
   const title = String(input.title ?? "").trim();
   const resourceType = String(input.resourceType ?? "").trim();
+  const dealId = normalizeOptionalText(input.dealId);
   const summaryText = normalizeOptionalText(input.summaryText ?? input.summary);
   const bodyText = normalizeOptionalText(input.bodyText);
   const resourceFile = normalizeResourceFile(input.resourceFile);
@@ -1829,12 +1859,24 @@ function normalizeCompanyResourceInput(input) {
     throw new Error("A resource title is required.");
   }
 
-  if (!["bylaw_document", "announcement"].includes(resourceType)) {
-    throw new Error("Resource type must be either bylaw document or announcement.");
+  if (!["bylaw_document", "announcement", "project_balance_sheet"].includes(resourceType)) {
+    throw new Error(
+      "Resource type must be bylaw document, announcement, or project balance sheet."
+    );
   }
 
   if (resourceType === "bylaw_document" && !resourceFile) {
     throw new Error("Bylaw documents must include an uploaded file.");
+  }
+
+  if (resourceType === "project_balance_sheet") {
+    if (!dealId) {
+      throw new Error("Project balance sheets must be linked to a deal.");
+    }
+
+    if (!resourceFile) {
+      throw new Error("Project balance sheets must include an uploaded file.");
+    }
   }
 
   if (resourceType === "announcement" && !summaryText && !bodyText && !resourceFile) {
@@ -1843,6 +1885,7 @@ function normalizeCompanyResourceInput(input) {
 
   return {
     title,
+    dealId: resourceType === "project_balance_sheet" ? dealId : null,
     resourceType,
     summaryText,
     bodyText,
@@ -2280,11 +2323,27 @@ export async function createCompanyResource(input, createdByUserId) {
   const resourceId = createId("resource");
   const timestamp = nowTimestamp();
 
+  if (resource.dealId) {
+    const linkedDeal = await queryOne(
+      `
+        SELECT id
+        FROM deals
+        WHERE id = $1
+      `,
+      [resource.dealId]
+    );
+
+    if (!linkedDeal) {
+      throw new Error("Choose a valid deal for the project balance sheet.");
+    }
+  }
+
   await pool.query(
     `
       INSERT INTO company_resources (
         id,
         title,
+        deal_id,
         resource_type,
         summary_text,
         body_text,
@@ -2296,11 +2355,12 @@ export async function createCompanyResource(input, createdByUserId) {
         created_at,
         updated_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
     `,
     [
       resourceId,
       resource.title,
+      resource.dealId,
       resource.resourceType,
       resource.summaryText,
       resource.bodyText,
@@ -2317,6 +2377,7 @@ export async function createCompanyResource(input, createdByUserId) {
   return {
     id: resourceId,
     title: resource.title,
+    dealId: resource.dealId,
     resourceType: resource.resourceType
   };
 }
@@ -2353,37 +2414,461 @@ export async function getCompanyResourceDownload(resourceId) {
   return resource;
 }
 
-export async function deleteCompanyResource(resourceId) {
+async function insertArchivedRecord(client, archiveInput) {
+  const entityType = String(archiveInput?.entityType ?? "").trim();
+  const entityId = String(archiveInput?.entityId ?? "").trim();
+  const sourceTable = String(archiveInput?.sourceTable ?? "").trim();
+
+  if (!entityType || !entityId || !sourceTable) {
+    throw new Error("Archive entries require entity type, entity id, and source table.");
+  }
+
+  const deletedAt = nowTimestamp();
+  const actor = await getArchiveActorSnapshot(archiveInput?.deletedByUserId, client);
+  const archiveRecord = {
+    id: createId("archive"),
+    entityType,
+    entityId,
+    sourceTable,
+    displayName: normalizeOptionalText(archiveInput?.displayName),
+    relatedDealId: normalizeOptionalText(archiveInput?.relatedDealId),
+    relatedParticipantId: normalizeOptionalText(archiveInput?.relatedParticipantId),
+    deletedByUserId: actor?.id ?? normalizeOptionalText(archiveInput?.deletedByUserId),
+    deletedByRole: actor?.role ?? null,
+    deletedByEmail: actor?.email ?? null,
+    deletedByName: actor?.name ?? null,
+    deletedAt,
+    payloadJson: archiveInput?.payload ?? {},
+    createdAt: deletedAt
+  };
+
+  await client.query(
+    `
+      INSERT INTO archived_records (
+        id,
+        entity_type,
+        entity_id,
+        source_table,
+        display_name,
+        related_deal_id,
+        related_participant_id,
+        deleted_by_user_id,
+        deleted_by_role,
+        deleted_by_email,
+        deleted_by_name,
+        deleted_at,
+        payload_json,
+        created_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14)
+    `,
+    [
+      archiveRecord.id,
+      archiveRecord.entityType,
+      archiveRecord.entityId,
+      archiveRecord.sourceTable,
+      archiveRecord.displayName,
+      archiveRecord.relatedDealId,
+      archiveRecord.relatedParticipantId,
+      archiveRecord.deletedByUserId,
+      archiveRecord.deletedByRole,
+      archiveRecord.deletedByEmail,
+      archiveRecord.deletedByName,
+      archiveRecord.deletedAt,
+      JSON.stringify(archiveRecord.payloadJson ?? {}),
+      archiveRecord.createdAt
+    ]
+  );
+
+  return archiveRecord;
+}
+
+async function buildCompanyResourceArchivePayload(resourceId, executor = pool) {
+  return queryOne(
+    `
+      SELECT
+        company_resources.*,
+        deals.name AS deal_name,
+        creator.email AS created_by_email,
+        creator_participant.name AS created_by_name
+      FROM company_resources
+      LEFT JOIN deals ON deals.id = company_resources.deal_id
+      LEFT JOIN users AS creator ON creator.id = company_resources.created_by_user_id
+      LEFT JOIN participants AS creator_participant
+        ON creator_participant.id = creator.participant_id
+      WHERE company_resources.id = $1
+    `,
+    [resourceId],
+    executor
+  );
+}
+
+async function buildDealArchivePayload(dealId, executor = pool) {
+  const deal = await queryOne(
+    `
+      SELECT *
+      FROM deals
+      WHERE id = $1
+    `,
+    [dealId],
+    executor
+  );
+
+  if (!deal) {
+    return null;
+  }
+
+  const promoteTiers = await queryAll(
+    `
+      SELECT *
+      FROM promote_tiers
+      WHERE deal_id = $1
+      ORDER BY sort_order, id
+    `,
+    [dealId],
+    executor
+  );
+  const timelineItems = await queryAll(
+    `
+      SELECT *
+      FROM deal_timeline_items
+      WHERE deal_id = $1
+      ORDER BY sort_order, id
+    `,
+    [dealId],
+    executor
+  );
+  const positions = await queryAll(
+    `
+      SELECT
+        positions.*,
+        participants.name AS participant_name,
+        participants.category AS participant_category
+      FROM positions
+      LEFT JOIN participants ON participants.id = positions.participant_id
+      WHERE positions.deal_id = $1
+      ORDER BY positions.created_at, positions.id
+    `,
+    [dealId],
+    executor
+  );
+  const contractorParticipation = await queryAll(
+    `
+      SELECT
+        contractor_participation.*,
+        participants.name AS participant_name,
+        participants.category AS participant_category
+      FROM contractor_participation
+      LEFT JOIN participants ON participants.id = contractor_participation.participant_id
+      WHERE contractor_participation.deal_id = $1
+      ORDER BY contractor_participation.created_at, contractor_participation.id
+    `,
+    [dealId],
+    executor
+  );
+  const distributionElections = await queryAll(
+    `
+      SELECT
+        distribution_elections.*,
+        participants.name AS participant_name,
+        rollover_deal.name AS rollover_target_deal_name,
+        submitter.email AS submitted_by_email,
+        submitter_participant.name AS submitted_by_name,
+        reviewer.email AS reviewed_by_email,
+        reviewer_participant.name AS reviewed_by_name
+      FROM distribution_elections
+      LEFT JOIN participants ON participants.id = distribution_elections.participant_id
+      LEFT JOIN deals AS rollover_deal
+        ON rollover_deal.id = distribution_elections.rollover_target_deal_id
+      LEFT JOIN users AS submitter
+        ON submitter.id = distribution_elections.submitted_by_user_id
+      LEFT JOIN participants AS submitter_participant
+        ON submitter_participant.id = submitter.participant_id
+      LEFT JOIN users AS reviewer
+        ON reviewer.id = distribution_elections.reviewed_by_user_id
+      LEFT JOIN participants AS reviewer_participant
+        ON reviewer_participant.id = reviewer.participant_id
+      WHERE distribution_elections.deal_id = $1
+      ORDER BY distribution_elections.created_at, distribution_elections.id
+    `,
+    [dealId],
+    executor
+  );
+  const companyResources = await queryAll(
+    `
+      SELECT
+        company_resources.*,
+        creator.email AS created_by_email,
+        creator_participant.name AS created_by_name
+      FROM company_resources
+      LEFT JOIN users AS creator ON creator.id = company_resources.created_by_user_id
+      LEFT JOIN participants AS creator_participant
+        ON creator_participant.id = creator.participant_id
+      WHERE company_resources.deal_id = $1
+      ORDER BY company_resources.created_at, company_resources.id
+    `,
+    [dealId],
+    executor
+  );
+  const issues = await queryAll(
+    `
+      SELECT
+        deal_issues.*,
+        creator.email AS created_by_email,
+        creator_participant.name AS created_by_name
+      FROM deal_issues
+      LEFT JOIN users AS creator ON creator.id = deal_issues.created_by_user_id
+      LEFT JOIN participants AS creator_participant
+        ON creator_participant.id = creator.participant_id
+      WHERE deal_issues.deal_id = $1
+      ORDER BY deal_issues.created_at, deal_issues.id
+    `,
+    [dealId],
+    executor
+  );
+  const issueVotes = await queryAll(
+    `
+      SELECT
+        deal_issue_votes.*,
+        deal_issues.title AS issue_title,
+        participants.name AS participant_name
+      FROM deal_issue_votes
+      JOIN deal_issues ON deal_issues.id = deal_issue_votes.issue_id
+      LEFT JOIN participants ON participants.id = deal_issue_votes.participant_id
+      WHERE deal_issues.deal_id = $1
+      ORDER BY deal_issue_votes.created_at, deal_issue_votes.id
+    `,
+    [dealId],
+    executor
+  );
+
+  return {
+    deal,
+    promoteTiers,
+    timelineItems,
+    positions,
+    contractorParticipation,
+    distributionElections,
+    companyResources,
+    issues,
+    issueVotes,
+    counts: {
+      promoteTiers: promoteTiers.length,
+      timelineItems: timelineItems.length,
+      positions: positions.length,
+      contractorParticipation: contractorParticipation.length,
+      distributionElections: distributionElections.length,
+      companyResources: companyResources.length,
+      issues: issues.length,
+      issueVotes: issueVotes.length
+    }
+  };
+}
+
+async function buildUserArchivePayload(userId, executor = pool) {
+  const user = await queryOne(
+    `
+      SELECT
+        users.*,
+        participants.name AS participant_name,
+        participants.category AS participant_category,
+        participants.first_name,
+        participants.middle_name,
+        participants.last_name,
+        participants.driver_license_number,
+        participants.id_card_file_name,
+        participants.id_card_mime_type,
+        participants.id_card_data_url,
+        participants.current_address,
+        participants.mailing_address,
+        participants.contact_phone,
+        participants.payout_method,
+        participants.bank_account_name,
+        participants.bank_name,
+        participants.bank_routing_number,
+        participants.bank_account_number,
+        participants.zelle_details,
+        participants.cash_app_handle,
+        participants.payout_notes
+      FROM users
+      JOIN participants ON participants.id = users.participant_id
+      WHERE users.id = $1
+    `,
+    [userId],
+    executor
+  );
+
+  if (!user) {
+    return null;
+  }
+
+  const positions = await queryAll(
+    `
+      SELECT
+        positions.*,
+        deals.name AS deal_name
+      FROM positions
+      LEFT JOIN deals ON deals.id = positions.deal_id
+      WHERE positions.participant_id = $1
+      ORDER BY positions.created_at, positions.id
+    `,
+    [user.participant_id],
+    executor
+  );
+  const contractorParticipation = await queryAll(
+    `
+      SELECT
+        contractor_participation.*,
+        deals.name AS deal_name
+      FROM contractor_participation
+      LEFT JOIN deals ON deals.id = contractor_participation.deal_id
+      WHERE contractor_participation.participant_id = $1
+      ORDER BY contractor_participation.created_at, contractor_participation.id
+    `,
+    [user.participant_id],
+    executor
+  );
+  const distributionElections = await queryAll(
+    `
+      SELECT
+        distribution_elections.*,
+        deals.name AS deal_name,
+        rollover_deal.name AS rollover_target_deal_name
+      FROM distribution_elections
+      LEFT JOIN deals ON deals.id = distribution_elections.deal_id
+      LEFT JOIN deals AS rollover_deal
+        ON rollover_deal.id = distribution_elections.rollover_target_deal_id
+      WHERE distribution_elections.participant_id = $1
+      ORDER BY distribution_elections.created_at, distribution_elections.id
+    `,
+    [user.participant_id],
+    executor
+  );
+  const emailNotifications = await queryAll(
+    `
+      SELECT *
+      FROM email_notifications
+      WHERE user_id = $1
+      ORDER BY created_at, id
+    `,
+    [userId],
+    executor
+  );
+  const passwordResetTokens = await queryAll(
+    `
+      SELECT *
+      FROM password_reset_tokens
+      WHERE user_id = $1
+      ORDER BY created_at, id
+    `,
+    [userId],
+    executor
+  );
+  const createdCompanyResources = await queryAll(
+    `
+      SELECT
+        company_resources.*,
+        deals.name AS deal_name
+      FROM company_resources
+      LEFT JOIN deals ON deals.id = company_resources.deal_id
+      WHERE company_resources.created_by_user_id = $1
+      ORDER BY company_resources.created_at, company_resources.id
+    `,
+    [userId],
+    executor
+  );
+  const createdDealIssues = await queryAll(
+    `
+      SELECT
+        deal_issues.*,
+        deals.name AS deal_name
+      FROM deal_issues
+      LEFT JOIN deals ON deals.id = deal_issues.deal_id
+      WHERE deal_issues.created_by_user_id = $1
+      ORDER BY deal_issues.created_at, deal_issues.id
+    `,
+    [userId],
+    executor
+  );
+  const reviewedDistributionElections = await queryAll(
+    `
+      SELECT
+        distribution_elections.*,
+        deals.name AS deal_name,
+        participants.name AS participant_name
+      FROM distribution_elections
+      LEFT JOIN deals ON deals.id = distribution_elections.deal_id
+      LEFT JOIN participants ON participants.id = distribution_elections.participant_id
+      WHERE distribution_elections.submitted_by_user_id = $1
+         OR distribution_elections.reviewed_by_user_id = $1
+      ORDER BY distribution_elections.updated_at, distribution_elections.id
+    `,
+    [userId],
+    executor
+  );
+
+  return {
+    user,
+    positions,
+    contractorParticipation,
+    distributionElections,
+    emailNotifications,
+    passwordResetTokens,
+    createdCompanyResources,
+    createdDealIssues,
+    reviewedDistributionElections,
+    counts: {
+      positions: positions.length,
+      contractorParticipation: contractorParticipation.length,
+      distributionElections: distributionElections.length,
+      emailNotifications: emailNotifications.length,
+      passwordResetTokens: passwordResetTokens.length,
+      createdCompanyResources: createdCompanyResources.length,
+      createdDealIssues: createdDealIssues.length,
+      reviewedDistributionElections: reviewedDistributionElections.length
+    }
+  };
+}
+
+export async function deleteCompanyResource(resourceId, actingUserId = null) {
   const normalizedResourceId = String(resourceId ?? "").trim();
 
   if (!normalizedResourceId) {
     throw new Error("Resource id is required.");
   }
 
-  const existing = await queryOne(
-    `
-      SELECT id
-      FROM company_resources
-      WHERE id = $1
-    `,
-    [normalizedResourceId]
-  );
+  const archive = await withTransaction(async (client) => {
+    const existing = await buildCompanyResourceArchivePayload(normalizedResourceId, client);
 
-  if (!existing) {
-    throw new Error("Resource not found.");
-  }
+    if (!existing) {
+      throw new Error("Resource not found.");
+    }
 
-  await pool.query(
-    `
-      DELETE FROM company_resources
-      WHERE id = $1
-    `,
-    [normalizedResourceId]
-  );
+    const archiveRecord = await insertArchivedRecord(client, {
+      entityType: "company_resource",
+      entityId: normalizedResourceId,
+      sourceTable: "company_resources",
+      displayName: existing.title,
+      relatedDealId: existing.deal_id,
+      deletedByUserId: actingUserId,
+      payload: existing
+    });
+
+    await client.query(
+      `
+        DELETE FROM company_resources
+        WHERE id = $1
+      `,
+      [normalizedResourceId]
+    );
+
+    return archiveRecord;
+  });
 
   return {
     ok: true,
-    deletedResourceId: normalizedResourceId
+    deletedResourceId: normalizedResourceId,
+    archivedRecordId: archive.id
   };
 }
 
@@ -2882,37 +3367,45 @@ export async function castDealIssueVote(issueId, userId, voteChoiceInput) {
   };
 }
 
-export async function deleteDeal(dealId) {
+export async function deleteDeal(dealId, actingUserId = null) {
   const id = String(dealId ?? "").trim();
 
   if (!id) {
     throw new Error("Deal id is required.");
   }
 
-  const existingDeal = await queryOne(
-    `
-      SELECT id
-      FROM deals
-      WHERE id = $1
-    `,
-    [id]
-  );
+  const archive = await withTransaction(async (client) => {
+    const existingDeal = await buildDealArchivePayload(id, client);
 
-  if (!existingDeal) {
-    throw new Error("Deal not found.");
-  }
+    if (!existingDeal) {
+      throw new Error("Deal not found.");
+    }
 
-  await pool.query(
-    `
-      DELETE FROM deals
-      WHERE id = $1
-    `,
-    [id]
-  );
+    const archiveRecord = await insertArchivedRecord(client, {
+      entityType: "deal",
+      entityId: id,
+      sourceTable: "deals",
+      displayName: existingDeal.deal?.name ?? id,
+      relatedDealId: id,
+      deletedByUserId: actingUserId,
+      payload: existingDeal
+    });
+
+    await client.query(
+      `
+        DELETE FROM deals
+        WHERE id = $1
+      `,
+      [id]
+    );
+
+    return archiveRecord;
+  });
 
   return {
     ok: true,
-    deletedDealId: id
+    deletedDealId: id,
+    archivedRecordId: archive.id
   };
 }
 
@@ -2968,16 +3461,37 @@ export async function deleteUserAccount(userId, actingUserId) {
     }
   }
 
-  await pool.query(
-    `
-      DELETE FROM users
-      WHERE id = $1
-    `,
-    [userId]
-  );
+  const archive = await withTransaction(async (client) => {
+    const archivePayload = await buildUserArchivePayload(userId, client);
+
+    if (!archivePayload) {
+      throw new Error("User not found.");
+    }
+
+    const archiveRecord = await insertArchivedRecord(client, {
+      entityType: "user",
+      entityId: userId,
+      sourceTable: "users",
+      displayName: archivePayload.user?.participant_name ?? targetUser.name ?? targetUser.email,
+      relatedParticipantId: archivePayload.user?.participant_id ?? targetUser.participantId ?? null,
+      deletedByUserId: actingUserId,
+      payload: archivePayload
+    });
+
+    await client.query(
+      `
+        DELETE FROM users
+        WHERE id = $1
+      `,
+      [userId]
+    );
+
+    return archiveRecord;
+  });
 
   return {
     ok: true,
-    deletedUserId: userId
+    deletedUserId: userId,
+    archivedRecordId: archive.id
   };
 }
