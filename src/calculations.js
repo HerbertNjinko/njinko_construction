@@ -238,29 +238,61 @@ function getDistributionElectionMap(data) {
 function buildDistributionPlan({ deal, position, participant, result, election, dealMap }) {
   const totalPayout = roundCurrency(result?.totalPayout ?? 0);
   const actualPayoutAmount = roundCurrency(Math.max(0, position?.distributionsToDate ?? 0));
-  let reinvestedAmount = 0;
+  let requestedReinvestAmount = 0;
 
   if (election?.electionMode === "reinvest_all") {
-    reinvestedAmount = totalPayout;
+    requestedReinvestAmount = totalPayout;
   } else if (election?.electionMode === "split_percentage") {
-    reinvestedAmount = roundCurrency(totalPayout * (election.reinvestPercent ?? 0));
+    requestedReinvestAmount = roundCurrency(totalPayout * (election.reinvestPercent ?? 0));
   } else if (election?.electionMode === "split_amount") {
-    reinvestedAmount = roundCurrency(election.reinvestAmount ?? 0);
+    requestedReinvestAmount = roundCurrency(election.reinvestAmount ?? 0);
   }
 
-  reinvestedAmount = roundCurrency(Math.max(0, Math.min(reinvestedAmount, totalPayout)));
+  requestedReinvestAmount = roundCurrency(
+    Math.max(0, Math.min(requestedReinvestAmount, totalPayout))
+  );
+  const requestedCashPayoutAmount = roundCurrency(totalPayout - requestedReinvestAmount);
+  const approvalStatus = election?.approvalStatus ?? (election?.reviewedAt ? "approved" : "pending");
+  const approvedReinvestedAmount =
+    approvalStatus === "approved"
+      ? roundCurrency(
+          Math.max(
+            0,
+            Math.min(
+              election?.approvedReinvestAmount ?? requestedReinvestAmount,
+              totalPayout
+            )
+          )
+        )
+      : 0;
+  const approvedCashPayoutAmount =
+    approvalStatus === "approved"
+      ? roundCurrency(
+          Math.max(
+            0,
+            election?.approvedCashPayoutAmount ?? (totalPayout - approvedReinvestedAmount)
+          )
+        )
+      : 0;
+  const remainingScheduledPayoutAmount = roundCurrency(
+    Math.max(approvedCashPayoutAmount - actualPayoutAmount, 0)
+  );
 
   return {
     hasElection: Boolean(election),
-    canSetDistributionElection: deal.status === "sold" && totalPayout > 0,
+    canSetDistributionElection:
+      deal.status === "sold" && totalPayout > 0 && approvalStatus !== "approved",
     electionMode: election?.electionMode ?? null,
     reinvestPercent: election?.reinvestPercent ?? null,
     requestedReinvestAmount: election?.reinvestAmount ?? null,
+    requestedReinvestedAmount: requestedReinvestAmount,
+    requestedCashPayoutAmount,
     actualPayoutAmount,
-    reinvestedAmount,
-    pendingDistributionAmount: roundCurrency(
-      Math.max(totalPayout - actualPayoutAmount - reinvestedAmount, 0)
-    ),
+    reinvestedAmount: approvedReinvestedAmount,
+    approvedReinvestedAmount,
+    approvedCashPayoutAmount,
+    pendingDistributionAmount: remainingScheduledPayoutAmount,
+    remainingScheduledPayoutAmount,
     rolloverTargetDealId: election?.rolloverTargetDealId ?? null,
     rolloverTargetDealName: election?.rolloverTargetDealId
       ? dealMap.get(election.rolloverTargetDealId)?.name ?? null
@@ -268,10 +300,12 @@ function buildDistributionPlan({ deal, position, participant, result, election, 
     notes: election?.notes ?? "",
     submittedByUserId: election?.submittedByUserId ?? null,
     submittedByRole: election?.submittedByRole ?? null,
+    approvalStatus: election ? approvalStatus : "none",
     reviewedByUserId: election?.reviewedByUserId ?? null,
     reviewedAt: election?.reviewedAt ?? null,
     managerOverride: Boolean(election?.managerOverride),
     overrideNotes: election?.overrideNotes ?? "",
+    payoutExpectedOn: election?.payoutExpectedOn ?? null,
     createdAt: election?.createdAt ?? null,
     updatedAt: election?.updatedAt ?? null,
     payoutMethod: participant?.payoutMethod ?? "",
@@ -765,21 +799,21 @@ export function buildManagerDashboard(user, data = seedData) {
       const reviewedBy = distribution.reviewedByUserId
         ? userMapById.get(distribution.reviewedByUserId)
         : null;
-      const needsReview =
-        !distribution.hasElection ||
-        (distribution.submittedByRole === "investor" && !distribution.reviewedAt);
+      const needsReview = !distribution.hasElection || distribution.approvalStatus !== "approved";
       let reviewStatus = "No election";
 
       if (!distribution.hasElection) {
         reviewStatus = "No election";
-      } else if (distribution.managerOverride) {
-        reviewStatus = "Manager override";
-      } else if (distribution.reviewedAt) {
-        reviewStatus = "Reviewed";
+      } else if (distribution.approvalStatus === "approved" && distribution.managerOverride) {
+        reviewStatus = "Approved with override";
+      } else if (distribution.approvalStatus === "approved" && distribution.submittedByRole === "manager") {
+        reviewStatus = "Backfilled approval";
+      } else if (distribution.approvalStatus === "approved") {
+        reviewStatus = "Approved";
       } else if (distribution.submittedByRole === "investor") {
-        reviewStatus = "Pending review";
+        reviewStatus = "Pending approval";
       } else {
-        reviewStatus = "Backfilled";
+        reviewStatus = "Manager draft";
       }
 
       return {
@@ -792,7 +826,12 @@ export function buildManagerDashboard(user, data = seedData) {
         totalPayout: result.totalPayout,
         capitalReturned: result.capitalReturned,
         profitReturned: roundCurrency(result.prefEarned + result.profitShare),
+        approvalStatus: distribution.approvalStatus,
         actualPayoutAmount: distribution.actualPayoutAmount,
+        requestedReinvestedAmount: distribution.requestedReinvestedAmount,
+        requestedCashPayoutAmount: distribution.requestedCashPayoutAmount,
+        approvedReinvestedAmount: distribution.approvedReinvestedAmount,
+        approvedCashPayoutAmount: distribution.approvedCashPayoutAmount,
         reinvestedAmount: distribution.reinvestedAmount,
         pendingDistributionAmount: distribution.pendingDistributionAmount,
         electionMode: distribution.electionMode,
@@ -800,6 +839,7 @@ export function buildManagerDashboard(user, data = seedData) {
         requestedReinvestAmount: distribution.requestedReinvestAmount,
         rolloverTargetDealId: distribution.rolloverTargetDealId,
         rolloverTargetDealName: distribution.rolloverTargetDealName,
+        payoutExpectedOn: distribution.payoutExpectedOn,
         notes: distribution.notes,
         submittedByRole: distribution.submittedByRole,
         submittedByName: submittedBy?.name ?? null,
@@ -810,6 +850,7 @@ export function buildManagerDashboard(user, data = seedData) {
         updatedAt: distribution.updatedAt,
         reviewStatus,
         needsReview,
+        canApprove: distribution.approvalStatus !== "approved",
         reinvestmentTargets: data.deals
           .filter((item) => item.status !== "sold" && item.id !== deal.id)
           .map((item) => ({ id: item.id, name: item.name }))

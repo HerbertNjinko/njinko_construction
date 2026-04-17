@@ -5,6 +5,7 @@ import { seedData } from "./data.js";
 import { assertDatabaseReady } from "./migrations.js";
 import {
   sendCredentialNotification,
+  sendDistributionElectionApprovedNotification,
   sendDistributionElectionAlertNotification,
   sendIssueCreatedNotification,
   sendPasswordResetNotification
@@ -31,6 +32,20 @@ function normalizeOptionalText(value) {
   return normalized || null;
 }
 
+function normalizeOptionalDateInput(value, fieldLabel) {
+  const normalized = normalizeOptionalText(value);
+
+  if (!normalized) {
+    return null;
+  }
+
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    throw new Error(`${fieldLabel} must use the YYYY-MM-DD format.`);
+  }
+
+  return normalized;
+}
+
 function normalizeConfigValue(value) {
   return String(value ?? "")
     .trim()
@@ -40,6 +55,28 @@ function normalizeConfigValue(value) {
 
 function roundNumber(value) {
   return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+}
+
+function computeDistributionAmounts(election, totalPayout) {
+  const normalizedTotalPayout = roundNumber(Math.max(0, Number(totalPayout ?? 0)));
+  let reinvestAmount = 0;
+
+  if (election?.electionMode === "reinvest_all") {
+    reinvestAmount = normalizedTotalPayout;
+  } else if (election?.electionMode === "split_percentage") {
+    reinvestAmount = roundNumber(normalizedTotalPayout * Number(election?.reinvestPercent ?? 0));
+  } else if (election?.electionMode === "split_amount") {
+    reinvestAmount = roundNumber(Number(election?.reinvestAmount ?? 0));
+  }
+
+  reinvestAmount = roundNumber(Math.max(0, Math.min(reinvestAmount, normalizedTotalPayout)));
+  const cashPayoutAmount = roundNumber(normalizedTotalPayout - reinvestAmount);
+
+  return {
+    totalPayout: normalizedTotalPayout,
+    reinvestAmount,
+    cashPayoutAmount
+  };
 }
 
 function createId(prefix) {
@@ -609,6 +646,10 @@ async function insertSeedData(executor) {
           notes,
           submitted_by_user_id,
           submitted_by_role,
+          approval_status,
+          approved_reinvest_amount,
+          approved_cash_payout_amount,
+          payout_expected_on,
           reviewed_by_user_id,
           reviewed_at,
           manager_override,
@@ -629,6 +670,10 @@ async function insertSeedData(executor) {
         election.notes ?? null,
         election.submittedByUserId ?? null,
         election.submittedByRole ?? null,
+        election.approvalStatus ?? (election.reviewedAt ? "approved" : "pending"),
+        election.approvedReinvestAmount ?? null,
+        election.approvedCashPayoutAmount ?? null,
+        election.payoutExpectedOn ?? null,
         election.reviewedByUserId ?? null,
         election.reviewedAt ?? null,
         election.managerOverride ? 1 : 0,
@@ -972,6 +1017,10 @@ export async function getAppDataSnapshot() {
         notes,
         submitted_by_user_id AS "submittedByUserId",
         submitted_by_role AS "submittedByRole",
+        approval_status AS "approvalStatus",
+        approved_reinvest_amount AS "approvedReinvestAmount",
+        approved_cash_payout_amount AS "approvedCashPayoutAmount",
+        payout_expected_on AS "payoutExpectedOn",
         reviewed_by_user_id AS "reviewedByUserId",
         reviewed_at AS "reviewedAt",
         manager_override AS "managerOverride",
@@ -991,6 +1040,14 @@ export async function getAppDataSnapshot() {
       row.reinvestAmount === null || row.reinvestAmount === undefined
         ? null
         : Number(row.reinvestAmount),
+    approvedReinvestAmount:
+      row.approvedReinvestAmount === null || row.approvedReinvestAmount === undefined
+        ? null
+        : Number(row.approvedReinvestAmount),
+    approvedCashPayoutAmount:
+      row.approvedCashPayoutAmount === null || row.approvedCashPayoutAmount === undefined
+        ? null
+        : Number(row.approvedCashPayoutAmount),
     managerOverride: Boolean(row.managerOverride)
   }));
 
@@ -1713,6 +1770,87 @@ export async function createDealAllocation(input) {
 
     await syncDealEquity(dealId, client);
   });
+}
+
+async function applyApprovedReinvestmentAllocation({
+  client,
+  targetDealId,
+  participantId,
+  classType,
+  amount
+}) {
+  const normalizedAmount = roundNumber(Number(amount ?? 0));
+
+  if (!targetDealId || !participantId || normalizedAmount <= 0) {
+    return null;
+  }
+
+  const timestamp = nowTimestamp();
+  const existingPosition = await queryOne(
+    `
+      SELECT id, contribution_amount AS "contributionAmount"
+      FROM positions
+      WHERE deal_id = $1
+        AND participant_id = $2
+    `,
+    [targetDealId, participantId],
+    client
+  );
+
+  if (existingPosition) {
+    await client.query(
+      `
+        UPDATE positions
+        SET
+          contribution_amount = $1,
+          updated_at = $2
+        WHERE id = $3
+      `,
+      [
+        roundNumber(Number(existingPosition.contributionAmount ?? 0) + normalizedAmount),
+        timestamp,
+        existingPosition.id
+      ]
+    );
+
+    await syncDealEquity(targetDealId, client);
+
+    return existingPosition.id;
+  }
+
+  const positionId = createId("position");
+
+  await client.query(
+    `
+      INSERT INTO positions (
+        id,
+        deal_id,
+        participant_id,
+        class_type,
+        contribution_type,
+        contribution_amount,
+        distributions_to_date,
+        created_at,
+        updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    `,
+    [
+      positionId,
+      targetDealId,
+      participantId,
+      classType,
+      "Reinvested proceeds",
+      normalizedAmount,
+      0,
+      timestamp,
+      timestamp
+    ]
+  );
+
+  await syncDealEquity(targetDealId, client);
+
+  return positionId;
 }
 
 function normalizeDealInput(input) {
@@ -2913,6 +3051,10 @@ export async function upsertDistributionElection(dealId, userId, input) {
 
   const election = normalizeDistributionElectionInput(input);
   const overrideNotes = normalizeOptionalText(input?.overrideNotes);
+  const payoutExpectedOn = normalizeOptionalDateInput(
+    input?.payoutExpectedOn,
+    "Expected payout date"
+  );
   const snapshot = await getAppDataSnapshot();
   const deal = snapshot.deals.find((item) => item.id === normalizedDealId);
 
@@ -2947,22 +3089,10 @@ export async function upsertDistributionElection(dealId, userId, input) {
     throw new Error("No exited proceeds are available for this position.");
   }
 
-  const totalPayout = roundNumber(positionResult.totalPayout);
-  let reinvestAmount = 0;
-
-  if (election.electionMode === "reinvest_all") {
-    reinvestAmount = totalPayout;
-  } else if (election.electionMode === "split_percentage") {
-    reinvestAmount = roundNumber(totalPayout * (election.reinvestPercent ?? 0));
-  } else if (election.electionMode === "split_amount") {
-    reinvestAmount = roundNumber(election.reinvestAmount ?? 0);
-  }
-
-  if (!Number.isFinite(reinvestAmount) || reinvestAmount < 0 || reinvestAmount > totalPayout) {
-    throw new Error("Reinvestment amount must stay within the available exited proceeds.");
-  }
-
-  const cashPayoutAmount = roundNumber(totalPayout - reinvestAmount);
+  const { totalPayout, reinvestAmount, cashPayoutAmount } = computeDistributionAmounts(
+    election,
+    positionResult.totalPayout
+  );
   const rolloverTargetDealId = reinvestAmount > 0 ? election.targetDealId : null;
 
   if (rolloverTargetDealId) {
@@ -2981,14 +3111,14 @@ export async function upsertDistributionElection(dealId, userId, input) {
     }
   }
 
-  if (
-    !isManagerActing &&
-    cashPayoutAmount > 0 &&
-    !participantHasPayoutInstructions(participant)
-  ) {
+  if (cashPayoutAmount > 0 && !participantHasPayoutInstructions(participant)) {
     throw new Error(
       "Save your payout method or payout instructions in Profile & Payout Details before requesting a cash payout."
     );
+  }
+
+  if (isManagerActing && cashPayoutAmount > 0 && !payoutExpectedOn) {
+    throw new Error("Expected payout date is required when approving a cash payout.");
   }
 
   const existingElection = await queryOne(
@@ -3001,7 +3131,15 @@ export async function upsertDistributionElection(dealId, userId, input) {
         rollover_target_deal_id AS "rolloverTargetDealId",
         notes,
         submitted_by_user_id AS "submittedByUserId",
-        submitted_by_role AS "submittedByRole"
+        submitted_by_role AS "submittedByRole",
+        approval_status AS "approvalStatus",
+        approved_reinvest_amount AS "approvedReinvestAmount",
+        approved_cash_payout_amount AS "approvedCashPayoutAmount",
+        payout_expected_on AS "payoutExpectedOn",
+        reviewed_by_user_id AS "reviewedByUserId",
+        reviewed_at AS "reviewedAt",
+        manager_override AS "managerOverride",
+        override_notes AS "overrideNotes"
       FROM distribution_elections
       WHERE deal_id = $1
         AND participant_id = $2
@@ -3018,20 +3156,155 @@ export async function upsertDistributionElection(dealId, userId, input) {
       Number(election.electionMode === "split_amount" ? reinvestAmount : 0) ||
     String(existingElection.rolloverTargetDealId ?? "") !== String(rolloverTargetDealId ?? "") ||
     String(existingElection.notes ?? "") !== String(election.notes ?? "");
-  const submissionUserId = isManagerActing
-    ? existingElection?.submittedByUserId ?? user.id
-    : user.id;
-  const submissionRole = isManagerActing
-    ? existingElection?.submittedByRole ?? "manager"
-    : "investor";
-  const reviewUserId = isManagerActing ? user.id : null;
-  const reviewAt = isManagerActing ? timestamp : null;
-  const managerOverride =
-    isManagerActing && (existingElection?.submittedByRole === "manager" || !existingElection || hasInstructionChange)
-      ? 1
-      : 0;
+  const rolloverTargetDealName = rolloverTargetDealId
+    ? snapshot.deals.find((item) => item.id === rolloverTargetDealId)?.name ?? null
+    : null;
 
-  await withTransaction(async (client) => {
+  if (!isManagerActing && existingElection?.approvalStatus === "approved") {
+    throw new Error("This distribution election has already been approved and cannot be changed.");
+  }
+
+  let notifications = [];
+
+  if (!isManagerActing) {
+    await withTransaction(async (client) => {
+      if (existingElection) {
+        await client.query(
+          `
+            UPDATE distribution_elections
+            SET
+              election_mode = $1,
+              reinvest_percent = $2,
+              reinvest_amount = $3,
+              rollover_target_deal_id = $4,
+              notes = $5,
+              submitted_by_user_id = $6,
+              submitted_by_role = $7,
+              approval_status = $8,
+              approved_reinvest_amount = NULL,
+              approved_cash_payout_amount = NULL,
+              payout_expected_on = NULL,
+              reviewed_by_user_id = NULL,
+              reviewed_at = NULL,
+              manager_override = 0,
+              override_notes = NULL,
+              updated_at = $9
+            WHERE id = $10
+          `,
+          [
+            election.electionMode,
+            election.electionMode === "split_percentage" ? election.reinvestPercent : null,
+            election.electionMode === "split_amount" ? reinvestAmount : null,
+            rolloverTargetDealId,
+            election.notes,
+            user.id,
+            "investor",
+            "pending",
+            timestamp,
+            existingElection.id
+          ]
+        );
+      } else {
+        await client.query(
+          `
+            INSERT INTO distribution_elections (
+              id,
+              deal_id,
+              participant_id,
+              election_mode,
+              reinvest_percent,
+              reinvest_amount,
+              rollover_target_deal_id,
+              notes,
+              submitted_by_user_id,
+              submitted_by_role,
+              approval_status,
+              reviewed_by_user_id,
+              reviewed_at,
+              manager_override,
+              override_notes,
+              created_at,
+              updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULL, NULL, 0, NULL, $12, $13)
+          `,
+          [
+            createId("distribution"),
+            normalizedDealId,
+            targetParticipantId,
+            election.electionMode,
+            election.electionMode === "split_percentage" ? election.reinvestPercent : null,
+            election.electionMode === "split_amount" ? reinvestAmount : null,
+            rolloverTargetDealId,
+            election.notes,
+            user.id,
+            "investor",
+            "pending",
+            timestamp,
+            timestamp
+          ]
+        );
+      }
+    });
+
+    const managerRecipients = await getActiveManagerRecipients();
+    notifications = await Promise.all(
+      managerRecipients.map(async (managerRecipient) => {
+        try {
+          return await sendDistributionElectionAlertNotification({
+            userId: managerRecipient.userId,
+            participantId: managerRecipient.participantId,
+            managerName: managerRecipient.fullName,
+            email: managerRecipient.email,
+            investorName: participant?.name ?? "Investor",
+            dealName: deal.name,
+            electionMode: election.electionMode,
+            cashPayoutAmount,
+            reinvestAmount,
+            rolloverTargetDealName,
+            notes: election.notes,
+            submittedAt: timestamp
+          });
+        } catch (error) {
+          return {
+            status: "failed",
+            provider: "notification_error",
+            localPath: null,
+            errorMessage: error.message,
+            recipientEmail: managerRecipient.email
+          };
+        }
+      })
+    );
+
+    return {
+      dealId: normalizedDealId,
+      participantId: targetParticipantId,
+      electionMode: election.electionMode,
+      totalPayout,
+      reinvestAmount,
+      cashPayoutAmount,
+      rolloverTargetDealId,
+      approvalStatus: "pending",
+      managerOverride: false,
+      reviewedAt: null,
+      payoutExpectedOn: null,
+      notifications
+    };
+  }
+
+  if (existingElection?.approvalStatus === "approved") {
+    throw new Error("This distribution election has already been approved and applied.");
+  }
+
+  const submittedByUserId = existingElection?.submittedByUserId ?? user.id;
+  const submittedByRole = existingElection?.submittedByRole ?? "manager";
+  const managerOverride = Boolean(
+    existingElection?.id &&
+      existingElection.submittedByRole === "investor" &&
+      hasInstructionChange
+  );
+  const approvedTargetPositionId = await withTransaction(async (client) => {
     if (existingElection) {
       await client.query(
         `
@@ -3044,12 +3317,16 @@ export async function upsertDistributionElection(dealId, userId, input) {
             notes = $5,
             submitted_by_user_id = $6,
             submitted_by_role = $7,
-            reviewed_by_user_id = $8,
-            reviewed_at = $9,
-            manager_override = $10,
-            override_notes = $11,
-            updated_at = $12
-          WHERE id = $13
+            approval_status = $8,
+            approved_reinvest_amount = $9,
+            approved_cash_payout_amount = $10,
+            payout_expected_on = $11,
+            reviewed_by_user_id = $12,
+            reviewed_at = $13,
+            manager_override = $14,
+            override_notes = $15,
+            updated_at = $16
+          WHERE id = $17
         `,
         [
           election.electionMode,
@@ -3057,12 +3334,16 @@ export async function upsertDistributionElection(dealId, userId, input) {
           election.electionMode === "split_amount" ? reinvestAmount : null,
           rolloverTargetDealId,
           election.notes,
-          submissionUserId,
-          submissionRole,
-          reviewUserId,
-          reviewAt,
-          managerOverride,
-          isManagerActing ? overrideNotes : null,
+          submittedByUserId,
+          submittedByRole,
+          "approved",
+          reinvestAmount > 0 ? reinvestAmount : 0,
+          cashPayoutAmount > 0 ? cashPayoutAmount : 0,
+          cashPayoutAmount > 0 ? payoutExpectedOn : null,
+          user.id,
+          timestamp,
+          managerOverride ? 1 : 0,
+          overrideNotes,
           timestamp,
           existingElection.id
         ]
@@ -3081,6 +3362,10 @@ export async function upsertDistributionElection(dealId, userId, input) {
             notes,
             submitted_by_user_id,
             submitted_by_role,
+            approval_status,
+            approved_reinvest_amount,
+            approved_cash_payout_amount,
+            payout_expected_on,
             reviewed_by_user_id,
             reviewed_at,
             manager_override,
@@ -3088,7 +3373,9 @@ export async function upsertDistributionElection(dealId, userId, input) {
             created_at,
             updated_at
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+          VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+          )
         `,
         [
           createId("distribution"),
@@ -3099,65 +3386,67 @@ export async function upsertDistributionElection(dealId, userId, input) {
           election.electionMode === "split_amount" ? reinvestAmount : null,
           rolloverTargetDealId,
           election.notes,
-          submissionUserId,
-          submissionRole,
-          reviewUserId,
-          reviewAt,
-          managerOverride,
-          isManagerActing ? overrideNotes : null,
+          user.id,
+          "manager",
+          "approved",
+          reinvestAmount > 0 ? reinvestAmount : 0,
+          cashPayoutAmount > 0 ? cashPayoutAmount : 0,
+          cashPayoutAmount > 0 ? payoutExpectedOn : null,
+          user.id,
+          timestamp,
+          0,
+          overrideNotes,
           timestamp,
           timestamp
         ]
       );
     }
 
-    await client.query(
-      `
-        UPDATE positions
-        SET
-          distributions_to_date = $1,
-          updated_at = $2
-        WHERE id = $3
-      `,
-      [cashPayoutAmount, timestamp, position.id]
-    );
+    return applyApprovedReinvestmentAllocation({
+      client,
+      targetDealId: rolloverTargetDealId,
+      participantId: targetParticipantId,
+      classType: position.classType,
+      amount: reinvestAmount
+    });
   });
 
-  let notifications = [];
+  const linkedInvestorUser = snapshot.users.find(
+    (account) => account.participantId === targetParticipantId && account.role === "investor"
+  );
 
-  if (!isManagerActing) {
-    const managerRecipients = await getActiveManagerRecipients();
-
-    notifications = await Promise.all(
-      managerRecipients.map(async (managerRecipient) => {
-        try {
-          return await sendDistributionElectionAlertNotification({
-            userId: managerRecipient.userId,
-            participantId: managerRecipient.participantId,
-            managerName: managerRecipient.fullName,
-            email: managerRecipient.email,
-            investorName: participant?.name ?? "Investor",
-            dealName: deal.name,
-            electionMode: election.electionMode,
-            cashPayoutAmount,
-            reinvestAmount,
-            rolloverTargetDealName: rolloverTargetDealId
-              ? snapshot.deals.find((item) => item.id === rolloverTargetDealId)?.name ?? null
-              : null,
-            notes: election.notes,
-            submittedAt: timestamp
-          });
-        } catch (error) {
-          return {
-            status: "failed",
-            provider: "notification_error",
-            localPath: null,
-            errorMessage: error.message,
-            recipientEmail: managerRecipient.email
-          };
+  if (linkedInvestorUser?.email) {
+    try {
+      notifications = [
+        await sendDistributionElectionApprovedNotification({
+          userId: linkedInvestorUser.id,
+          participantId: linkedInvestorUser.participantId,
+          fullName: linkedInvestorUser.name,
+          email: linkedInvestorUser.email,
+          dealName: deal.name,
+          electionMode: election.electionMode,
+          approvedAt: timestamp,
+          payoutExpectedOn: cashPayoutAmount > 0 ? payoutExpectedOn : null,
+          payoutMethod: participant?.payoutMethod ?? "",
+          cashPayoutAmount,
+          reinvestAmount,
+          rolloverTargetDealName,
+          managerOverride,
+          overrideNotes,
+          notes: election.notes
+        })
+      ];
+    } catch (error) {
+      notifications = [
+        {
+          status: "failed",
+          provider: "notification_error",
+          localPath: null,
+          errorMessage: error.message,
+          recipientEmail: linkedInvestorUser.email
         }
-      })
-    );
+      ];
+    }
   }
 
   return {
@@ -3168,8 +3457,11 @@ export async function upsertDistributionElection(dealId, userId, input) {
     reinvestAmount,
     cashPayoutAmount,
     rolloverTargetDealId,
-    managerOverride: Boolean(managerOverride),
-    reviewedAt: reviewAt,
+    approvedTargetPositionId,
+    approvalStatus: "approved",
+    managerOverride,
+    reviewedAt: timestamp,
+    payoutExpectedOn: cashPayoutAmount > 0 ? payoutExpectedOn : null,
     notifications
   };
 }

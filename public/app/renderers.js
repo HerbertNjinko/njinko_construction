@@ -820,112 +820,194 @@ function payoutMethodLabel(method) {
   return labels[method] ?? "No payout method saved";
 }
 
-function renderDistributionElectionSection(project) {
+function distributionApprovalStatusLabel(status) {
+  const labels = {
+    none: "No election submitted",
+    pending: "Pending manager approval",
+    approved: "Approved"
+  };
+
+  return labels[status] ?? "Pending manager approval";
+}
+
+function renderInvestorDistributionElectionCard(project) {
   const distribution = project.personalPosition.distributionElection;
 
-  if (!distribution?.canSetDistributionElection) {
+  if (!distribution || project.status !== "sold" || project.personalPosition.totalPayout <= 0) {
     return "";
   }
 
+  const sectionId = `investor-distribution-${project.id}`;
+  const collapsed = Boolean(state.collapsedSections?.[sectionId]);
   const selectedMode = distribution.electionMode ?? "payout_all";
+  const approvalStatusClass =
+    distribution.approvalStatus === "approved"
+      ? "reviewed"
+      : distribution.hasElection
+        ? "pending"
+        : "empty";
 
   return `
-    <div>
-      <div class="section-head">
+    <article class="distribution-review-card">
+      <div class="distribution-review-head">
         <div>
-          <h4>Reinvestment or payout election</h4>
-          <p class="section-copy">
-            Choose how much of this sold project should be rolled into another active deal versus paid out using your saved payout instructions.
-          </p>
+          <p class="eyebrow">${escapeHtml(project.name)}</p>
+          <h4>${escapeHtml(project.location)}</h4>
+          <p class="deal-location">${escapeHtml(project.currentPhase)}</p>
+          <div class="mini-head">
+            <span class="review-status-pill ${escapeHtml(approvalStatusClass)}">${escapeHtml(
+              distributionApprovalStatusLabel(distribution.approvalStatus)
+            )}</span>
+            <span class="class-pill">${escapeHtml(
+              distributionModeLabel(distribution.electionMode)
+            )}</span>
+            <span class="read-only-tag">${escapeHtml(
+              payoutMethodLabel(distribution.payoutMethod)
+            )}</span>
+          </div>
+        </div>
+        <div class="distribution-review-toolbar">
+          <div>
+            <p class="metric-label">Total exit proceeds</p>
+            <p class="metric-value">${escapeHtml(
+              formatCurrency(project.personalPosition.totalPayout)
+            )}</p>
+          </div>
+          ${renderSectionToggle(sectionId)}
         </div>
       </div>
-      ${renderMessage(state.messages.distribution)}
-      <div class="summary-grid">
-        ${summaryItem("Profit returned", formatCurrency(project.personalPosition.profitEarned))}
-        ${summaryItem("Cash paid out", formatCurrency(distribution.actualPayoutAmount))}
-        ${summaryItem("Reinvested", formatCurrency(distribution.reinvestedAmount))}
-        ${summaryItem("Awaiting instruction", formatCurrency(distribution.pendingDistributionAmount))}
-        ${summaryItem("Current instruction", distributionModeLabel(distribution.electionMode))}
-        ${summaryItem("Payout method", payoutMethodLabel(distribution.payoutMethod))}
-      </div>
-      <form class="distribution-form" data-distribution-form="true" data-deal-id="${escapeHtml(
-        project.id
-      )}">
-        <div class="form-grid-2">
-          <label>
-            Election type
-            <select name="electionMode" required>
-              <option value="payout_all" ${
-                selectedMode === "payout_all" ? "selected" : ""
-              }>Cash out all proceeds</option>
-              <option value="reinvest_all" ${
-                selectedMode === "reinvest_all" ? "selected" : ""
-              }>Reinvest all proceeds</option>
-              <option value="split_percentage" ${
-                selectedMode === "split_percentage" ? "selected" : ""
-              }>Split by percentage</option>
-              <option value="split_amount" ${
-                selectedMode === "split_amount" ? "selected" : ""
-              }>Split by fixed amount</option>
-            </select>
-          </label>
-          <label>
-            Reinvestment target
-            <select name="targetDealId">
-              <option value="">No target selected</option>
-              ${project.reinvestmentTargets
-                .map(
-                  (deal) => `
-                    <option value="${escapeHtml(deal.id)}" ${
-                      deal.id === distribution.rolloverTargetDealId ? "selected" : ""
-                    }>
-                      ${escapeHtml(deal.name)}
-                    </option>
+      ${
+        collapsed
+          ? '<div class="deal-card-collapsed-note">Election minimized. Use Maximize to reopen this distribution request.</div>'
+          : `
+            <div class="distribution-review-body">
+              <div class="summary-grid">
+                ${summaryItem("Profit returned", formatCurrency(project.personalPosition.profitEarned))}
+                ${summaryItem(
+                  "Requested payout",
+                  formatCurrency(distribution.requestedCashPayoutAmount)
+                )}
+                ${summaryItem(
+                  "Requested reinvestment",
+                  formatCurrency(distribution.requestedReinvestedAmount)
+                )}
+                ${summaryItem(
+                  "Approved payout",
+                  formatCurrency(distribution.approvedCashPayoutAmount)
+                )}
+                ${summaryItem(
+                  "Approved reinvestment",
+                  formatCurrency(distribution.approvedReinvestedAmount)
+                )}
+                ${summaryItem("Actual payout received", formatCurrency(distribution.actualPayoutAmount))}
+                ${summaryItem(
+                  "Expected payout date",
+                  distribution.payoutExpectedOn ? formatDate(distribution.payoutExpectedOn) : "Not scheduled"
+                )}
+                ${summaryItem("Payout method", payoutMethodLabel(distribution.payoutMethod))}
+              </div>
+              <div class="distribution-review-meta">
+                <p><strong>Status:</strong> ${escapeHtml(
+                  distributionApprovalStatusLabel(distribution.approvalStatus)
+                )}</p>
+                <p><strong>Current instruction:</strong> ${escapeHtml(
+                  distributionModeLabel(distribution.electionMode)
+                )}</p>
+                <p><strong>Target project:</strong> ${escapeHtml(
+                  distribution.rolloverTargetDealName || "No target selected"
+                )}</p>
+                <p><strong>Notes:</strong> ${escapeHtml(distribution.notes || "None provided.")}</p>
+                <p><strong>Manager notes:</strong> ${escapeHtml(
+                  distribution.overrideNotes || "No manager notes yet."
+                )}</p>
+              </div>
+              ${
+                distribution.canSetDistributionElection
+                  ? `
+                    <form class="distribution-form" data-distribution-form="true" data-deal-id="${escapeHtml(
+                      project.id
+                    )}">
+                      <div class="form-grid-2">
+                        <label>
+                          Election type
+                          <select name="electionMode" required>
+                            <option value="payout_all" ${
+                              selectedMode === "payout_all" ? "selected" : ""
+                            }>Cash out all proceeds</option>
+                            <option value="reinvest_all" ${
+                              selectedMode === "reinvest_all" ? "selected" : ""
+                            }>Reinvest all proceeds</option>
+                            <option value="split_percentage" ${
+                              selectedMode === "split_percentage" ? "selected" : ""
+                            }>Split by percentage</option>
+                            <option value="split_amount" ${
+                              selectedMode === "split_amount" ? "selected" : ""
+                            }>Split by fixed amount</option>
+                          </select>
+                        </label>
+                        <label>
+                          Reinvestment target
+                          <select name="targetDealId">
+                            <option value="">No target selected</option>
+                            ${project.reinvestmentTargets
+                              .map(
+                                (deal) => `
+                                  <option value="${escapeHtml(deal.id)}" ${
+                                    deal.id === distribution.rolloverTargetDealId ? "selected" : ""
+                                  }>
+                                    ${escapeHtml(deal.name)}
+                                  </option>
+                                `
+                              )
+                              .join("")}
+                          </select>
+                        </label>
+                      </div>
+                      <div class="form-grid-2">
+                        <label>
+                          Reinvest percentage
+                          <input
+                            type="number"
+                            name="reinvestPercent"
+                            min="0"
+                            max="1"
+                            step="0.01"
+                            value="${inputValue(distribution.reinvestPercent)}"
+                            placeholder="0.50"
+                          />
+                        </label>
+                        <label>
+                          Reinvest amount
+                          <input
+                            type="number"
+                            name="reinvestAmount"
+                            min="0"
+                            step="100"
+                            value="${inputValue(distribution.requestedReinvestAmount)}"
+                            placeholder="${escapeHtml(String(project.personalPosition.totalPayout))}"
+                          />
+                        </label>
+                      </div>
+                      <label>
+                        Notes
+                        <textarea
+                          name="notes"
+                          rows="3"
+                          placeholder="Optional instructions for how to handle this exited balance."
+                        >${escapeHtml(distribution.notes)}</textarea>
+                      </label>
+                      <p class="helper-copy">
+                        Use <code>split by percentage</code> to roll a portion of the full exit proceeds, or <code>split by fixed amount</code> to set an exact reinvestment amount. Your request remains pending until the manager approves it and schedules any cash payout.
+                      </p>
+                      <button class="button-primary" type="submit">Submit election for approval</button>
+                    </form>
                   `
-                )
-                .join("")}
-            </select>
-          </label>
-        </div>
-        <div class="form-grid-2">
-          <label>
-            Reinvest percentage
-            <input
-              type="number"
-              name="reinvestPercent"
-              min="0"
-              max="1"
-              step="0.01"
-              value="${inputValue(distribution.reinvestPercent)}"
-              placeholder="0.50"
-            />
-          </label>
-          <label>
-            Reinvest amount
-            <input
-              type="number"
-              name="reinvestAmount"
-              min="0"
-              step="100"
-              value="${inputValue(distribution.requestedReinvestAmount)}"
-              placeholder="${escapeHtml(String(project.personalPosition.totalPayout))}"
-            />
-          </label>
-        </div>
-        <label>
-          Notes
-          <textarea
-            name="notes"
-            rows="3"
-            placeholder="Optional instructions for how to handle this exited balance."
-          >${escapeHtml(distribution.notes)}</textarea>
-        </label>
-        <p class="helper-copy">
-          Use <code>split by percentage</code> to roll a portion of the full exit proceeds, or <code>split by fixed amount</code> to set an exact reinvestment amount. Any balance not reinvested is treated as a payout using the method saved in your profile.
-        </p>
-        <button class="button-primary" type="submit">Save election</button>
-      </form>
-    </div>
+                  : '<p class="helper-copy">This election has already been approved. The approved rollover and payout schedule are shown above.</p>'
+              }
+            </div>
+          `
+      }
+    </article>
   `;
 }
 
@@ -980,9 +1062,20 @@ function renderManagerDistributionReviewCard(review) {
               <div class="summary-grid">
                 ${summaryItem("Capital returned", formatCurrency(review.capitalReturned))}
                 ${summaryItem("Profit returned", formatCurrency(review.profitReturned))}
-                ${summaryItem("Cash paid out", formatCurrency(review.actualPayoutAmount))}
-                ${summaryItem("Reinvested", formatCurrency(review.reinvestedAmount))}
-                ${summaryItem("Awaiting instruction", formatCurrency(review.pendingDistributionAmount))}
+                ${summaryItem(
+                  "Requested payout",
+                  formatCurrency(review.requestedCashPayoutAmount)
+                )}
+                ${summaryItem(
+                  "Requested reinvestment",
+                  formatCurrency(review.requestedReinvestedAmount)
+                )}
+                ${summaryItem("Approved payout", formatCurrency(review.approvedCashPayoutAmount))}
+                ${summaryItem(
+                  "Approved reinvestment",
+                  formatCurrency(review.approvedReinvestedAmount)
+                )}
+                ${summaryItem("Actual payout recorded", formatCurrency(review.actualPayoutAmount))}
                 ${summaryItem(
                   "Rollover target",
                   review.rolloverTargetDealName || "No target selected"
@@ -991,100 +1084,122 @@ function renderManagerDistributionReviewCard(review) {
               <div class="distribution-review-meta">
                 <p><strong>Submitted:</strong> ${escapeHtml(submissionSummary)}</p>
                 <p><strong>Last updated:</strong> ${escapeHtml(formatDateTime(review.updatedAt))}</p>
-                <p><strong>Reviewed:</strong> ${escapeHtml(reviewSummary)}</p>
+                <p><strong>Approved:</strong> ${escapeHtml(reviewSummary)}</p>
+                <p><strong>Approval status:</strong> ${escapeHtml(
+                  distributionApprovalStatusLabel(review.approvalStatus)
+                )}</p>
+                <p><strong>Expected payout date:</strong> ${escapeHtml(
+                  review.payoutExpectedOn ? formatDate(review.payoutExpectedOn) : "Not scheduled"
+                )}</p>
                 <p><strong>Investor notes:</strong> ${escapeHtml(review.notes || "None provided.")}</p>
                 <p><strong>Manager notes:</strong> ${escapeHtml(review.overrideNotes || "None recorded.")}</p>
               </div>
-              <form
-                class="distribution-form"
-                data-manager-distribution-form="true"
-                data-deal-id="${escapeHtml(review.dealId)}"
-                data-participant-id="${escapeHtml(review.participantId)}"
-              >
-                <div class="form-grid-2">
-                  <label>
-                    Election type
-                    <select name="electionMode" required>
-                      <option value="payout_all" ${
-                        selectedMode === "payout_all" ? "selected" : ""
-                      }>Cash out all proceeds</option>
-                      <option value="reinvest_all" ${
-                        selectedMode === "reinvest_all" ? "selected" : ""
-                      }>Reinvest all proceeds</option>
-                      <option value="split_percentage" ${
-                        selectedMode === "split_percentage" ? "selected" : ""
-                      }>Split by percentage</option>
-                      <option value="split_amount" ${
-                        selectedMode === "split_amount" ? "selected" : ""
-                      }>Split by fixed amount</option>
-                    </select>
-                  </label>
-                  <label>
-                    Reinvestment target
-                    <select name="targetDealId">
-                      <option value="">No target selected</option>
-                      ${review.reinvestmentTargets
-                        .map(
-                          (deal) => `
-                            <option value="${escapeHtml(deal.id)}" ${
-                              deal.id === review.rolloverTargetDealId ? "selected" : ""
-                            }>
-                              ${escapeHtml(deal.name)}
-                            </option>
-                          `
-                        )
-                        .join("")}
-                    </select>
-                  </label>
-                </div>
-                <div class="form-grid-2">
-                  <label>
-                    Reinvest percentage
-                    <input
-                      type="number"
-                      name="reinvestPercent"
-                      min="0"
-                      max="1"
-                      step="0.01"
-                      value="${inputValue(review.reinvestPercent)}"
-                      placeholder="0.50"
-                    />
-                  </label>
-                  <label>
-                    Reinvest amount
-                    <input
-                      type="number"
-                      name="reinvestAmount"
-                      min="0"
-                      step="100"
-                      value="${inputValue(review.requestedReinvestAmount)}"
-                      placeholder="${escapeHtml(String(review.totalPayout))}"
-                    />
-                  </label>
-                </div>
-                <label>
-                  Distribution notes
-                  <textarea
-                    name="notes"
-                    rows="3"
-                    placeholder="Investor or manager notes about how this sold balance should be handled."
-                  >${escapeHtml(review.notes)}</textarea>
-                </label>
-                <label>
-                  Manager review or override notes
-                  <textarea
-                    name="overrideNotes"
-                    rows="3"
-                    placeholder="Document approval, override reason, or historical payout backfill context."
-                  >${escapeHtml(review.overrideNotes)}</textarea>
-                </label>
-                <p class="helper-copy">
-                  Saving without changing the financial instruction marks the election as reviewed.
-                  Changing the instruction records a manager override. Use this same form to backfill
-                  historical sold-deal payouts when no election is on file.
-                </p>
-                <button class="button-primary" type="submit">Save review or override</button>
-              </form>
+              ${
+                review.canApprove
+                  ? `
+                    <form
+                      class="distribution-form"
+                      data-manager-distribution-form="true"
+                      data-deal-id="${escapeHtml(review.dealId)}"
+                      data-participant-id="${escapeHtml(review.participantId)}"
+                    >
+                      <div class="form-grid-2">
+                        <label>
+                          Election type
+                          <select name="electionMode" required>
+                            <option value="payout_all" ${
+                              selectedMode === "payout_all" ? "selected" : ""
+                            }>Cash out all proceeds</option>
+                            <option value="reinvest_all" ${
+                              selectedMode === "reinvest_all" ? "selected" : ""
+                            }>Reinvest all proceeds</option>
+                            <option value="split_percentage" ${
+                              selectedMode === "split_percentage" ? "selected" : ""
+                            }>Split by percentage</option>
+                            <option value="split_amount" ${
+                              selectedMode === "split_amount" ? "selected" : ""
+                            }>Split by fixed amount</option>
+                          </select>
+                        </label>
+                        <label>
+                          Reinvestment target
+                          <select name="targetDealId">
+                            <option value="">No target selected</option>
+                            ${review.reinvestmentTargets
+                              .map(
+                                (deal) => `
+                                  <option value="${escapeHtml(deal.id)}" ${
+                                    deal.id === review.rolloverTargetDealId ? "selected" : ""
+                                  }>
+                                    ${escapeHtml(deal.name)}
+                                  </option>
+                                `
+                              )
+                              .join("")}
+                          </select>
+                        </label>
+                      </div>
+                      <div class="form-grid-2">
+                        <label>
+                          Reinvest percentage
+                          <input
+                            type="number"
+                            name="reinvestPercent"
+                            min="0"
+                            max="1"
+                            step="0.01"
+                            value="${inputValue(review.reinvestPercent)}"
+                            placeholder="0.50"
+                          />
+                        </label>
+                        <label>
+                          Reinvest amount
+                          <input
+                            type="number"
+                            name="reinvestAmount"
+                            min="0"
+                            step="100"
+                            value="${inputValue(review.requestedReinvestAmount)}"
+                            placeholder="${escapeHtml(String(review.totalPayout))}"
+                          />
+                        </label>
+                      </div>
+                      <div class="form-grid-2">
+                        <label>
+                          Expected payout date
+                          <input
+                            type="date"
+                            name="payoutExpectedOn"
+                            value="${inputValue(review.payoutExpectedOn)}"
+                          />
+                        </label>
+                        <label>
+                          Distribution notes
+                          <textarea
+                            name="notes"
+                            rows="3"
+                            placeholder="Investor or manager notes about how this sold balance should be handled."
+                          >${escapeHtml(review.notes)}</textarea>
+                        </label>
+                      </div>
+                      <label>
+                        Manager approval or override notes
+                        <textarea
+                          name="overrideNotes"
+                          rows="3"
+                          placeholder="Document the approval decision, any override reason, and payout timing context."
+                        >${escapeHtml(review.overrideNotes)}</textarea>
+                      </label>
+                      <p class="helper-copy">
+                        Approval applies the reinvestment to the selected target project immediately.
+                        Any cash portion is scheduled using the expected payout date and the investor
+                        receives an approval email with that timestamp.
+                      </p>
+                      <button class="button-primary" type="submit">Approve election</button>
+                    </form>
+                  `
+                  : '<p class="helper-copy">This distribution plan has already been approved and applied. No further manager action is required in this queue.</p>'
+              }
             </div>
           `
       }
@@ -1108,7 +1223,7 @@ function renderDistributionReviewSection() {
     sectionId: "manager-distribution-reviews",
     title: "Distribution Elections Review",
     copy:
-      "Review investor payout elections, record manager overrides, and backfill historical sold-deal payouts from one queue.",
+      "Approve investor payout elections, confirm rollover amounts into target deals, and schedule cash payouts from one queue.",
     message: renderMessage(state.messages.distribution),
     body: `
       <div class="table-toolbar">
@@ -1155,7 +1270,7 @@ function renderDistributionReviewSection() {
         </span>
       </div>
       <div class="metrics-grid">
-        ${metricCard("Pending review", String(pendingReviewCount))}
+        ${metricCard("Pending approvals", String(pendingReviewCount))}
         ${metricCard("Manager overrides", String(overrideCount))}
         ${metricCard("Backfill needed", String(backfillCount))}
         ${metricCard("Tracked cash payouts", formatCurrency(trackedCashPayout))}
@@ -1246,7 +1361,6 @@ function renderInvestorProject(project) {
             )}
           </div>
         </div>
-        ${renderDistributionElectionSection(project)}
         <div>
           <div class="section-head">
             <div>
@@ -1306,6 +1420,9 @@ function renderInvestorDashboard() {
   const { viewer, portfolio, projects } = state.dashboard;
   const filteredProjects = applyInvestorProjectFilters(projects);
   const projectFilterOptions = getInvestorProjectFilterOptions(projects);
+  const distributionProjects = projects.filter(
+    (project) => project.status === "sold" && project.personalPosition.totalPayout > 0
+  );
 
   return `
     <div class="shell">
@@ -1338,6 +1455,25 @@ function renderInvestorDashboard() {
             ${metricCard("Total amount payout", formatCurrency(portfolio.totalAmountPayout))}
             ${metricCard("Current active investments", String(portfolio.activeInvestments))}
             ${metricCard("Current pref earned", formatCurrency(portfolio.currentPrefEarned))}
+          </div>
+        `
+      })}
+
+      ${renderCollapsibleSection({
+        sectionId: "investor-distribution-elections",
+        title: "Reinvestment or Payout Elections",
+        copy:
+          "Sold-project proceeds are requested here and stay pending until the manager approves the rollover and schedules any cash payout.",
+        message: renderMessage(state.messages.distribution),
+        body: `
+          <div class="distribution-review-list">
+            ${
+              distributionProjects.length
+                ? distributionProjects
+                    .map((project) => renderInvestorDistributionElectionCard(project))
+                    .join("")
+                : '<div class="empty-state">No sold projects currently require a reinvestment or payout election.</div>'
+            }
           </div>
         `
       })}

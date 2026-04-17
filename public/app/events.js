@@ -321,9 +321,9 @@ export function setupEventListeners() {
         setMessage(
           "distribution",
           "success",
-          `Distribution election saved. ${formatNotificationBatchSummary(
+          `Distribution election submitted for manager approval. ${formatNotificationBatchSummary(
             result.election?.notifications ?? []
-          )} Cash payout totals now reflect the updated instruction.`
+          )} Approved payout and rollover amounts will appear after manager approval.`
         );
       } catch (error) {
         setMessage("distribution", "error", error.message);
@@ -362,6 +362,7 @@ export function setupEventListeners() {
               reinvestAmount: formData.get("reinvestAmount"),
               targetDealId: formData.get("targetDealId"),
               notes: formData.get("notes"),
+              payoutExpectedOn: formData.get("payoutExpectedOn"),
               overrideNotes: formData.get("overrideNotes")
             })
           }
@@ -370,9 +371,13 @@ export function setupEventListeners() {
         setMessage(
           "distribution",
           "success",
-          result.election?.managerOverride
-            ? "Manager override saved and the payout backfill was updated."
-            : "Distribution election reviewed and saved."
+          `Distribution election approved. ${formatNotificationBatchSummary(
+            result.election?.notifications ?? []
+          )}${
+            result.election?.managerOverride
+              ? " Manager override was applied before approval."
+              : " Investor instruction was approved as submitted."
+          }`
         );
       } catch (error) {
         setMessage("distribution", "error", error.message);
