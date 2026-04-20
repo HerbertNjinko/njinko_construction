@@ -1,4 +1,4 @@
-import { state } from "./state.js";
+import { state } from "./state.js?v=20260417-frontend-2";
 import {
   clearAuthFeedback,
   clearMessages,
@@ -10,7 +10,7 @@ import {
   setAuthMode,
   setMessage,
   toggleSectionCollapsed
-} from "./helpers.js";
+} from "./helpers.js?v=20260417-frontend-2";
 import {
   createTierDraft,
   createTimelineDraft,
@@ -18,7 +18,7 @@ import {
   getDealEditorDraft,
   syncDealEditorField,
   updateDealEditorDraft
-} from "./data.js";
+} from "./data.js?v=20260417-frontend-2";
 import {
   api,
   applyLoggedOutState,
@@ -26,8 +26,8 @@ import {
   loadSession,
   recordSessionActivity,
   refreshDashboard
-} from "./session.js";
-import { render } from "./renderers.js";
+} from "./session.js?v=20260417-frontend-2";
+import { render } from "./renderers.js?v=20260417-frontend-2";
 
 let listenersBound = false;
 

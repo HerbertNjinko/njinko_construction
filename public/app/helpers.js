@@ -1,4 +1,4 @@
-import { RESET_TOKEN_PARAM, createInitialMessages, state } from "./state.js";
+import { RESET_TOKEN_PARAM, createInitialMessages, state } from "./state.js?v=20260417-frontend-2";
 
 const currency = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -244,6 +244,15 @@ export function formatDateTime(value) {
 
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+}
+
+export function formatDate(value) {
+  if (!value) {
+    return "Not scheduled";
+  }
+
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleDateString();
 }
 
 export async function readFileAsPayload(file) {

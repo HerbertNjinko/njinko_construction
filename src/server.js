@@ -105,7 +105,10 @@ async function serveStatic(request, response) {
   try {
     const file = await readFile(filePath);
     const contentType = mimeTypes[extname(filePath)] ?? "application/octet-stream";
-    response.writeHead(200, { "Content-Type": contentType });
+    response.writeHead(200, {
+      "Content-Type": contentType,
+      "Cache-Control": "no-store"
+    });
     response.end(file);
   } catch {
     response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });

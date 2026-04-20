@@ -19,13 +19,30 @@ npm run seed
 npm start
 ```
 
-The app runs on `http://localhost:3000`.
+The app runs on the `PORT` value in `.env`. In the current local setup that is `http://localhost:4173`.
 
 If the database already contains data, `npm run seed` will stop instead of overwriting it. Use `npm run seed -- --force` only when you intentionally want to replace the current contents with the demo dataset.
 The npm scripts automatically load variables from `.env`. The local `.env` file is ignored by git; use `.env.example` as the template.
 If you prefer not to use `.env`, you can still provide `DATABASE_URL` or the standard `PGHOST` / `PGPORT` / `PGUSER` / `PGPASSWORD` / `PGDATABASE` variables from the shell.
 If no manager account exists when the app starts, it will create the initial manager from the `DEFAULT_MANAGER_*` values in `.env`.
 If `SMTP_HOST`, `SMTP_USER`, and `SMTP_PASS` are set, new-user credential emails are sent through SMTP. If SMTP is unavailable, the app falls back to the local outbox. Resend remains optional as a secondary provider when SMTP is not configured.
+
+## User service
+
+The investor portal is also installed as a user-level systemd service using:
+
+- service unit source: [`ops/systemd/njinko-investor-portal.service`](/home/herbertabingwa/njinko_construction/ops/systemd/njinko-investor-portal.service)
+- installed unit path: `~/.config/systemd/user/njinko-investor-portal.service`
+
+Use these commands for deploys and runtime management:
+
+```bash
+systemctl --user restart njinko-investor-portal.service
+systemctl --user status njinko-investor-portal.service --no-pager
+journalctl --user -u njinko-investor-portal.service -n 50 --no-pager
+```
+
+This service now owns port `4173`, and the Cloudflare tunnel forwards `investors.njinkofarm.com` to that local port.
 
 ## Demo logins
 

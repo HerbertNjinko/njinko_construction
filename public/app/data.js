@@ -1,5 +1,5 @@
-import { state } from "./state.js";
-import { roundMoney } from "./helpers.js";
+import { state } from "./state.js?v=20260417-frontend-2";
+import { roundMoney } from "./helpers.js?v=20260417-frontend-2";
 
 export function getCreateDealDefaults() {
   return {

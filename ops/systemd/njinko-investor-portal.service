@@ -1,0 +1,16 @@
+[Unit]
+Description=Njinko Investor Portal
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/herbertabingwa/njinko_construction
+Environment=HOME=/home/herbertabingwa
+ExecStart=/usr/bin/node --env-file-if-exists=.env src/server.js
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGINT
+
+[Install]
+WantedBy=default.target

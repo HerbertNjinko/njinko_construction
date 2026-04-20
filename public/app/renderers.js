@@ -5,11 +5,12 @@ import {
   LOGIN_PAGE_TITLE,
   app,
   state
-} from "./state.js";
+} from "./state.js?v=20260417-frontend-2";
 import {
   breakdownItem,
   escapeHtml,
   formatCurrency,
+  formatDate,
   formatDateTime,
   formatPercent,
   formatRate,
@@ -20,7 +21,7 @@ import {
   renderSectionToggle,
   summaryItem,
   titleCase
-} from "./helpers.js";
+} from "./helpers.js?v=20260417-frontend-2";
 import {
   applyAllocationFilters,
   applyContractorFilters,
@@ -40,7 +41,7 @@ import {
   getInvestorProjectFilterOptions,
   getManagerEditableDeal,
   getUserFilterOptions
-} from "./data.js";
+} from "./data.js?v=20260417-frontend-2";
 
 function renderLogin() {
   const errorMarkup = state.loginError
