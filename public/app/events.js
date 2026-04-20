@@ -392,7 +392,7 @@ export function setupEventListeners() {
       const formData = new FormData(event.target);
 
       try {
-        await api("/api/admin/allocations", {
+        const result = await api("/api/admin/allocations", {
           method: "POST",
           body: JSON.stringify({
             participantId: formData.get("participantId"),
@@ -409,7 +409,13 @@ export function setupEventListeners() {
           })
         });
         await refreshDashboard();
-        setMessage("allocation", "success", "Deal allocation saved to the database.");
+        setMessage(
+          "allocation",
+          "success",
+          result.action === "increased"
+            ? "Existing position increased successfully."
+            : "Deal allocation saved to the database."
+        );
         event.target.reset();
       } catch (error) {
         setMessage("allocation", "error", error.message);
@@ -441,6 +447,7 @@ export function setupEventListeners() {
             prefRate: Number(formData.get("prefRate")),
             timelineProgress: Number(formData.get("timelineProgress")),
             fundedOn: formData.get("fundedOn"),
+            investmentCloseOn: formData.get("investmentCloseOn"),
             projectedExitOn: formData.get("projectedExitOn"),
             actualExitOn: formData.get("actualExitOn")
           })
@@ -448,7 +455,13 @@ export function setupEventListeners() {
         state.adminDealId = result.deal.id;
         state.rollupDealFilter = result.deal.id;
         await refreshDashboard();
-        setMessage("dealCreate", "success", "Project created and ready for allocations.");
+        setMessage(
+          "dealCreate",
+          "success",
+          `Project created and ready for allocations. ${formatNotificationBatchSummary(
+            result.notifications ?? []
+          )}`
+        );
         render();
       } catch (error) {
         setMessage("dealCreate", "error", error.message);
@@ -481,6 +494,7 @@ export function setupEventListeners() {
             prefRate: draft.prefRate,
             timelineProgress: draft.timelineProgress,
             fundedOn: draft.fundedOn,
+            investmentCloseOn: draft.investmentCloseOn,
             projectedExitOn: draft.projectedExitOn,
             actualExitOn: draft.actualExitOn,
             timeline: draft.timeline,

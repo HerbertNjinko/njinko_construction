@@ -7,6 +7,7 @@ import { pool } from "./postgres.js";
 
 const OUTBOX_DIR = join(process.cwd(), "data", "email_outbox");
 const COMPANY_NAME = "Njinko Development Group LLC";
+const DEFAULT_APP_URL = "https://investors.njinkofarm.com/";
 
 function nowTimestamp() {
   return new Date().toISOString();
@@ -30,7 +31,7 @@ function resolveLoginUrl() {
     return explicit;
   }
 
-  return `http://localhost:${process.env.PORT ?? 3000}`;
+  return DEFAULT_APP_URL;
 }
 
 function buildCredentialBody({ fullName, email, temporaryPassword, role }) {
@@ -73,6 +74,30 @@ function buildIssueCreatedBody({
     issueDescription,
     "",
     `Log in to review and vote: ${resolveLoginUrl()}`,
+    "",
+    `If you have questions, contact ${COMPANY_NAME}.`
+  ].join("\n");
+}
+
+function buildNewDealAnnouncementBody({
+  fullName,
+  dealName,
+  location,
+  currentPhase,
+  investmentCloseOn
+}) {
+  return [
+    `Hello ${fullName},`,
+    "",
+    `A new project, ${dealName}, is now available in the ${COMPANY_NAME} portal.`,
+    "",
+    `Location: ${location}`,
+    `Current phase: ${currentPhase}`,
+    `Investment window closes: ${investmentCloseOn || "Not set"}`,
+    "",
+    "If you have proceeds from a closed project and want to reinvest into this new deal, log in to review the opportunity and update your elections early.",
+    "",
+    `Portal link: ${resolveLoginUrl()}`,
     "",
     `If you have questions, contact ${COMPANY_NAME}.`
   ].join("\n");
@@ -479,6 +504,32 @@ export async function sendPasswordResetNotification({
       fullName,
       resetUrl,
       expiresInMinutes
+    }),
+    persist: false
+  });
+}
+
+export async function sendNewDealAnnouncementNotification({
+  userId,
+  participantId,
+  fullName,
+  email,
+  dealName,
+  location,
+  currentPhase,
+  investmentCloseOn
+}) {
+  return queueAndDeliverNotification({
+    userId,
+    participantId,
+    recipientEmail: email,
+    subject: `New project available: ${dealName}`,
+    bodyText: buildNewDealAnnouncementBody({
+      fullName,
+      dealName,
+      location,
+      currentPhase,
+      investmentCloseOn
     }),
     persist: false
   });

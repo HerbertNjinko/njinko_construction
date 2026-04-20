@@ -8,6 +8,7 @@ import {
   sendDistributionElectionApprovedNotification,
   sendDistributionElectionAlertNotification,
   sendIssueCreatedNotification,
+  sendNewDealAnnouncementNotification,
   sendPasswordResetNotification
 } from "./notifications.js";
 import { pool, queryAll, queryOne, withTransaction } from "./postgres.js";
@@ -44,6 +45,11 @@ function normalizeOptionalDateInput(value, fieldLabel) {
   }
 
   return normalized;
+}
+
+function isInvestmentWindowClosed(investmentCloseOn, asOfDate = todayStamp()) {
+  const normalizedCloseDate = normalizeOptionalText(investmentCloseOn);
+  return Boolean(normalizedCloseDate && normalizedCloseDate < asOfDate);
 }
 
 function normalizeConfigValue(value) {
@@ -111,7 +117,8 @@ function hashResetToken(token) {
 }
 
 function buildPasswordResetUrl(token) {
-  const appUrl = normalizeConfigValue(process.env.APP_URL) || `http://localhost:${process.env.PORT ?? 3000}`;
+  const appUrl =
+    normalizeConfigValue(process.env.APP_URL) || "https://investors.njinkofarm.com/";
   const separator = appUrl.includes("?") ? "&" : "?";
   return `${appUrl}${separator}resetToken=${encodeURIComponent(token)}`;
 }
@@ -435,13 +442,36 @@ async function insertSeedData(executor) {
           status,
           current_phase,
           funded_on,
+          investment_close_on,
           projected_exit_on,
           actual_exit_on,
           timeline_progress,
           created_at,
           updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+        VALUES (
+          $1,
+          $2,
+          $3,
+          $4,
+          $5,
+          $6,
+          $7,
+          $8,
+          $9,
+          $10,
+          $11,
+          $12,
+          $13,
+          $14,
+          $15,
+          $16,
+          $17,
+          $18,
+          $19,
+          $20,
+          $21
+        )
       `,
       [
         deal.id,
@@ -459,6 +489,7 @@ async function insertSeedData(executor) {
         deal.status,
         deal.currentPhase,
         deal.fundedOn,
+        deal.investmentCloseOn ?? null,
         deal.projectedExitOn ?? null,
         deal.actualExitOn ?? null,
         deal.timelineProgress,
@@ -890,6 +921,7 @@ export async function getAppDataSnapshot() {
         status,
         current_phase AS "currentPhase",
         funded_on AS "fundedOn",
+        investment_close_on AS "investmentCloseOn",
         projected_exit_on AS "projectedExitOn",
         actual_exit_on AS "actualExitOn",
         timeline_progress AS "timelineProgress"
@@ -1631,7 +1663,7 @@ export async function createDealAllocation(input) {
 
   const deal = await queryOne(
     `
-      SELECT id, name
+      SELECT id, name, investment_close_on AS "investmentCloseOn"
       FROM deals
       WHERE id = $1
     `,
@@ -1640,6 +1672,12 @@ export async function createDealAllocation(input) {
 
   if (!deal) {
     throw new Error("Deal not found.");
+  }
+
+  if (isInvestmentWindowClosed(deal.investmentCloseOn)) {
+    throw new Error(
+      `Investments for ${deal.name} closed on ${deal.investmentCloseOn}. You can no longer add allocations to this project.`
+    );
   }
 
   const participant = await queryOne(
@@ -1661,17 +1699,17 @@ export async function createDealAllocation(input) {
 
   const existingPosition = await queryOne(
     `
-      SELECT id
+      SELECT
+        id,
+        class_type AS "classType",
+        contribution_type AS "contributionType",
+        contribution_amount AS "contributionAmount"
       FROM positions
       WHERE deal_id = $1
         AND participant_id = $2
     `,
     [dealId, participantId]
   );
-
-  if (existingPosition) {
-    throw new Error("That participant already has a position in this deal.");
-  }
 
   if (participant.category === "contractor" && classType !== "Class C") {
     throw new Error("Contractor participants must be assigned as Class C.");
@@ -1703,73 +1741,168 @@ export async function createDealAllocation(input) {
   const positionId = createId("position");
 
   await withTransaction(async (client) => {
-    await client.query(
-      `
-        INSERT INTO positions (
-          id,
-          deal_id,
-          participant_id,
-          class_type,
-          contribution_type,
-          contribution_amount,
-          distributions_to_date,
-          created_at,
-          updated_at
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-      `,
-      [
-        positionId,
-        dealId,
-        participantId,
-        classType,
-        contributionType ||
-          (participant.category === "contractor" ? "Deferred compensation" : "Cash equity"),
-        roundNumber(contributionAmount),
-        0,
-        timestamp,
-        timestamp
-      ]
-    );
+    if (existingPosition) {
+      if (existingPosition.classType !== classType) {
+        throw new Error(
+          `This participant already has a ${existingPosition.classType} position in ${deal.name}. Use the same class type to increase the position.`
+        );
+      }
 
-    if (participant.category === "contractor") {
       await client.query(
         `
-          INSERT INTO contractor_participation (
+          UPDATE positions
+          SET
+            contribution_type = $1,
+            contribution_amount = $2,
+            updated_at = $3
+          WHERE id = $4
+        `,
+        [
+          contributionType || existingPosition.contributionType,
+          roundNumber(Number(existingPosition.contributionAmount ?? 0) + contributionAmount),
+          timestamp,
+          existingPosition.id
+        ]
+      );
+
+      if (participant.category === "contractor") {
+        const existingContractor = await queryOne(
+          `
+            SELECT
+              id,
+              trade,
+              total_contract_value AS "totalContractValue",
+              cash_paid AS "cashPaid",
+              deferred_amount AS "deferredAmount",
+              contribution_type AS "contributionType",
+              status
+            FROM contractor_participation
+            WHERE deal_id = $1
+              AND participant_id = $2
+          `,
+          [dealId, participantId],
+          client
+        );
+
+        const updatedTotalContractValue = roundNumber(
+          Number(existingContractor?.totalContractValue ?? 0) + totalContractValue
+        );
+        const updatedCashPaid = roundNumber(Number(existingContractor?.cashPaid ?? 0) + cashPaid);
+        const updatedDeferredAmount = roundNumber(
+          Number(existingContractor?.deferredAmount ?? 0) + contributionAmount
+        );
+
+        if (updatedCashPaid + updatedDeferredAmount > updatedTotalContractValue) {
+          throw new Error("Cash paid plus deferred amount cannot exceed the total contract value.");
+        }
+
+        if (existingContractor) {
+          await client.query(
+            `
+              UPDATE contractor_participation
+              SET
+                trade = $1,
+                total_contract_value = $2,
+                cash_paid = $3,
+                deferred_amount = $4,
+                contribution_type = $5,
+                hybrid = $6,
+                status = $7,
+                updated_at = $8
+              WHERE id = $9
+            `,
+            [
+              trade || existingContractor.trade,
+              updatedTotalContractValue,
+              updatedCashPaid,
+              updatedDeferredAmount,
+              contributionType || existingContractor.contributionType,
+              updatedCashPaid > 0 && updatedCashPaid < updatedTotalContractValue ? 1 : 0,
+              contractorStatus || existingContractor.status,
+              timestamp,
+              existingContractor.id
+            ]
+          );
+        }
+      }
+    } else {
+      await client.query(
+        `
+          INSERT INTO positions (
             id,
             deal_id,
             participant_id,
-            trade,
-            total_contract_value,
-            cash_paid,
-            deferred_amount,
+            class_type,
             contribution_type,
-            hybrid,
-            status,
+            contribution_amount,
+            distributions_to_date,
             created_at,
             updated_at
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         `,
         [
-          createId("contractor"),
+          positionId,
           dealId,
           participantId,
-          trade,
-          roundNumber(totalContractValue),
-          roundNumber(cashPaid),
+          classType,
+          contributionType ||
+            (participant.category === "contractor" ? "Deferred compensation" : "Cash equity"),
           roundNumber(contributionAmount),
-          "Class C",
-          cashPaid > 0 && cashPaid < totalContractValue ? 1 : 0,
-          contractorStatus,
+          0,
           timestamp,
           timestamp
         ]
       );
+
+      if (participant.category === "contractor") {
+        await client.query(
+          `
+            INSERT INTO contractor_participation (
+              id,
+              deal_id,
+              participant_id,
+              trade,
+              total_contract_value,
+              cash_paid,
+              deferred_amount,
+              contribution_type,
+              hybrid,
+              status,
+              created_at,
+              updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+          `,
+          [
+            createId("contractor"),
+            dealId,
+            participantId,
+            trade,
+            roundNumber(totalContractValue),
+            roundNumber(cashPaid),
+            roundNumber(contributionAmount),
+            "Class C",
+            cashPaid > 0 && cashPaid < totalContractValue ? 1 : 0,
+            contractorStatus,
+            timestamp,
+            timestamp
+          ]
+        );
+      }
     }
 
     await syncDealEquity(dealId, client);
   });
+
+  return {
+    action: existingPosition ? "increased" : "created",
+    dealId,
+    dealName: deal.name,
+    participantId,
+    participantName: participant.name,
+    positionId: existingPosition?.id ?? positionId
+  };
 }
 
 async function applyApprovedReinvestmentAllocation({
@@ -1858,9 +1991,13 @@ function normalizeDealInput(input) {
   const location = String(input.location ?? "").trim();
   const currentPhase = String(input.currentPhase ?? "").trim();
   const status = String(input.status ?? "").trim();
-  const fundedOn = String(input.fundedOn ?? "").trim();
-  const projectedExitOn = String(input.projectedExitOn ?? "").trim();
-  const actualExitOn = String(input.actualExitOn ?? "").trim();
+  const fundedOn = normalizeOptionalDateInput(input.fundedOn, "Funded on");
+  const investmentCloseOn = normalizeOptionalDateInput(
+    input.investmentCloseOn,
+    "Investment close date"
+  );
+  const projectedExitOn = normalizeOptionalDateInput(input.projectedExitOn, "Projected exit");
+  const actualExitOn = normalizeOptionalDateInput(input.actualExitOn, "Actual exit");
   const debt = Number(input.debt);
   const taxExpense = Number(input.taxExpense ?? 0);
   const debtInterestRate = Number(input.debtInterestRate ?? 0);
@@ -1871,8 +2008,8 @@ function normalizeDealInput(input) {
   const prefRate = Number(input.prefRate);
   const timelineProgress = Number(input.timelineProgress);
 
-  if (!name || !location || !currentPhase || !fundedOn) {
-    throw new Error("Name, location, phase, and funded date are required.");
+  if (!name || !location || !currentPhase || !fundedOn || !investmentCloseOn) {
+    throw new Error("Name, location, phase, funded date, and investment close date are required.");
   }
 
   if (!["under_construction", "listed", "sold"].includes(status)) {
@@ -1921,8 +2058,9 @@ function normalizeDealInput(input) {
     currentPhase,
     status,
     fundedOn,
-    projectedExitOn: projectedExitOn || null,
-    actualExitOn: actualExitOn || null,
+    investmentCloseOn,
+    projectedExitOn,
+    actualExitOn,
     debt: roundNumber(debt),
     taxExpense: roundNumber(taxExpense),
     debtInterestRate: roundNumber(debtInterestRate),
@@ -2288,12 +2426,13 @@ export async function createDeal(input) {
           sale_price,
           hold_months,
           pref_rate,
-          status,
-          current_phase,
-          funded_on,
-          projected_exit_on,
-          actual_exit_on,
-          timeline_progress,
+        status,
+        current_phase,
+        funded_on,
+        investment_close_on,
+        projected_exit_on,
+        actual_exit_on,
+        timeline_progress,
           created_at,
           updated_at
         )
@@ -2317,7 +2456,8 @@ export async function createDeal(input) {
           $17,
           $18,
           $19,
-          $20
+          $20,
+          $21
         )
       `,
       [
@@ -2336,6 +2476,7 @@ export async function createDeal(input) {
         deal.status,
         deal.currentPhase,
         deal.fundedOn,
+        deal.investmentCloseOn,
         deal.projectedExitOn,
         deal.actualExitOn,
         deal.timelineProgress,
@@ -2353,7 +2494,47 @@ export async function createDeal(input) {
     }
   });
 
-  return queryOne(
+  const recipients = await queryAll(
+    `
+      SELECT
+        users.id AS "userId",
+        users.participant_id AS "participantId",
+        users.email AS email,
+        participants.name AS "fullName"
+      FROM users
+      JOIN participants ON participants.id = users.participant_id
+      WHERE users.role = 'investor'
+        AND users.is_active = 1
+      ORDER BY participants.name
+    `
+  );
+
+  const notifications = await Promise.all(
+    recipients.map(async (recipient) => {
+      try {
+        return await sendNewDealAnnouncementNotification({
+          userId: recipient.userId,
+          participantId: recipient.participantId,
+          fullName: recipient.fullName,
+          email: recipient.email,
+          dealName: deal.name,
+          location: deal.location,
+          currentPhase: deal.currentPhase,
+          investmentCloseOn: deal.investmentCloseOn
+        });
+      } catch (error) {
+        return {
+          status: "failed",
+          provider: "notification_error",
+          localPath: null,
+          errorMessage: error.message,
+          recipientEmail: recipient.email
+        };
+      }
+    })
+  );
+
+  const createdDeal = await queryOne(
     `
       SELECT id, name
       FROM deals
@@ -2361,6 +2542,11 @@ export async function createDeal(input) {
     `,
     [dealId]
   );
+
+  return {
+    deal: createdDeal,
+    notifications
+  };
 }
 
 export async function updateDeal(dealId, input) {
@@ -2418,11 +2604,12 @@ export async function updateDeal(dealId, input) {
           status = $11,
           current_phase = $12,
           funded_on = $13,
-          projected_exit_on = $14,
-          actual_exit_on = $15,
-          timeline_progress = $16,
-          updated_at = $17
-        WHERE id = $18
+          investment_close_on = $14,
+          projected_exit_on = $15,
+          actual_exit_on = $16,
+          timeline_progress = $17,
+          updated_at = $18
+        WHERE id = $19
       `,
       [
         deal.name,
@@ -2438,6 +2625,7 @@ export async function updateDeal(dealId, input) {
         deal.status,
         deal.currentPhase,
         deal.fundedOn,
+        deal.investmentCloseOn,
         deal.projectedExitOn,
         deal.actualExitOn,
         deal.timelineProgress,

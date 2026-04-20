@@ -663,8 +663,8 @@ const server = createServer(async (request, response) => {
       }
 
       try {
-        await createDealAllocation(body);
-        sendJson(response, 201, { ok: true });
+        const allocation = await createDealAllocation(body);
+        sendJson(response, allocation.action === "created" ? 201 : 200, allocation);
       } catch (error) {
         sendJson(response, 400, { error: error.message });
       }
@@ -687,8 +687,8 @@ const server = createServer(async (request, response) => {
       }
 
       try {
-        const deal = await createDeal(body);
-        sendJson(response, 201, { deal });
+        const result = await createDeal(body);
+        sendJson(response, 201, result);
       } catch (error) {
         sendJson(response, 400, { error: error.message });
       }

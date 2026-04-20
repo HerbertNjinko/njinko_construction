@@ -31,6 +31,7 @@ import {
   applyUserFilters,
   buildContractorProjectRollups,
   getAllocationFilterOptions,
+  getAllocatableDeals,
   getContractorFilterOptions,
   getCreateDealDefaults,
   getDealEditorDraft,
@@ -2016,13 +2017,13 @@ function renderCreateUserPanel() {
 
 function renderAllocationPanel() {
   const participants = state.dashboard.admin.participants;
-  const deals = state.dashboard.deals;
+  const deals = getAllocatableDeals(state.dashboard.deals);
 
   return renderCollapsibleSection({
     sectionId: "admin-add-allocation",
     title: "Add Deal Allocation",
     copy:
-      "Link a participant to a deal. Contractor fields are only required for contractor participants.",
+      "Link a participant to a deal or increase an existing position while the investment window is still open. Contractor fields are only required for contractor participants.",
     message: renderMessage(state.messages.allocation),
     panelClass: "admin-card",
     body: `
@@ -2050,7 +2051,13 @@ function renderAllocationPanel() {
             ${deals
               .map(
                 (deal) => `
-                  <option value="${escapeHtml(deal.id)}">${escapeHtml(deal.name)}</option>
+                  <option value="${escapeHtml(deal.id)}">
+                    ${escapeHtml(
+                      deal.investmentCloseOn
+                        ? `${deal.name} · closes ${formatDate(deal.investmentCloseOn)}`
+                        : `${deal.name} · no close date`
+                    )}
+                  </option>
                 `
               )
               .join("")}
@@ -2073,6 +2080,9 @@ function renderAllocationPanel() {
           Contribution type
           <input type="text" name="contributionType" placeholder="Cash equity or Deferred compensation" />
         </label>
+        <p class="helper-copy">
+          Only projects whose investment window is still open can accept new allocations or position increases.
+        </p>
         <p class="helper-copy">
           Contractor-only inputs:
         </p>
@@ -2242,14 +2252,25 @@ function renderCreateDealPanel() {
             <input type="date" name="fundedOn" value="${escapeHtml(defaults.fundedOn)}" required />
           </label>
           <label>
+            Investment close date
+            <input
+              type="date"
+              name="investmentCloseOn"
+              value="${escapeHtml(defaults.investmentCloseOn)}"
+              required
+            />
+          </label>
+        </div>
+        <div class="form-grid-2">
+          <label>
             Projected exit
             <input type="date" name="projectedExitOn" />
           </label>
+          <label>
+            Actual exit
+            <input type="date" name="actualExitOn" />
+          </label>
         </div>
-        <label>
-          Actual exit
-          <input type="date" name="actualExitOn" />
-        </label>
         <button class="button-primary" type="submit">Create project</button>
       </form>
     `
@@ -2449,6 +2470,10 @@ function renderDealEditorPanel() {
           ${summaryItem("Gross project IRR", formatPercent(deal.projectIrr))}
           ${summaryItem("Sponsor promote", formatCurrency(deal.sponsorPromote))}
           ${summaryItem("Timeline progress", `${deal.timelineProgress}%`)}
+          ${summaryItem(
+            "Investment closes",
+            deal.investmentCloseOn ? formatDate(deal.investmentCloseOn) : "No deadline"
+          )}
         </div>
         <div class="form-grid-2">
           <label>
@@ -2630,6 +2655,18 @@ function renderDealEditorPanel() {
             />
           </label>
           <label>
+            Investment close date
+            <input
+              type="date"
+              name="investmentCloseOn"
+              value="${inputValue(draft.investmentCloseOn)}"
+              data-deal-field="investmentCloseOn"
+              required
+            />
+          </label>
+        </div>
+        <div class="form-grid-2">
+          <label>
             Projected exit
             <input
               type="date"
@@ -2638,16 +2675,16 @@ function renderDealEditorPanel() {
               data-deal-field="projectedExitOn"
             />
           </label>
+          <label>
+            Actual exit
+            <input
+              type="date"
+              name="actualExitOn"
+              value="${inputValue(draft.actualExitOn)}"
+              data-deal-field="actualExitOn"
+            />
+          </label>
         </div>
-        <label>
-          Actual exit
-          <input
-            type="date"
-            name="actualExitOn"
-            value="${inputValue(draft.actualExitOn)}"
-            data-deal-field="actualExitOn"
-          />
-        </label>
 
         ${renderCollapsibleSection({
           sectionId: `admin-edit-deal-${draft.id}-timeline`,

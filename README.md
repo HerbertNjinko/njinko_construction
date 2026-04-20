@@ -24,6 +24,7 @@ The app runs on the `PORT` value in `.env`. In the current local setup that is `
 If the database already contains data, `npm run seed` will stop instead of overwriting it. Use `npm run seed -- --force` only when you intentionally want to replace the current contents with the demo dataset.
 The npm scripts automatically load variables from `.env`. The local `.env` file is ignored by git; use `.env.example` as the template.
 If you prefer not to use `.env`, you can still provide `DATABASE_URL` or the standard `PGHOST` / `PGPORT` / `PGUSER` / `PGPASSWORD` / `PGDATABASE` variables from the shell.
+Credential emails and password reset links use `APP_URL`; if it is not set, the app defaults to `https://investors.njinkofarm.com/`.
 If no manager account exists when the app starts, it will create the initial manager from the `DEFAULT_MANAGER_*` values in `.env`.
 If `SMTP_HOST`, `SMTP_USER`, and `SMTP_PASS` are set, new-user credential emails are sent through SMTP. If SMTP is unavailable, the app falls back to the local outbox. Resend remains optional as a secondary provider when SMTP is not configured.
 
@@ -68,7 +69,10 @@ These accounts exist only after running `npm run seed`.
   - add manager, investor, and contractor users
   - capture driver's license number and attach an ID card at user creation
   - add deal allocations / Class C participation
+  - increase an existing participant position before the project investment close date
   - update project records and save changes to the database
+  - define an investment close date for each project so new allocations stop after the window closes
+  - send a new-project announcement email to active investor portal users when a project is created
 
 ## Database
 

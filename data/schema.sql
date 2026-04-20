@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS deals (
   status TEXT NOT NULL CHECK (status IN ('under_construction', 'listed', 'sold')),
   current_phase TEXT NOT NULL,
   funded_on TEXT NOT NULL,
+  investment_close_on TEXT,
   projected_exit_on TEXT,
   actual_exit_on TEXT,
   timeline_progress INTEGER NOT NULL DEFAULT 0,

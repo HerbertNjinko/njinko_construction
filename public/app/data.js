@@ -2,6 +2,9 @@ import { state } from "./state.js?v=20260417-frontend-2";
 import { roundMoney } from "./helpers.js?v=20260417-frontend-2";
 
 export function getCreateDealDefaults() {
+  const investmentCloseOn = new Date();
+  investmentCloseOn.setDate(investmentCloseOn.getDate() + 30);
+
   return {
     status: "under_construction",
     holdMonths: 18,
@@ -10,8 +13,26 @@ export function getCreateDealDefaults() {
     debtInterestRate: 0,
     totalInterestPaid: 0,
     timelineProgress: 0,
-    fundedOn: new Date().toISOString().slice(0, 10)
+    fundedOn: new Date().toISOString().slice(0, 10),
+    investmentCloseOn: investmentCloseOn.toISOString().slice(0, 10)
   };
+}
+
+function todayStamp() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+export function isDealOpenForAllocation(deal) {
+  const investmentCloseOn = String(deal?.investmentCloseOn ?? "").trim();
+  return !investmentCloseOn || investmentCloseOn >= todayStamp();
+}
+
+export function getAllocatableDeals(deals = state.dashboard?.deals ?? []) {
+  return deals.filter((deal) => isDealOpenForAllocation(deal));
 }
 
 export function getDefaultVoteCloseDate() {
@@ -316,6 +337,7 @@ export function buildDealEditorDraft(deal) {
     prefRate: String(deal.prefRate ?? 0),
     timelineProgress: String(deal.timelineProgress ?? 0),
     fundedOn: String(deal.fundedOn ?? ""),
+    investmentCloseOn: String(deal.investmentCloseOn ?? ""),
     projectedExitOn: String(deal.projectedExitOn ?? ""),
     actualExitOn: String(deal.actualExitOn ?? ""),
     timeline:
