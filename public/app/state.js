@@ -63,6 +63,7 @@ export function createInitialMessages() {
     issue: null,
     vote: null,
     distribution: null,
+    withdrawal: null,
     resource: null,
     directory: null,
     profile: null,

@@ -17,6 +17,7 @@ const REQUIRED_TABLES = [
   "email_notifications",
   "company_resources",
   "distribution_elections",
+  "early_withdrawal_requests",
   "deal_issues",
   "deal_issue_votes",
   "archived_records"

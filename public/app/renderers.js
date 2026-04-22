@@ -365,6 +365,10 @@ function renderIssueMetrics(issue, { showCapital = false, showViewer = true } = 
     summaryItem("Vote closes", issue.closesOn || "Open ended")
   ];
 
+  if (issue.issueType === "penalty_rate_change" && issue.proposedPenaltyRate !== null) {
+    metrics.push(summaryItem("Proposed penalty rate", formatRate(issue.proposedPenaltyRate)));
+  }
+
   if (showViewer) {
     const viewerVoteLabel =
       issue.myVote
@@ -380,6 +384,14 @@ function renderIssueMetrics(issue, { showCapital = false, showViewer = true } = 
   if (showCapital) {
     metrics.push(summaryItem("Eligible capital", formatCurrency(issue.eligibleInvestment)));
     metrics.push(summaryItem("Votes cast", `${issue.voteCount} of ${issue.eligibleVoterCount}`));
+  }
+
+  if (
+    issue.issueType === "penalty_rate_change" &&
+    issue.resolutionResult === "passed" &&
+    issue.resolutionAppliedAt
+  ) {
+    metrics.push(summaryItem("Applied to project", formatDateTime(issue.resolutionAppliedAt)));
   }
 
   return metrics.join("");
@@ -485,6 +497,9 @@ function renderInvestorIssueCard(issue) {
         </div>
         <div class="issue-head-meta">
           ${renderIssueStatus(issue)}
+          <span class="read-only-tag">${escapeHtml(
+            issue.issueType === "penalty_rate_change" ? "Penalty rate vote" : "General vote"
+          )}</span>
           <span class="read-only-tag">${escapeHtml(`Closes ${issue.closesOn || "TBD"}`)}</span>
           <span class="read-only-tag">${escapeHtml(`${formatPercent(issue.myWeightPct)} power`)}</span>
         </div>
@@ -832,6 +847,17 @@ function distributionApprovalStatusLabel(status) {
   return labels[status] ?? "Pending manager approval";
 }
 
+function earlyWithdrawalStatusLabel(status) {
+  const labels = {
+    none: "No request submitted",
+    pending: "Pending manager approval",
+    approved: "Approved",
+    rejected: "Rejected"
+  };
+
+  return labels[status] ?? "Pending manager approval";
+}
+
 function renderInvestorDistributionElectionCard(project) {
   const distribution = project.personalPosition.distributionElection;
 
@@ -1005,6 +1031,114 @@ function renderInvestorDistributionElectionCard(project) {
                     </form>
                   `
                   : '<p class="helper-copy">This election has already been approved. The approved rollover and payout schedule are shown above.</p>'
+              }
+            </div>
+          `
+      }
+    </article>
+  `;
+}
+
+function renderInvestorEarlyWithdrawalCard(project) {
+  const withdrawal = project.withdrawalRequest;
+
+  if (!withdrawal) {
+    return "";
+  }
+
+  const sectionId = `investor-withdrawal-${project.id}`;
+  const collapsed = Boolean(state.collapsedSections?.[sectionId]);
+  const statusClass =
+    withdrawal.requestStatus === "approved"
+      ? "reviewed"
+      : withdrawal.requestStatus === "rejected"
+        ? "rejected"
+        : withdrawal.hasRequest
+          ? "pending"
+          : "empty";
+
+  return `
+    <article class="distribution-review-card">
+      <div class="distribution-review-head">
+        <div>
+          <p class="eyebrow">${escapeHtml(project.name)}</p>
+          <h4>${escapeHtml(project.location)}</h4>
+          <p class="deal-location">${escapeHtml(project.currentPhase)}</p>
+          <div class="mini-head">
+            <span class="review-status-pill ${escapeHtml(statusClass)}">${escapeHtml(
+              earlyWithdrawalStatusLabel(withdrawal.requestStatus)
+            )}</span>
+            <span class="class-pill">${escapeHtml(withdrawal.classType || "Investor position")}</span>
+            <span class="read-only-tag">${escapeHtml(
+              payoutMethodLabel(withdrawal.payoutMethod)
+            )}</span>
+          </div>
+        </div>
+        <div class="distribution-review-toolbar">
+          <div>
+            <p class="metric-label">Current invested capital</p>
+            <p class="metric-value">${escapeHtml(
+              formatCurrency(withdrawal.currentContributionAmount || withdrawal.requestedCapitalAmount)
+            )}</p>
+          </div>
+          ${renderSectionToggle(sectionId)}
+        </div>
+      </div>
+      ${
+        collapsed
+          ? '<div class="deal-card-collapsed-note">Request minimized. Use Maximize to reopen this withdrawal request.</div>'
+          : `
+            <div class="distribution-review-body">
+              <div class="summary-grid">
+                ${summaryItem("Withdrawal request", formatCurrency(withdrawal.requestedCapitalAmount))}
+                ${summaryItem("Penalty rate", formatRate(withdrawal.penaltyRate))}
+                ${summaryItem("Forfeited capital", formatCurrency(withdrawal.penaltyAmount))}
+                ${summaryItem("Estimated payout", formatCurrency(withdrawal.estimatedPayoutAmount))}
+                ${summaryItem("Approved payout", formatCurrency(withdrawal.approvedPayoutAmount))}
+                ${summaryItem(
+                  "Expected payout date",
+                  withdrawal.payoutExpectedOn ? formatDate(withdrawal.payoutExpectedOn) : "Not scheduled"
+                )}
+              </div>
+              <div class="distribution-review-meta">
+                <p><strong>Status:</strong> ${escapeHtml(
+                  earlyWithdrawalStatusLabel(withdrawal.requestStatus)
+                )}</p>
+                <p><strong>Investment window closes:</strong> ${escapeHtml(
+                  project.investmentCloseOn ? formatDate(project.investmentCloseOn) : "Not set"
+                )}</p>
+                <p><strong>Investor notes:</strong> ${escapeHtml(
+                  withdrawal.investorNotes || "None provided."
+                )}</p>
+                <p><strong>Manager notes:</strong> ${escapeHtml(
+                  withdrawal.managerNotes || "No manager notes yet."
+                )}</p>
+              </div>
+              ${
+                withdrawal.canRequest
+                  ? `
+                    <form class="distribution-form" data-withdrawal-form="true" data-deal-id="${escapeHtml(
+                      project.id
+                    )}">
+                      <label>
+                        Notes for the manager
+                        <textarea
+                          name="investorNotes"
+                          rows="3"
+                          placeholder="Share any context for why you need to withdraw before project completion."
+                        >${escapeHtml(withdrawal.investorNotes)}</textarea>
+                      </label>
+                      <p class="helper-copy">
+                        Company policy on this project returns ${escapeHtml(
+                          formatRate(1 - project.earlyWithdrawalPenaltyRate)
+                        )} of your invested capital and forfeits ${escapeHtml(
+                          formatRate(project.earlyWithdrawalPenaltyRate)
+                        )}. Your request stays pending until the manager approves or rejects it.
+                      </p>
+                      <button class="button-primary" type="submit">Submit withdrawal request</button>
+                    </form>
+                  `
+                  : '<p class="helper-copy">This request has been reviewed. The final payout status and manager notes are shown above.</p>'
               }
             </div>
           `
@@ -1209,10 +1343,130 @@ function renderManagerDistributionReviewCard(review) {
   `;
 }
 
+function renderManagerEarlyWithdrawalReviewCard(review) {
+  const sectionId = `manager-withdrawal-review-${review.dealId}-${review.participantId}`;
+  const collapsed = Boolean(state.collapsedSections?.[sectionId]);
+  const submissionSummary = review.submittedByName ? review.submittedByName : "Investor";
+  const reviewSummary = review.reviewedAt
+    ? `${review.reviewedByName ?? "Manager"} · ${formatDateTime(review.reviewedAt)}`
+    : "Not reviewed";
+  const statusClass =
+    review.requestStatus === "approved"
+      ? "reviewed"
+      : review.requestStatus === "rejected"
+        ? "rejected"
+        : "pending";
+
+  return `
+    <article class="distribution-review-card">
+      <div class="distribution-review-head">
+        <div>
+          <p class="eyebrow">${escapeHtml(review.dealName)}</p>
+          <h4>${escapeHtml(review.participantName)}</h4>
+          <p class="deal-location">${escapeHtml(review.participantEmail || "No linked portal email")}</p>
+          <div class="mini-head">
+            <span class="review-status-pill ${escapeHtml(statusClass)}">${escapeHtml(
+              earlyWithdrawalStatusLabel(review.requestStatus)
+            )}</span>
+            <span class="class-pill">${escapeHtml(review.classType || "Investor position")}</span>
+            <span class="read-only-tag">${escapeHtml(
+              payoutMethodLabel(review.payoutMethod)
+            )}</span>
+          </div>
+        </div>
+        <div class="distribution-review-toolbar">
+          <div>
+            <p class="metric-label">Requested capital</p>
+            <p class="metric-value">${escapeHtml(formatCurrency(review.requestedCapitalAmount))}</p>
+          </div>
+          ${renderSectionToggle(sectionId)}
+        </div>
+      </div>
+      ${
+        collapsed
+          ? '<div class="deal-card-collapsed-note">Review minimized. Use Maximize to reopen this withdrawal request.</div>'
+          : `
+            <div class="distribution-review-body">
+              <div class="summary-grid">
+                ${summaryItem("Current capital still in deal", formatCurrency(review.currentContributionAmount))}
+                ${summaryItem("Penalty rate", formatRate(review.penaltyRate))}
+                ${summaryItem("Forfeited capital", formatCurrency(review.penaltyAmount))}
+                ${summaryItem("Estimated payout", formatCurrency(review.estimatedPayoutAmount))}
+                ${summaryItem("Approved payout", formatCurrency(review.approvedPayoutAmount))}
+                ${summaryItem(
+                  "Expected payout date",
+                  review.payoutExpectedOn ? formatDate(review.payoutExpectedOn) : "Not scheduled"
+                )}
+              </div>
+              <div class="distribution-review-meta">
+                <p><strong>Submitted by:</strong> ${escapeHtml(submissionSummary)}</p>
+                <p><strong>Last updated:</strong> ${escapeHtml(formatDateTime(review.updatedAt))}</p>
+                <p><strong>Reviewed by:</strong> ${escapeHtml(reviewSummary)}</p>
+                <p><strong>Status:</strong> ${escapeHtml(
+                  earlyWithdrawalStatusLabel(review.requestStatus)
+                )}</p>
+                <p><strong>Participant notes:</strong> ${escapeHtml(
+                  review.investorNotes || "None provided."
+                )}</p>
+                <p><strong>Manager notes:</strong> ${escapeHtml(
+                  review.managerNotes || "None recorded."
+                )}</p>
+              </div>
+              ${
+                review.canReview
+                  ? `
+                    <form
+                      class="distribution-form"
+                      data-manager-withdrawal-form="true"
+                      data-deal-id="${escapeHtml(review.dealId)}"
+                      data-participant-id="${escapeHtml(review.participantId)}"
+                    >
+                      <div class="form-grid-2">
+                        <label>
+                          Expected payout date
+                          <input
+                            type="date"
+                            name="payoutExpectedOn"
+                            value="${inputValue(review.payoutExpectedOn)}"
+                          />
+                        </label>
+                        <label>
+                          Manager notes
+                          <textarea
+                            name="managerNotes"
+                            rows="3"
+                            placeholder="Document approval timing or the reason for rejection."
+                          >${escapeHtml(review.managerNotes)}</textarea>
+                        </label>
+                      </div>
+                      <p class="helper-copy">
+                        Approval removes the investor’s active capital from the deal immediately and schedules the net payout after the policy penalty.
+                      </p>
+                      <div class="button-row">
+                        <button class="button-primary" type="submit" name="decision" value="approve">
+                          Approve request
+                        </button>
+                        <button class="button-secondary" type="submit" name="decision" value="reject">
+                          Reject request
+                        </button>
+                      </div>
+                    </form>
+                  `
+                  : '<p class="helper-copy">This withdrawal request has already been reviewed. No further manager action is required in this queue.</p>'
+              }
+            </div>
+          `
+      }
+    </article>
+  `;
+}
+
 function renderDistributionReviewSection() {
   const reviews = state.dashboard.admin.distributionReviews ?? [];
+  const withdrawalReviews = state.dashboard.admin.earlyWithdrawalReviews ?? [];
+  const filterOptions = getDistributionReviewFilterOptions([...reviews, ...withdrawalReviews]);
   const filteredReviews = applyDistributionReviewFilters(reviews);
-  const filterOptions = getDistributionReviewFilterOptions(reviews);
+  const filteredWithdrawalReviews = applyDistributionReviewFilters(withdrawalReviews);
   const pendingReviewCount = filteredReviews.filter((review) => review.needsReview).length;
   const overrideCount = filteredReviews.filter((review) => review.managerOverride).length;
   const backfillCount = filteredReviews.filter((review) => !review.electionMode).length;
@@ -1220,12 +1474,23 @@ function renderDistributionReviewSection() {
     (sum, review) => sum + (review.actualPayoutAmount ?? 0),
     0
   );
+  const pendingWithdrawalCount = filteredWithdrawalReviews.filter((review) => review.needsReview).length;
+  const approvedWithdrawalCount = filteredWithdrawalReviews.filter(
+    (review) => review.requestStatus === "approved"
+  ).length;
+  const rejectedWithdrawalCount = filteredWithdrawalReviews.filter(
+    (review) => review.requestStatus === "rejected"
+  ).length;
+  const scheduledWithdrawalPayout = filteredWithdrawalReviews.reduce(
+    (sum, review) => sum + (review.approvedPayoutAmount ?? 0),
+    0
+  );
 
   return renderCollapsibleSection({
     sectionId: "manager-distribution-reviews",
     title: "Distribution Elections Review",
     copy:
-      "Approve investor payout elections, confirm rollover amounts into target deals, and schedule cash payouts from one queue.",
+      "Review sold-project distribution elections and active-project early withdrawal requests from one manager queue.",
     message: renderMessage(state.messages.distribution),
     body: `
       <div class="table-toolbar">
@@ -1250,7 +1515,7 @@ function renderDistributionReviewSection() {
           <label>
             Investor
             <select id="distribution-review-filter-participant">
-              <option value="">All investors</option>
+              <option value="">All participants</option>
               ${filterOptions.participants
                 .map(
                   (participant) => `
@@ -1268,21 +1533,61 @@ function renderDistributionReviewSection() {
           </label>
         </div>
         <span class="read-only-tag">
-          Showing ${escapeHtml(String(filteredReviews.length))} of ${escapeHtml(String(reviews.length))}
+          Showing ${escapeHtml(
+            String(filteredReviews.length + filteredWithdrawalReviews.length)
+          )} of ${escapeHtml(String(reviews.length + withdrawalReviews.length))}
         </span>
       </div>
-      <div class="metrics-grid">
-        ${metricCard("Pending approvals", String(pendingReviewCount))}
-        ${metricCard("Manager overrides", String(overrideCount))}
-        ${metricCard("Backfill needed", String(backfillCount))}
-        ${metricCard("Tracked cash payouts", formatCurrency(trackedCashPayout))}
+      <div class="review-subsection">
+        <div class="section-head section-head-tight">
+          <div>
+            <p class="eyebrow">Sold Projects</p>
+            <h3>Distribution Elections</h3>
+            <p class="section-copy">
+              Approve rollover elections, confirm cash payouts, and review any manager overrides.
+            </p>
+          </div>
+        </div>
+        <div class="metrics-grid">
+          ${metricCard("Pending approvals", String(pendingReviewCount))}
+          ${metricCard("Manager overrides", String(overrideCount))}
+          ${metricCard("Backfill needed", String(backfillCount))}
+          ${metricCard("Tracked cash payouts", formatCurrency(trackedCashPayout))}
+        </div>
+        <div class="distribution-review-list">
+          ${
+            filteredReviews.length
+              ? filteredReviews.map((review) => renderManagerDistributionReviewCard(review)).join("")
+              : '<div class="empty-state">No distribution reviews match the current investor and project filters.</div>'
+          }
+        </div>
       </div>
-      <div class="distribution-review-list">
-        ${
-          filteredReviews.length
-            ? filteredReviews.map((review) => renderManagerDistributionReviewCard(review)).join("")
-            : '<div class="empty-state">No distribution reviews match the current investor and project filters.</div>'
-        }
+      <div class="review-subsection">
+        <div class="section-head section-head-tight">
+          <div>
+            <p class="eyebrow">Active Projects</p>
+            <h3>Early Withdrawal Requests</h3>
+            <p class="section-copy">
+              Review investor back-out requests, apply the project penalty, and schedule or reject payouts.
+            </p>
+          </div>
+        </div>
+        ${renderMessage(state.messages.withdrawal)}
+        <div class="metrics-grid">
+          ${metricCard("Pending requests", String(pendingWithdrawalCount))}
+          ${metricCard("Approved requests", String(approvedWithdrawalCount))}
+          ${metricCard("Rejected requests", String(rejectedWithdrawalCount))}
+          ${metricCard("Scheduled withdrawal payouts", formatCurrency(scheduledWithdrawalPayout))}
+        </div>
+        <div class="distribution-review-list">
+          ${
+            filteredWithdrawalReviews.length
+              ? filteredWithdrawalReviews
+                  .map((review) => renderManagerEarlyWithdrawalReviewCard(review))
+                  .join("")
+              : '<div class="empty-state">No early withdrawal requests match the current investor and project filters.</div>'
+          }
+        </div>
       </div>
     `
   });
@@ -1389,6 +1694,10 @@ function renderInvestorProject(project) {
               "Interest paid",
               formatCurrency(project.projectSummary.totalInterestPaid)
             )}
+            ${summaryItem(
+              "Early withdrawal penalty",
+              formatRate(project.earlyWithdrawalPenaltyRate)
+            )}
             ${summaryItem("Hold period", `${project.projectSummary.holdMonths} months`)}
           </div>
         </div>
@@ -1419,7 +1728,7 @@ function renderInvestorProject(project) {
 }
 
 function renderInvestorDashboard() {
-  const { viewer, portfolio, projects } = state.dashboard;
+  const { viewer, portfolio, projects, withdrawalRequests = [] } = state.dashboard;
   const filteredProjects = applyInvestorProjectFilters(projects);
   const projectFilterOptions = getInvestorProjectFilterOptions(projects);
   const distributionProjects = projects.filter(
@@ -1475,6 +1784,25 @@ function renderInvestorDashboard() {
                     .map((project) => renderInvestorDistributionElectionCard(project))
                     .join("")
                 : '<div class="empty-state">No sold projects currently require a reinvestment or payout election.</div>'
+            }
+          </div>
+        `
+      })}
+
+      ${renderCollapsibleSection({
+        sectionId: "investor-early-withdrawals",
+        title: "Early Withdrawal Requests",
+        copy:
+          "If you need to exit an active project before completion, submit the request here. The manager must approve or reject it, and any approved payout is reduced by the project penalty policy.",
+        message: renderMessage(state.messages.withdrawal),
+        body: `
+          <div class="distribution-review-list">
+            ${
+              withdrawalRequests.length
+                ? withdrawalRequests
+                    .map((project) => renderInvestorEarlyWithdrawalCard(project))
+                    .join("")
+                : '<div class="empty-state">No active participant positions currently qualify for an early withdrawal request.</div>'
             }
           </div>
         `
@@ -1590,6 +1918,10 @@ function renderManagerDeal(deal) {
           ${summaryItem("Tax expense", formatCurrency(deal.taxExpense))}
           ${summaryItem("Loan rate", formatRate(deal.debtInterestRate))}
           ${summaryItem("Interest paid", formatCurrency(deal.totalInterestPaid))}
+          ${summaryItem(
+            "Early withdrawal penalty",
+            formatRate(deal.earlyWithdrawalPenaltyRate)
+          )}
           ${summaryItem("Current sale case", formatCurrency(deal.salePrice))}
           ${summaryItem("Gross project IRR", formatPercent(deal.projectIrr))}
         </div>
@@ -2174,6 +2506,18 @@ function renderCreateDealPanel() {
               required
             />
           </label>
+          <label>
+            Early withdrawal penalty rate
+            <input
+              type="number"
+              name="earlyWithdrawalPenaltyRate"
+              min="0"
+              max="1"
+              step="0.01"
+              value="${escapeHtml(String(defaults.earlyWithdrawalPenaltyRate))}"
+              required
+            />
+          </label>
         </div>
         <div class="form-grid-2">
           <label>
@@ -2474,6 +2818,10 @@ function renderDealEditorPanel() {
             "Investment closes",
             deal.investmentCloseOn ? formatDate(deal.investmentCloseOn) : "No deadline"
           )}
+          ${summaryItem(
+            "Early withdrawal penalty",
+            formatRate(draft.earlyWithdrawalPenaltyRate)
+          )}
         </div>
         <div class="form-grid-2">
           <label>
@@ -2555,6 +2903,19 @@ function renderDealEditorPanel() {
               step="1000"
               value="${inputValue(draft.taxExpense)}"
               data-deal-field="taxExpense"
+              required
+            />
+          </label>
+          <label>
+            Early withdrawal penalty rate
+            <input
+              type="number"
+              name="earlyWithdrawalPenaltyRate"
+              min="0"
+              max="1"
+              step="0.01"
+              value="${inputValue(draft.earlyWithdrawalPenaltyRate)}"
+              data-deal-field="earlyWithdrawalPenaltyRate"
               required
             />
           </label>
@@ -2743,8 +3104,29 @@ function renderDealEditorPanel() {
                   <input type="text" name="title" placeholder="Approve sale price reduction" />
                 </label>
                 <label>
+                  Issue type
+                  <select name="issueType">
+                    <option value="general">General issue</option>
+                    <option value="penalty_rate_change">Penalty rate vote</option>
+                  </select>
+                </label>
+              </div>
+              <div class="form-grid-2">
+                <label>
                   Approval threshold
                   <input type="number" name="approvalThreshold" min="0.01" max="1" step="0.01" value="0.75" />
+                </label>
+                <label>
+                  Proposed penalty rate
+                  <input
+                    type="number"
+                    name="proposedPenaltyRate"
+                    min="0"
+                    max="1"
+                    step="0.01"
+                    value="${inputValue(draft.earlyWithdrawalPenaltyRate)}"
+                    placeholder="0.30"
+                  />
                 </label>
               </div>
               <label>
@@ -2782,6 +3164,11 @@ function renderDealEditorPanel() {
                               </div>
                               <div class="issue-head-meta">
                                 ${renderIssueStatus(issue)}
+                                <span class="read-only-tag">${escapeHtml(
+                                  issue.issueType === "penalty_rate_change"
+                                    ? "Penalty rate vote"
+                                    : "General vote"
+                                )}</span>
                                 <span class="read-only-tag">${escapeHtml(`Closes ${issue.closesOn || "TBD"}`)}</span>
                               </div>
                             </div>
@@ -3133,7 +3520,7 @@ const MANAGER_PAGE_ITEMS = [
   {
     id: "distribution-reviews",
     label: "Distribution Reviews",
-    copy: "Review investor elections, override instructions, and backfill past payouts."
+    copy: "Review sold-project elections and active-project withdrawal requests."
   },
   {
     id: "company-library",

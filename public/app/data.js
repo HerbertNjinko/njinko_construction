@@ -12,6 +12,7 @@ export function getCreateDealDefaults() {
     taxExpense: 0,
     debtInterestRate: 0,
     totalInterestPaid: 0,
+    earlyWithdrawalPenaltyRate: 0.3,
     timelineProgress: 0,
     fundedOn: new Date().toISOString().slice(0, 10),
     investmentCloseOn: investmentCloseOn.toISOString().slice(0, 10)
@@ -332,6 +333,7 @@ export function buildDealEditorDraft(deal) {
     taxExpense: String(deal.taxExpense ?? 0),
     debtInterestRate: String(deal.debtInterestRate ?? 0),
     totalInterestPaid: String(deal.totalInterestPaid ?? 0),
+    earlyWithdrawalPenaltyRate: String(deal.earlyWithdrawalPenaltyRate ?? 0.3),
     salePrice: String(deal.salePrice ?? 0),
     holdMonths: String(deal.holdMonths ?? 1),
     prefRate: String(deal.prefRate ?? 0),

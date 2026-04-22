@@ -7,6 +7,9 @@ import {
   sendCredentialNotification,
   sendDistributionElectionApprovedNotification,
   sendDistributionElectionAlertNotification,
+  sendEarlyWithdrawalApprovedNotification,
+  sendEarlyWithdrawalRejectedNotification,
+  sendEarlyWithdrawalRequestAlertNotification,
   sendIssueCreatedNotification,
   sendNewDealAnnouncementNotification,
   sendPasswordResetNotification
@@ -15,6 +18,7 @@ import { pool, queryAll, queryOne, withTransaction } from "./postgres.js";
 
 const PASSWORD_RESET_TTL_MINUTES = 60;
 const RESOURCE_UPLOAD_MAX_BYTES = 100 * 1024 * 1024;
+const DEFAULT_EARLY_WITHDRAWAL_PENALTY_RATE = 0.3;
 
 function nowTimestamp() {
   return new Date().toISOString();
@@ -82,6 +86,22 @@ function computeDistributionAmounts(election, totalPayout) {
     totalPayout: normalizedTotalPayout,
     reinvestAmount,
     cashPayoutAmount
+  };
+}
+
+function computeEarlyWithdrawalAmounts(capitalAmount, penaltyRate) {
+  const normalizedCapitalAmount = roundNumber(Math.max(0, Number(capitalAmount ?? 0)));
+  const normalizedPenaltyRate = roundNumber(
+    Math.max(0, Math.min(1, Number(penaltyRate ?? DEFAULT_EARLY_WITHDRAWAL_PENALTY_RATE)))
+  );
+  const penaltyAmount = roundNumber(normalizedCapitalAmount * normalizedPenaltyRate);
+  const payoutAmount = roundNumber(Math.max(normalizedCapitalAmount - penaltyAmount, 0));
+
+  return {
+    capitalAmount: normalizedCapitalAmount,
+    penaltyRate: normalizedPenaltyRate,
+    penaltyAmount,
+    payoutAmount
   };
 }
 
@@ -435,6 +455,7 @@ async function insertSeedData(executor) {
           tax_expense,
           debt_interest_rate,
           total_interest_paid,
+          early_withdrawal_penalty_rate,
           total_project_cost,
           sale_price,
           hold_months,
@@ -470,7 +491,8 @@ async function insertSeedData(executor) {
           $18,
           $19,
           $20,
-          $21
+          $21,
+          $22
         )
       `,
       [
@@ -482,6 +504,7 @@ async function insertSeedData(executor) {
         deal.taxExpense ?? 0,
         deal.debtInterestRate ?? 0,
         deal.totalInterestPaid ?? 0,
+        deal.earlyWithdrawalPenaltyRate ?? DEFAULT_EARLY_WITHDRAWAL_PENALTY_RATE,
         deal.totalProjectCost,
         deal.salePrice,
         deal.holdMonths,
@@ -688,7 +711,9 @@ async function insertSeedData(executor) {
           created_at,
           updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+        )
       `,
       [
         election.id,
@@ -709,6 +734,56 @@ async function insertSeedData(executor) {
         election.reviewedAt ?? null,
         election.managerOverride ? 1 : 0,
         election.overrideNotes ?? null,
+        timestamp,
+        timestamp
+      ]
+    );
+  }
+
+  for (const request of seedData.earlyWithdrawalRequests ?? []) {
+    await executor.query(
+      `
+        INSERT INTO early_withdrawal_requests (
+          id,
+          deal_id,
+          participant_id,
+          position_id,
+          class_type,
+          requested_capital_amount,
+          penalty_rate,
+          penalty_amount,
+          approved_payout_amount,
+          investor_notes,
+          manager_notes,
+          request_status,
+          payout_expected_on,
+          requested_by_user_id,
+          reviewed_by_user_id,
+          reviewed_at,
+          created_at,
+          updated_at
+        )
+        VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
+        )
+      `,
+      [
+        request.id,
+        request.dealId,
+        request.participantId,
+        request.positionId ?? null,
+        request.classType ?? null,
+        request.requestedCapitalAmount ?? 0,
+        request.penaltyRate ?? DEFAULT_EARLY_WITHDRAWAL_PENALTY_RATE,
+        request.penaltyAmount ?? 0,
+        request.approvedPayoutAmount ?? null,
+        request.investorNotes ?? null,
+        request.managerNotes ?? null,
+        request.requestStatus ?? "pending",
+        request.payoutExpectedOn ?? null,
+        request.requestedByUserId ?? null,
+        request.reviewedByUserId ?? null,
+        request.reviewedAt ?? null,
         timestamp,
         timestamp
       ]
@@ -748,6 +823,7 @@ export async function seedDatabase({ force = false } = {}) {
           company_resources,
           contractor_participation,
           distribution_elections,
+          early_withdrawal_requests,
           positions,
           deal_timeline_items,
           promote_tiers,
@@ -868,6 +944,8 @@ export async function getUserById(userId) {
 }
 
 export async function getAppDataSnapshot() {
+  await applyClosedPenaltyRateIssueResolutions();
+
   const participants = (await queryAll(
     `
       SELECT
@@ -914,6 +992,7 @@ export async function getAppDataSnapshot() {
         tax_expense AS "taxExpense",
         debt_interest_rate AS "debtInterestRate",
         total_interest_paid AS "totalInterestPaid",
+        early_withdrawal_penalty_rate AS "earlyWithdrawalPenaltyRate",
         total_project_cost AS "totalProjectCost",
         sale_price AS "salePrice",
         hold_months AS "holdMonths",
@@ -935,6 +1014,7 @@ export async function getAppDataSnapshot() {
     taxExpense: Number(row.taxExpense),
     debtInterestRate: Number(row.debtInterestRate),
     totalInterestPaid: Number(row.totalInterestPaid),
+    earlyWithdrawalPenaltyRate: Number(row.earlyWithdrawalPenaltyRate),
     totalProjectCost: Number(row.totalProjectCost),
     salePrice: Number(row.salePrice),
     holdMonths: Number(row.holdMonths),
@@ -1083,6 +1163,41 @@ export async function getAppDataSnapshot() {
     managerOverride: Boolean(row.managerOverride)
   }));
 
+  const earlyWithdrawalRequests = (await queryAll(
+    `
+      SELECT
+        id,
+        deal_id AS "dealId",
+        participant_id AS "participantId",
+        position_id AS "positionId",
+        class_type AS "classType",
+        requested_capital_amount AS "requestedCapitalAmount",
+        penalty_rate AS "penaltyRate",
+        penalty_amount AS "penaltyAmount",
+        approved_payout_amount AS "approvedPayoutAmount",
+        investor_notes AS "investorNotes",
+        manager_notes AS "managerNotes",
+        request_status AS "requestStatus",
+        payout_expected_on AS "payoutExpectedOn",
+        requested_by_user_id AS "requestedByUserId",
+        reviewed_by_user_id AS "reviewedByUserId",
+        reviewed_at AS "reviewedAt",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM early_withdrawal_requests
+      ORDER BY updated_at DESC, id
+    `
+  )).map((row) => ({
+    ...row,
+    requestedCapitalAmount: Number(row.requestedCapitalAmount),
+    penaltyRate: Number(row.penaltyRate),
+    penaltyAmount: Number(row.penaltyAmount),
+    approvedPayoutAmount:
+      row.approvedPayoutAmount === null || row.approvedPayoutAmount === undefined
+        ? null
+        : Number(row.approvedPayoutAmount)
+  }));
+
   const companyResources = (await queryAll(
     `
       SELECT
@@ -1113,10 +1228,14 @@ export async function getAppDataSnapshot() {
       SELECT
         id,
         deal_id AS "dealId",
+        issue_type AS "issueType",
         title,
         description,
         approval_threshold AS "approvalThreshold",
+        proposed_penalty_rate AS "proposedPenaltyRate",
         closes_on AS "closesOn",
+        resolution_result AS "resolutionResult",
+        resolution_applied_at AS "resolutionAppliedAt",
         created_by_user_id AS "createdByUserId",
         created_at AS "createdAt",
         updated_at AS "updatedAt"
@@ -1125,7 +1244,11 @@ export async function getAppDataSnapshot() {
     `
   )).map((row) => ({
     ...row,
-    approvalThreshold: Number(row.approvalThreshold)
+    approvalThreshold: Number(row.approvalThreshold),
+    proposedPenaltyRate:
+      row.proposedPenaltyRate === null || row.proposedPenaltyRate === undefined
+        ? null
+        : Number(row.proposedPenaltyRate)
   }));
 
   const issueVotes = await queryAll(
@@ -1150,6 +1273,7 @@ export async function getAppDataSnapshot() {
     positions,
     contractors,
     distributionElections,
+    earlyWithdrawalRequests,
     companyResources,
     dealIssues,
     issueVotes
@@ -2002,6 +2126,9 @@ function normalizeDealInput(input) {
   const taxExpense = Number(input.taxExpense ?? 0);
   const debtInterestRate = Number(input.debtInterestRate ?? 0);
   const totalInterestPaid = Number(input.totalInterestPaid ?? 0);
+  const earlyWithdrawalPenaltyRate = Number(
+    input.earlyWithdrawalPenaltyRate ?? DEFAULT_EARLY_WITHDRAWAL_PENALTY_RATE
+  );
   const totalProjectCost = Number(input.totalProjectCost);
   const salePrice = Number(input.salePrice);
   const holdMonths = Number(input.holdMonths);
@@ -2030,6 +2157,14 @@ function normalizeDealInput(input) {
 
   if (!Number.isFinite(totalInterestPaid) || totalInterestPaid < 0) {
     throw new Error("Total interest paid must be zero or greater.");
+  }
+
+  if (
+    !Number.isFinite(earlyWithdrawalPenaltyRate) ||
+    earlyWithdrawalPenaltyRate < 0 ||
+    earlyWithdrawalPenaltyRate > 1
+  ) {
+    throw new Error("Early withdrawal penalty rate must be between 0 and 1.");
   }
 
   if (!Number.isFinite(totalProjectCost) || totalProjectCost < 0) {
@@ -2065,6 +2200,7 @@ function normalizeDealInput(input) {
     taxExpense: roundNumber(taxExpense),
     debtInterestRate: roundNumber(debtInterestRate),
     totalInterestPaid: roundNumber(totalInterestPaid),
+    earlyWithdrawalPenaltyRate: roundNumber(earlyWithdrawalPenaltyRate),
     totalProjectCost: roundNumber(totalProjectCost),
     salePrice: roundNumber(salePrice),
     holdMonths: Math.round(holdMonths),
@@ -2075,13 +2211,26 @@ function normalizeDealInput(input) {
 
 function normalizeIssueInput(input) {
   const dealId = String(input.dealId ?? "").trim();
+  const issueType = String(input.issueType ?? "general")
+    .trim()
+    .toLowerCase();
   const title = String(input.title ?? "").trim();
   const description = String(input.description ?? "").trim();
   const approvalThreshold = Number(input.approvalThreshold ?? 0.75);
   const closesOn = String(input.closesOn ?? "").trim();
+  const proposedPenaltyRate =
+    input.proposedPenaltyRate === null ||
+    input.proposedPenaltyRate === undefined ||
+    String(input.proposedPenaltyRate).trim() === ""
+      ? null
+      : Number(input.proposedPenaltyRate);
 
   if (!dealId) {
     throw new Error("A deal selection is required.");
+  }
+
+  if (!["general", "penalty_rate_change"].includes(issueType)) {
+    throw new Error("Issue type is invalid.");
   }
 
   if (!title) {
@@ -2104,12 +2253,26 @@ function normalizeIssueInput(input) {
     throw new Error("Vote close date cannot be in the past.");
   }
 
+  if (issueType === "penalty_rate_change") {
+    if (
+      proposedPenaltyRate === null ||
+      !Number.isFinite(proposedPenaltyRate) ||
+      proposedPenaltyRate < 0 ||
+      proposedPenaltyRate > 1
+    ) {
+      throw new Error("Penalty rate proposal must be between 0 and 1.");
+    }
+  }
+
   return {
     dealId,
+    issueType,
     title,
     description,
     approvalThreshold: roundNumber(approvalThreshold),
-    closesOn
+    closesOn,
+    proposedPenaltyRate:
+      issueType === "penalty_rate_change" ? roundNumber(proposedPenaltyRate) : null
   };
 }
 
@@ -2121,6 +2284,133 @@ function normalizeVoteChoice(value) {
   }
 
   return voteChoice;
+}
+
+async function applyClosedPenaltyRateIssueResolutions() {
+  const unresolvedIssues = await queryAll(
+    `
+      SELECT
+        id,
+        deal_id AS "dealId",
+        approval_threshold AS "approvalThreshold",
+        proposed_penalty_rate AS "proposedPenaltyRate"
+      FROM deal_issues
+      WHERE issue_type = 'penalty_rate_change'
+        AND proposed_penalty_rate IS NOT NULL
+        AND closes_on IS NOT NULL
+        AND closes_on < $1
+        AND resolution_applied_at IS NULL
+      ORDER BY closes_on, created_at, id
+    `,
+    [todayStamp()]
+  );
+
+  for (const unresolvedIssue of unresolvedIssues) {
+    await withTransaction(async (client) => {
+      const issue = await queryOne(
+        `
+          SELECT
+            id,
+            deal_id AS "dealId",
+            approval_threshold AS "approvalThreshold",
+            proposed_penalty_rate AS "proposedPenaltyRate"
+          FROM deal_issues
+          WHERE id = $1
+            AND issue_type = 'penalty_rate_change'
+            AND proposed_penalty_rate IS NOT NULL
+            AND resolution_applied_at IS NULL
+          FOR UPDATE
+        `,
+        [unresolvedIssue.id],
+        client
+      );
+
+      if (!issue) {
+        return;
+      }
+
+      const capitalRows = await queryAll(
+        `
+          SELECT
+            positions.participant_id AS "participantId",
+            COALESCE(SUM(positions.contribution_amount), 0)::float AS amount
+          FROM positions
+          JOIN participants ON participants.id = positions.participant_id
+          WHERE positions.deal_id = $1
+            AND participants.category = 'investor'
+          GROUP BY positions.participant_id
+          HAVING COALESCE(SUM(positions.contribution_amount), 0) > 0
+        `,
+        [issue.dealId],
+        client
+      );
+      const votes = await queryAll(
+        `
+          SELECT
+            participant_id AS "participantId",
+            vote_choice AS "voteChoice"
+          FROM deal_issue_votes
+          WHERE issue_id = $1
+        `,
+        [issue.id],
+        client
+      );
+
+      const capitalByParticipant = new Map(
+        capitalRows.map((row) => [row.participantId, Number(row.amount ?? 0)])
+      );
+      const eligibleInvestment = [...capitalByParticipant.values()].reduce(
+        (sum, amount) => sum + amount,
+        0
+      );
+      let explicitYesInvestment = 0;
+      let noInvestment = 0;
+
+      for (const vote of votes) {
+        const investedAmount = capitalByParticipant.get(vote.participantId) ?? 0;
+
+        if (vote.voteChoice === "yes") {
+          explicitYesInvestment += investedAmount;
+        } else if (vote.voteChoice === "no") {
+          noInvestment += investedAmount;
+        }
+      }
+
+      const unresolvedInvestment = Math.max(
+        0,
+        eligibleInvestment - explicitYesInvestment - noInvestment
+      );
+      const yesInvestment = explicitYesInvestment + unresolvedInvestment;
+      const yesPct = eligibleInvestment > 0 ? yesInvestment / eligibleInvestment : 0;
+      const passed = eligibleInvestment > 0 && yesPct >= Number(issue.approvalThreshold ?? 0);
+      const timestamp = nowTimestamp();
+
+      if (passed) {
+        await client.query(
+          `
+            UPDATE deals
+            SET
+              early_withdrawal_penalty_rate = $1,
+              updated_at = $2
+            WHERE id = $3
+          `,
+          [roundNumber(issue.proposedPenaltyRate), timestamp, issue.dealId]
+        );
+      }
+
+      await client.query(
+        `
+          UPDATE deal_issues
+          SET
+            resolution_result = $1,
+            resolution_applied_at = $2,
+            updated_at = $2
+          WHERE id = $3
+        `,
+        [passed ? "passed" : "failed", timestamp, issue.id]
+      );
+    });
+  }
 }
 
 function normalizeCompanyResourceInput(input) {
@@ -2422,6 +2712,7 @@ export async function createDeal(input) {
           tax_expense,
           debt_interest_rate,
           total_interest_paid,
+          early_withdrawal_penalty_rate,
           total_project_cost,
           sale_price,
           hold_months,
@@ -2457,7 +2748,8 @@ export async function createDeal(input) {
           $18,
           $19,
           $20,
-          $21
+          $21,
+          $22
         )
       `,
       [
@@ -2469,6 +2761,7 @@ export async function createDeal(input) {
         deal.taxExpense,
         deal.debtInterestRate,
         deal.totalInterestPaid,
+        deal.earlyWithdrawalPenaltyRate,
         deal.totalProjectCost,
         deal.salePrice,
         deal.holdMonths,
@@ -2597,19 +2890,20 @@ export async function updateDeal(dealId, input) {
           tax_expense = $4,
           debt_interest_rate = $5,
           total_interest_paid = $6,
-          total_project_cost = $7,
-          sale_price = $8,
-          hold_months = $9,
-          pref_rate = $10,
-          status = $11,
-          current_phase = $12,
-          funded_on = $13,
-          investment_close_on = $14,
-          projected_exit_on = $15,
-          actual_exit_on = $16,
-          timeline_progress = $17,
-          updated_at = $18
-        WHERE id = $19
+          early_withdrawal_penalty_rate = $7,
+          total_project_cost = $8,
+          sale_price = $9,
+          hold_months = $10,
+          pref_rate = $11,
+          status = $12,
+          current_phase = $13,
+          funded_on = $14,
+          investment_close_on = $15,
+          projected_exit_on = $16,
+          actual_exit_on = $17,
+          timeline_progress = $18,
+          updated_at = $19
+        WHERE id = $20
       `,
       [
         deal.name,
@@ -2618,6 +2912,7 @@ export async function updateDeal(dealId, input) {
         deal.taxExpense,
         deal.debtInterestRate,
         deal.totalInterestPaid,
+        deal.earlyWithdrawalPenaltyRate,
         deal.totalProjectCost,
         deal.salePrice,
         deal.holdMonths,
@@ -3211,6 +3506,428 @@ function participantHasPayoutInstructions(participant) {
   );
 }
 
+function normalizeEarlyWithdrawalRequestInput(input) {
+  return {
+    investorNotes: normalizeOptionalText(input?.investorNotes ?? input?.notes)
+  };
+}
+
+function normalizeEarlyWithdrawalReviewInput(input) {
+  const decision = String(input?.decision ?? "")
+    .trim()
+    .toLowerCase();
+
+  if (!["approve", "reject"].includes(decision)) {
+    throw new Error("Manager decision must be approve or reject.");
+  }
+
+  return {
+    decision,
+    managerNotes: normalizeOptionalText(input?.managerNotes ?? input?.overrideNotes),
+    payoutExpectedOn: normalizeOptionalDateInput(
+      input?.payoutExpectedOn,
+      "Expected payout date"
+    )
+  };
+}
+
+export async function upsertEarlyWithdrawalRequest(dealId, userId, input) {
+  const normalizedDealId = String(dealId ?? "").trim();
+
+  if (!normalizedDealId) {
+    throw new Error("Deal id is required.");
+  }
+
+  const user = await getUserById(userId);
+
+  if (!user) {
+    throw new Error("User not found.");
+  }
+
+  if (user.role === "manager") {
+    throw new Error("Managers cannot create investor early withdrawal requests.");
+  }
+
+  const snapshot = await getAppDataSnapshot();
+  const deal = snapshot.deals.find((item) => item.id === normalizedDealId);
+
+  if (!deal) {
+    throw new Error("Deal not found.");
+  }
+
+  if (deal.status === "sold") {
+    throw new Error("Early withdrawals are only available while the project is still active.");
+  }
+
+  const participant = snapshot.participants.find((item) => item.id === user.participantId);
+
+  if (!["investor", "contractor"].includes(participant?.category ?? "")) {
+    throw new Error("Only participant positions with portal access can request an early withdrawal.");
+  }
+
+  const position = snapshot.positions.find(
+    (item) => item.dealId === normalizedDealId && item.participantId === user.participantId
+  );
+
+  if (!position || position.contributionAmount <= 0) {
+    throw new Error("You do not have an active invested position in this project.");
+  }
+
+  if (!participantHasPayoutInstructions(participant)) {
+    throw new Error(
+      "Save your payout method or payout instructions in Profile & Payout Details before submitting a withdrawal request."
+    );
+  }
+
+  const request = normalizeEarlyWithdrawalRequestInput(input);
+  const existingRequest = await queryOne(
+    `
+      SELECT
+        id,
+        request_status AS "requestStatus"
+      FROM early_withdrawal_requests
+      WHERE deal_id = $1
+        AND participant_id = $2
+    `,
+    [normalizedDealId, user.participantId]
+  );
+
+  if (existingRequest?.requestStatus === "approved") {
+    throw new Error("This position already has an approved early withdrawal request.");
+  }
+
+  const timestamp = nowTimestamp();
+  const { capitalAmount, penaltyRate, penaltyAmount, payoutAmount } = computeEarlyWithdrawalAmounts(
+    position.contributionAmount,
+    deal.earlyWithdrawalPenaltyRate
+  );
+
+  await withTransaction(async (client) => {
+    if (existingRequest) {
+      await client.query(
+        `
+          UPDATE early_withdrawal_requests
+          SET
+            position_id = $1,
+            class_type = $2,
+            requested_capital_amount = $3,
+            penalty_rate = $4,
+            penalty_amount = $5,
+            approved_payout_amount = NULL,
+            investor_notes = $6,
+            manager_notes = NULL,
+            request_status = 'pending',
+            payout_expected_on = NULL,
+            requested_by_user_id = $7,
+            reviewed_by_user_id = NULL,
+            reviewed_at = NULL,
+            updated_at = $8
+          WHERE id = $9
+        `,
+        [
+          position.id,
+          position.classType,
+          capitalAmount,
+          penaltyRate,
+          penaltyAmount,
+          request.investorNotes,
+          user.id,
+          timestamp,
+          existingRequest.id
+        ]
+      );
+    } else {
+      await client.query(
+        `
+          INSERT INTO early_withdrawal_requests (
+            id,
+            deal_id,
+            participant_id,
+            position_id,
+            class_type,
+            requested_capital_amount,
+            penalty_rate,
+            penalty_amount,
+            approved_payout_amount,
+            investor_notes,
+            manager_notes,
+            request_status,
+            payout_expected_on,
+            requested_by_user_id,
+            reviewed_by_user_id,
+            reviewed_at,
+            created_at,
+            updated_at
+          )
+          VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, NULL, $9, NULL, 'pending', NULL, $10, NULL, NULL, $11, $12
+          )
+        `,
+        [
+          createId("withdrawal"),
+          normalizedDealId,
+          user.participantId,
+          position.id,
+          position.classType,
+          capitalAmount,
+          penaltyRate,
+          penaltyAmount,
+          request.investorNotes,
+          user.id,
+          timestamp,
+          timestamp
+        ]
+      );
+    }
+  });
+
+  const managerRecipients = await getActiveManagerRecipients();
+  const notifications = await Promise.all(
+    managerRecipients.map(async (managerRecipient) => {
+      try {
+        return await sendEarlyWithdrawalRequestAlertNotification({
+          userId: managerRecipient.userId,
+          participantId: managerRecipient.participantId,
+          managerName: managerRecipient.fullName,
+          email: managerRecipient.email,
+          investorName: participant?.name ?? "Investor",
+          dealName: deal.name,
+          requestedCapitalAmount: capitalAmount,
+          penaltyRate,
+          penaltyAmount,
+          payoutAmount,
+          payoutMethod: participant?.payoutMethod ?? "",
+          notes: request.investorNotes,
+          submittedAt: timestamp
+        });
+      } catch (error) {
+        return {
+          status: "failed",
+          provider: "notification_error",
+          localPath: null,
+          errorMessage: error.message,
+          recipientEmail: managerRecipient.email
+        };
+      }
+    })
+  );
+
+  return {
+    dealId: normalizedDealId,
+    participantId: user.participantId,
+    positionId: position.id,
+    classType: position.classType,
+    requestStatus: "pending",
+    requestedCapitalAmount: capitalAmount,
+    penaltyRate,
+    penaltyAmount,
+    estimatedPayoutAmount: payoutAmount,
+    payoutExpectedOn: null,
+    investorNotes: request.investorNotes,
+    managerNotes: null,
+    reviewedAt: null,
+    notifications
+  };
+}
+
+export async function reviewEarlyWithdrawalRequest(dealId, participantId, userId, input) {
+  const normalizedDealId = String(dealId ?? "").trim();
+  const normalizedParticipantId = String(participantId ?? "").trim();
+
+  if (!normalizedDealId || !normalizedParticipantId) {
+    throw new Error("Deal and participant ids are required.");
+  }
+
+  const user = await getUserById(userId);
+
+  if (!user || user.role !== "manager") {
+    throw new Error("Only managers can review early withdrawal requests.");
+  }
+
+  const review = normalizeEarlyWithdrawalReviewInput(input);
+  const snapshot = await getAppDataSnapshot();
+  const deal = snapshot.deals.find((item) => item.id === normalizedDealId);
+
+  if (!deal) {
+    throw new Error("Deal not found.");
+  }
+
+  const participant = snapshot.participants.find((item) => item.id === normalizedParticipantId);
+
+  if (!["investor", "contractor"].includes(participant?.category ?? "")) {
+    throw new Error("Only participant positions with portal access can be reviewed for early withdrawal.");
+  }
+
+  const existingRequest = await queryOne(
+    `
+      SELECT
+        id,
+        position_id AS "positionId",
+        class_type AS "classType",
+        requested_capital_amount AS "requestedCapitalAmount",
+        penalty_rate AS "penaltyRate",
+        penalty_amount AS "penaltyAmount",
+        approved_payout_amount AS "approvedPayoutAmount",
+        investor_notes AS "investorNotes",
+        manager_notes AS "managerNotes",
+        request_status AS "requestStatus",
+        payout_expected_on AS "payoutExpectedOn",
+        requested_by_user_id AS "requestedByUserId",
+        reviewed_by_user_id AS "reviewedByUserId",
+        reviewed_at AS "reviewedAt"
+      FROM early_withdrawal_requests
+      WHERE deal_id = $1
+        AND participant_id = $2
+    `,
+    [normalizedDealId, normalizedParticipantId]
+  );
+
+  if (!existingRequest) {
+    throw new Error("No early withdrawal request was found for this investor and project.");
+  }
+
+  if (existingRequest.requestStatus !== "pending") {
+    throw new Error("This early withdrawal request has already been reviewed.");
+  }
+
+  const position = snapshot.positions.find(
+    (item) => item.dealId === normalizedDealId && item.participantId === normalizedParticipantId
+  );
+  const requestedCapitalAmount = roundNumber(existingRequest.requestedCapitalAmount ?? 0);
+  const penaltyRate = roundNumber(existingRequest.penaltyRate ?? deal.earlyWithdrawalPenaltyRate);
+  const penaltyAmount = roundNumber(existingRequest.penaltyAmount ?? 0);
+  const payoutAmount = roundNumber(
+    Math.max(requestedCapitalAmount - penaltyAmount, 0)
+  );
+
+  if (review.decision === "approve") {
+    if (!position || position.contributionAmount <= 0) {
+      throw new Error("No active capital remains on this position to withdraw.");
+    }
+
+    if (!participantHasPayoutInstructions(participant)) {
+      throw new Error(
+        "The investor must save payout instructions before the request can be approved."
+      );
+    }
+
+    if (!review.payoutExpectedOn) {
+      throw new Error("Expected payout date is required when approving a withdrawal request.");
+    }
+  }
+
+  const timestamp = nowTimestamp();
+
+  await withTransaction(async (client) => {
+    await client.query(
+      `
+        UPDATE early_withdrawal_requests
+        SET
+          request_status = $1,
+          approved_payout_amount = $2,
+          manager_notes = $3,
+          payout_expected_on = $4,
+          reviewed_by_user_id = $5,
+          reviewed_at = $6,
+          updated_at = $7
+        WHERE id = $8
+      `,
+      [
+        review.decision === "approve" ? "approved" : "rejected",
+        review.decision === "approve" ? payoutAmount : null,
+        review.managerNotes,
+        review.decision === "approve" ? review.payoutExpectedOn : null,
+        user.id,
+        timestamp,
+        timestamp,
+        existingRequest.id
+      ]
+    );
+
+    if (review.decision === "approve" && position) {
+      await client.query(
+        `
+          UPDATE positions
+          SET contribution_amount = 0, updated_at = $1
+          WHERE id = $2
+        `,
+        [timestamp, position.id]
+      );
+
+      await syncDealEquity(normalizedDealId, client);
+    }
+  });
+
+  const linkedInvestorUser = snapshot.users.find(
+    (account) => account.participantId === normalizedParticipantId && account.role === "investor"
+  );
+  let notifications = [];
+
+  if (linkedInvestorUser?.email) {
+    try {
+      notifications = [
+        review.decision === "approve"
+          ? await sendEarlyWithdrawalApprovedNotification({
+              userId: linkedInvestorUser.id,
+              participantId: linkedInvestorUser.participantId,
+              fullName: linkedInvestorUser.name,
+              email: linkedInvestorUser.email,
+              dealName: deal.name,
+              approvedAt: timestamp,
+              requestedCapitalAmount,
+              penaltyRate,
+              penaltyAmount,
+              payoutAmount,
+              payoutExpectedOn: review.payoutExpectedOn,
+              payoutMethod: participant?.payoutMethod ?? "",
+              investorNotes: existingRequest.investorNotes,
+              managerNotes: review.managerNotes
+            })
+          : await sendEarlyWithdrawalRejectedNotification({
+              userId: linkedInvestorUser.id,
+              participantId: linkedInvestorUser.participantId,
+              fullName: linkedInvestorUser.name,
+              email: linkedInvestorUser.email,
+              dealName: deal.name,
+              reviewedAt: timestamp,
+              requestedCapitalAmount,
+              penaltyRate,
+              payoutAmount,
+              investorNotes: existingRequest.investorNotes,
+              managerNotes: review.managerNotes
+            })
+      ];
+    } catch (error) {
+      notifications = [
+        {
+          status: "failed",
+          provider: "notification_error",
+          localPath: null,
+          errorMessage: error.message,
+          recipientEmail: linkedInvestorUser.email
+        }
+      ];
+    }
+  }
+
+  return {
+    dealId: normalizedDealId,
+    participantId: normalizedParticipantId,
+    positionId: existingRequest.positionId ?? position?.id ?? null,
+    classType: existingRequest.classType ?? position?.classType ?? null,
+    requestStatus: review.decision === "approve" ? "approved" : "rejected",
+    requestedCapitalAmount,
+    penaltyRate,
+    penaltyAmount,
+    approvedPayoutAmount: review.decision === "approve" ? payoutAmount : 0,
+    payoutExpectedOn: review.decision === "approve" ? review.payoutExpectedOn : null,
+    investorNotes: existingRequest.investorNotes ?? null,
+    managerNotes: review.managerNotes,
+    reviewedAt: timestamp,
+    notifications
+  };
+}
+
 export async function upsertDistributionElection(dealId, userId, input) {
   const normalizedDealId = String(dealId ?? "").trim();
 
@@ -3658,7 +4375,7 @@ export async function createDealIssue(input, createdByUserId) {
   const issue = normalizeIssueInput(input);
   const deal = await queryOne(
     `
-      SELECT id, name
+      SELECT id, name, early_withdrawal_penalty_rate AS "earlyWithdrawalPenaltyRate"
       FROM deals
       WHERE id = $1
     `,
@@ -3667,6 +4384,13 @@ export async function createDealIssue(input, createdByUserId) {
 
   if (!deal) {
     throw new Error("Deal not found.");
+  }
+
+  if (
+    issue.issueType === "penalty_rate_change" &&
+    Number(deal.earlyWithdrawalPenaltyRate) === Number(issue.proposedPenaltyRate)
+  ) {
+    throw new Error("The proposed penalty rate matches the current project penalty rate.");
   }
 
   const recipients = await queryAll(
@@ -3702,22 +4426,26 @@ export async function createDealIssue(input, createdByUserId) {
       INSERT INTO deal_issues (
         id,
         deal_id,
+        issue_type,
         title,
         description,
         approval_threshold,
+        proposed_penalty_rate,
         closes_on,
         created_by_user_id,
         created_at,
         updated_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
     `,
     [
       issueId,
       issue.dealId,
+      issue.issueType,
       issue.title,
       issue.description,
       issue.approvalThreshold,
+      issue.proposedPenaltyRate,
       issue.closesOn,
       createdByUserId,
       timestamp,
@@ -3735,7 +4463,12 @@ export async function createDealIssue(input, createdByUserId) {
           email: recipient.email,
           dealName: deal.name,
           issueTitle: issue.title,
-          issueDescription: issue.description,
+          issueDescription:
+            issue.issueType === "penalty_rate_change"
+              ? `${issue.description}\n\nProposed early withdrawal penalty rate: ${Math.round(
+                  issue.proposedPenaltyRate * 1000
+                ) / 10}%`
+              : issue.description,
           approvalThreshold: issue.approvalThreshold,
           closesOn: issue.closesOn,
           weightPct:
@@ -3760,13 +4493,17 @@ export async function createDealIssue(input, createdByUserId) {
       id: issueId,
       dealId: issue.dealId,
       closesOn: issue.closesOn,
-      title: issue.title
+      title: issue.title,
+      issueType: issue.issueType,
+      proposedPenaltyRate: issue.proposedPenaltyRate
     },
     notifications
   };
 }
 
 export async function castDealIssueVote(issueId, userId, voteChoiceInput) {
+  await applyClosedPenaltyRateIssueResolutions();
+
   const normalizedIssueId = String(issueId ?? "").trim();
 
   if (!normalizedIssueId) {

@@ -62,6 +62,7 @@ These accounts exist only after running `npm run seed`.
 - Personal investor portfolio totals and per-project breakdowns
 - Limited project summary for investors without exposing the full cap table
 - Self-service profile editing for names, address, contact info, and payout instructions
+- Early withdrawal requests on active investor deals with per-project penalty rates, manager approval or rejection, and scheduled payout dates
 - First-login password reset requirement for manager-created users
 - Sponsor calculator to plug in sale price, hold months, and pref rate
 - Contractor tracking table for deferred compensation and Class C participation
@@ -72,6 +73,7 @@ These accounts exist only after running `npm run seed`.
   - increase an existing participant position before the project investment close date
   - update project records and save changes to the database
   - define an investment close date for each project so new allocations stop after the window closes
+  - define an early withdrawal penalty rate for each project
   - send a new-project announcement email to active investor portal users when a project is created
 
 ## Database
@@ -87,6 +89,7 @@ These accounts exist only after running `npm run seed`.
 - `participants`: investors, contractors, sponsor entities
 - `users`: login credentials, email, first-login password reset state
 - `deals`: project-level financial and status fields
+- `early_withdrawal_requests`: investor back-out requests, penalty amounts, review state, and payout scheduling
 - `promote_tiers`: promote hurdle structure per deal
 - `deal_timeline_items`: visible milestone timeline per deal
 - `positions`: Class A / Class C capital participation by deal and participant

@@ -23,8 +23,10 @@ import {
   getUserById,
   markUserLogin,
   requestPasswordReset,
+  reviewEarlyWithdrawalRequest,
   resetPasswordWithToken,
   setUserAccountActive,
+  upsertEarlyWithdrawalRequest,
   upsertDistributionElection,
   updateOwnProfile,
   updateDeal,
@@ -332,9 +334,13 @@ const server = createServer(async (request, response) => {
     const adminDistributionElectionMatch = url.pathname.match(
       /^\/api\/admin\/deals\/([^/]+)\/distribution-elections\/([^/]+)$/
     );
+    const adminEarlyWithdrawalMatch = url.pathname.match(
+      /^\/api\/admin\/deals\/([^/]+)\/withdrawal-requests\/([^/]+)$/
+    );
     const distributionElectionMatch = url.pathname.match(
       /^\/api\/deals\/([^/]+)\/distribution-election$/
     );
+    const earlyWithdrawalMatch = url.pathname.match(/^\/api\/deals\/([^/]+)\/withdrawal-request$/);
 
     if (method === "POST" && url.pathname === "/api/password/forgot") {
       const body = await readJsonBody(request);
@@ -621,6 +627,41 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    if (method === "PUT" && earlyWithdrawalMatch) {
+      const user = await requireUnlockedUser(request, response);
+
+      if (!user) {
+        return;
+      }
+
+      if (user.role === "manager") {
+        sendJson(response, 403, {
+          error: "Managers cannot submit investor early withdrawal requests."
+        });
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const requestResult = await upsertEarlyWithdrawalRequest(
+          decodeURIComponent(earlyWithdrawalMatch[1]),
+          user.id,
+          body
+        );
+        sendJson(response, 200, { request: requestResult });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
     if (method === "POST" && url.pathname === "/api/admin/users") {
       const manager = await requireManager(request, response);
 
@@ -768,6 +809,35 @@ const server = createServer(async (request, response) => {
           }
         );
         sendJson(response, 200, { election });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "PUT" && adminEarlyWithdrawalMatch) {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const requestResult = await reviewEarlyWithdrawalRequest(
+          decodeURIComponent(adminEarlyWithdrawalMatch[1]),
+          decodeURIComponent(adminEarlyWithdrawalMatch[2]),
+          manager.id,
+          body
+        );
+        sendJson(response, 200, { request: requestResult });
       } catch (error) {
         sendJson(response, 400, { error: error.message });
       }

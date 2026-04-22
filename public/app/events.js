@@ -333,6 +333,40 @@ export function setupEventListeners() {
       return;
     }
 
+    if (event.target.dataset.withdrawalForm === "true") {
+      event.preventDefault();
+      const formData = new FormData(event.target);
+      const dealId = String(event.target.dataset.dealId ?? "");
+
+      if (!dealId) {
+        setMessage("withdrawal", "error", "A valid active project is required.");
+        render();
+        return;
+      }
+
+      try {
+        const result = await api(`/api/deals/${encodeURIComponent(dealId)}/withdrawal-request`, {
+          method: "PUT",
+          body: JSON.stringify({
+            investorNotes: formData.get("investorNotes")
+          })
+        });
+        await refreshDashboard();
+        setMessage(
+          "withdrawal",
+          "success",
+          `Early withdrawal request submitted for manager approval. ${formatNotificationBatchSummary(
+            result.request?.notifications ?? []
+          )}`
+        );
+      } catch (error) {
+        setMessage("withdrawal", "error", error.message);
+      }
+
+      render();
+      return;
+    }
+
     if (event.target.dataset.managerDistributionForm === "true") {
       event.preventDefault();
       const formData = new FormData(event.target);
@@ -381,6 +415,57 @@ export function setupEventListeners() {
         );
       } catch (error) {
         setMessage("distribution", "error", error.message);
+      }
+
+      render();
+      return;
+    }
+
+    if (event.target.dataset.managerWithdrawalForm === "true") {
+      event.preventDefault();
+      const formData = new FormData(event.target);
+      const dealId = String(event.target.dataset.dealId ?? "");
+      const participantId = String(event.target.dataset.participantId ?? "");
+      const decision = String(event.submitter?.value ?? "").trim();
+
+      if (!dealId || !participantId) {
+        setMessage(
+          "withdrawal",
+          "error",
+          "A valid project and investor are required for withdrawal review."
+        );
+        render();
+        return;
+      }
+
+      try {
+        const result = await api(
+          `/api/admin/deals/${encodeURIComponent(dealId)}/withdrawal-requests/${encodeURIComponent(
+            participantId
+          )}`,
+          {
+            method: "PUT",
+            body: JSON.stringify({
+              decision,
+              payoutExpectedOn: formData.get("payoutExpectedOn"),
+              managerNotes: formData.get("managerNotes")
+            })
+          }
+        );
+        await refreshDashboard();
+        setMessage(
+          "withdrawal",
+          "success",
+          decision === "approve"
+            ? `Early withdrawal request approved. ${formatNotificationBatchSummary(
+                result.request?.notifications ?? []
+              )}`
+            : `Early withdrawal request rejected. ${formatNotificationBatchSummary(
+                result.request?.notifications ?? []
+              )}`
+        );
+      } catch (error) {
+        setMessage("withdrawal", "error", error.message);
       }
 
       render();
@@ -440,6 +525,7 @@ export function setupEventListeners() {
             totalProjectCost: Number(formData.get("totalProjectCost")),
             debt: Number(formData.get("debt")),
             taxExpense: Number(formData.get("taxExpense")),
+            earlyWithdrawalPenaltyRate: Number(formData.get("earlyWithdrawalPenaltyRate")),
             debtInterestRate: Number(formData.get("debtInterestRate")),
             totalInterestPaid: Number(formData.get("totalInterestPaid")),
             salePrice: Number(formData.get("salePrice")),
@@ -487,6 +573,7 @@ export function setupEventListeners() {
             totalProjectCost: draft.totalProjectCost,
             debt: draft.debt,
             taxExpense: draft.taxExpense,
+            earlyWithdrawalPenaltyRate: draft.earlyWithdrawalPenaltyRate,
             debtInterestRate: draft.debtInterestRate,
             totalInterestPaid: draft.totalInterestPaid,
             salePrice: draft.salePrice,
@@ -735,16 +822,28 @@ export function setupEventListeners() {
       if (action === "create-issue") {
         const issueRoot = document.querySelector(`[data-deal-issue-root="${dealId}"]`);
         const titleInput = issueRoot?.querySelector('input[name="title"]');
+        const issueTypeInput = issueRoot?.querySelector('select[name="issueType"]');
         const thresholdInput = issueRoot?.querySelector('input[name="approvalThreshold"]');
+        const proposedPenaltyRateInput = issueRoot?.querySelector(
+          'input[name="proposedPenaltyRate"]'
+        );
         const closesOnInput = issueRoot?.querySelector('input[name="closesOn"]');
         const descriptionInput = issueRoot?.querySelector('textarea[name="description"]');
         const title = String(titleInput?.value ?? "").trim();
+        const issueType = String(issueTypeInput?.value ?? "general").trim();
         const description = String(descriptionInput?.value ?? "").trim();
         const approvalThreshold = Number(thresholdInput?.value ?? 0.75);
+        const proposedPenaltyRate = String(proposedPenaltyRateInput?.value ?? "").trim();
         const closesOn = String(closesOnInput?.value ?? "").trim();
 
         if (!title || !description || !closesOn) {
           setMessage("issue", "error", "Issue title, close date, and description are required.");
+          render();
+          return;
+        }
+
+        if (issueType === "penalty_rate_change" && !proposedPenaltyRate) {
+          setMessage("issue", "error", "A proposed penalty rate is required for a penalty vote.");
           render();
           return;
         }
@@ -754,9 +853,11 @@ export function setupEventListeners() {
             method: "POST",
             body: JSON.stringify({
               dealId,
+              issueType,
               title,
               description,
               approvalThreshold,
+              proposedPenaltyRate,
               closesOn
             })
           });

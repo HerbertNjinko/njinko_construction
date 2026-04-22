@@ -1078,6 +1078,15 @@ td {
   gap: 1rem;
 }
 
+.review-subsection {
+  display: grid;
+  gap: 1rem;
+}
+
+.section-head-tight {
+  margin-bottom: 0;
+}
+
 .distribution-review-card {
   border-radius: 22px;
   border: 1px solid rgba(31, 26, 23, 0.08);
@@ -1145,6 +1154,12 @@ td {
   background: rgba(19, 70, 132, 0.1);
   color: #134684;
   border-color: rgba(19, 70, 132, 0.18);
+}
+
+.review-status-pill.rejected {
+  background: rgba(146, 39, 39, 0.1);
+  color: #922727;
+  border-color: rgba(146, 39, 39, 0.18);
 }
 
 .review-status-pill.empty {

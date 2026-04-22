@@ -235,6 +235,15 @@ function getDistributionElectionMap(data) {
   );
 }
 
+function getEarlyWithdrawalRequestMap(data) {
+  return new Map(
+    (data.earlyWithdrawalRequests ?? []).map((request) => [
+      `${request.dealId}:${request.participantId}`,
+      request
+    ])
+  );
+}
+
 function buildDistributionPlan({ deal, position, participant, result, election, dealMap }) {
   const totalPayout = roundCurrency(result?.totalPayout ?? 0);
   const actualPayoutAmount = roundCurrency(Math.max(0, position?.distributionsToDate ?? 0));
@@ -310,6 +319,50 @@ function buildDistributionPlan({ deal, position, participant, result, election, 
     updatedAt: election?.updatedAt ?? null,
     payoutMethod: participant?.payoutMethod ?? "",
     totalPayout
+  };
+}
+
+function buildEarlyWithdrawalPlan({ deal, position, participant, request }) {
+  const currentContributionAmount = roundCurrency(Math.max(0, position?.contributionAmount ?? 0));
+  const requestedCapitalAmount = roundCurrency(
+    Math.max(0, request?.requestedCapitalAmount ?? currentContributionAmount)
+  );
+  const penaltyRate = Math.max(
+    0,
+    Math.min(1, Number(request?.penaltyRate ?? deal?.earlyWithdrawalPenaltyRate ?? 0.3))
+  );
+  const penaltyAmount = roundCurrency(
+    Math.max(0, request?.penaltyAmount ?? requestedCapitalAmount * penaltyRate)
+  );
+  const estimatedPayoutAmount = roundCurrency(Math.max(requestedCapitalAmount - penaltyAmount, 0));
+  const requestStatus = request?.requestStatus ?? "none";
+
+  return {
+    hasRequest: Boolean(request),
+    canRequest:
+      (deal?.status ?? "sold") !== "sold" &&
+      currentContributionAmount > 0 &&
+      requestStatus !== "approved",
+    requestStatus,
+    classType: position?.classType ?? request?.classType ?? null,
+    currentContributionAmount,
+    requestedCapitalAmount,
+    penaltyRate,
+    penaltyAmount,
+    estimatedPayoutAmount,
+    approvedPayoutAmount:
+      requestStatus === "approved"
+        ? roundCurrency(request?.approvedPayoutAmount ?? estimatedPayoutAmount)
+        : 0,
+    payoutExpectedOn: request?.payoutExpectedOn ?? null,
+    investorNotes: request?.investorNotes ?? "",
+    managerNotes: request?.managerNotes ?? "",
+    submittedByUserId: request?.requestedByUserId ?? null,
+    reviewedByUserId: request?.reviewedByUserId ?? null,
+    reviewedAt: request?.reviewedAt ?? null,
+    createdAt: request?.createdAt ?? null,
+    updatedAt: request?.updatedAt ?? null,
+    payoutMethod: participant?.payoutMethod ?? ""
   };
 }
 
@@ -395,7 +448,11 @@ function buildGovernanceIssues(data, viewerParticipantId, { includeAll = false }
       const isEligibleToVote = myInvestment > 0;
       let status = "open";
 
-      if (isClosed && eligibleInvestment > 0) {
+      if (isClosed && issue.resolutionResult === "passed") {
+        status = "passed";
+      } else if (isClosed && issue.resolutionResult === "failed") {
+        status = "failed";
+      } else if (isClosed && eligibleInvestment > 0) {
         if (yesPct >= issue.approvalThreshold) {
           status = "passed";
         } else {
@@ -433,11 +490,15 @@ function buildGovernanceIssues(data, viewerParticipantId, { includeAll = false }
         dealId: issue.dealId,
         dealName: deal?.name ?? "Deal",
         dealStatus: deal?.status ?? "under_construction",
+        issueType: issue.issueType ?? "general",
         title: issue.title,
         description: issue.description,
         approvalThreshold: issue.approvalThreshold,
+        proposedPenaltyRate: issue.proposedPenaltyRate ?? null,
         closesOn,
         isClosed,
+        resolutionResult: issue.resolutionResult ?? null,
+        resolutionAppliedAt: issue.resolutionAppliedAt ?? null,
         createdAt: issue.createdAt,
         updatedAt: issue.updatedAt,
         eligibleInvestment,
@@ -469,6 +530,7 @@ export function buildInvestorDashboard(user, data = seedData) {
   const participantMap = getParticipantMap(data);
   const dealMap = new Map(data.deals.map((deal) => [deal.id, deal]));
   const distributionElectionMap = getDistributionElectionMap(data);
+  const earlyWithdrawalRequestMap = getEarlyWithdrawalRequestMap(data);
   const participant = participantMap.get(user.participantId);
   const governanceIssues = buildGovernanceIssues(data, user.participantId);
   const issuesByDeal = new Map();
@@ -487,8 +549,11 @@ export function buildInvestorDashboard(user, data = seedData) {
     issuesByDeal.get(issue.dealId).push(issue);
   }
 
-  const visiblePositions = data.positions.filter(
+  const participantPositions = data.positions.filter(
     (position) => position.participantId === user.participantId
+  );
+  const visiblePositions = participantPositions.filter(
+    (position) => position.contributionAmount > 0 || position.distributionsToDate > 0
   );
 
   const projects = visiblePositions.map((position) => {
@@ -514,6 +579,7 @@ export function buildInvestorDashboard(user, data = seedData) {
       statusLabel: statusLabel(deal.status),
       currentPhase: deal.currentPhase,
       investmentCloseOn: deal.investmentCloseOn ?? null,
+      earlyWithdrawalPenaltyRate: deal.earlyWithdrawalPenaltyRate ?? 0.3,
       timelineProgress: resolveTimelineProgress(deal.status, deal.timelineProgress),
       timeline: deal.timeline,
       projectionLabel: deal.status === "sold" ? "Actual at exit" : "Projected at exit",
@@ -553,6 +619,67 @@ export function buildInvestorDashboard(user, data = seedData) {
     };
   });
 
+  const withdrawalProjects =
+    ["investor", "contractor"].includes(participant?.category ?? "")
+      ? [...new Set(
+          [
+            ...participantPositions
+              .filter((position) => {
+                const deal = dealMap.get(position.dealId);
+                return deal && deal.status !== "sold";
+              })
+              .map((position) => position.dealId),
+            ...(data.earlyWithdrawalRequests ?? [])
+              .filter((request) => request.participantId === user.participantId)
+              .map((request) => request.dealId)
+          ].filter(Boolean)
+        )]
+          .map((dealId) => {
+            const deal = dealMap.get(dealId);
+
+            if (!deal || deal.status === "sold") {
+              return null;
+            }
+
+            const position = participantPositions.find((item) => item.dealId === dealId) ?? null;
+            const request =
+              earlyWithdrawalRequestMap.get(`${dealId}:${user.participantId}`) ?? null;
+            const plan = buildEarlyWithdrawalPlan({
+              deal,
+              position,
+              participant,
+              request
+            });
+
+            if (!plan.hasRequest && !plan.canRequest) {
+              return null;
+            }
+
+            return {
+              id: deal.id,
+              name: deal.name,
+              location: deal.location,
+              currentPhase: deal.currentPhase,
+              status: deal.status,
+              statusLabel: statusLabel(deal.status),
+              investmentCloseOn: deal.investmentCloseOn ?? null,
+              earlyWithdrawalPenaltyRate: deal.earlyWithdrawalPenaltyRate ?? 0.3,
+              withdrawalRequest: plan
+            };
+          })
+          .filter(Boolean)
+          .sort((left, right) => {
+            const leftPending = left.withdrawalRequest.requestStatus === "pending";
+            const rightPending = right.withdrawalRequest.requestStatus === "pending";
+
+            if (leftPending !== rightPending) {
+              return leftPending ? -1 : 1;
+            }
+
+            return left.name.localeCompare(right.name);
+          })
+      : [];
+
   const totalInvested = roundCurrency(
     visiblePositions.reduce((sum, position) => sum + position.contributionAmount, 0)
   );
@@ -589,7 +716,8 @@ export function buildInvestorDashboard(user, data = seedData) {
       issues: governanceIssues
     },
     companyResources: data.companyResources ?? [],
-    projects
+    projects,
+    withdrawalRequests: withdrawalProjects
   };
 }
 
@@ -630,6 +758,7 @@ export function buildManagerDashboard(user, data = seedData) {
       taxExpense: deal.taxExpense ?? 0,
       debtInterestRate: deal.debtInterestRate ?? 0,
       totalInterestPaid: deal.totalInterestPaid ?? 0,
+      earlyWithdrawalPenaltyRate: deal.earlyWithdrawalPenaltyRate ?? 0.3,
       totalProjectCost: deal.totalProjectCost,
       salePrice: deal.salePrice,
       holdMonths: deal.holdMonths,
@@ -743,6 +872,7 @@ export function buildManagerDashboard(user, data = seedData) {
     .sort((left, right) => left.name.localeCompare(right.name));
 
   const adminAllocations = data.positions
+    .filter((position) => position.contributionAmount > 0)
     .map((position) => {
       const deal = data.deals.find((item) => item.id === position.dealId);
       const participant = participantMap.get(position.participantId);
@@ -867,6 +997,75 @@ export function buildManagerDashboard(user, data = seedData) {
       return String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? ""));
     });
 
+  const earlyWithdrawalReviews = (data.earlyWithdrawalRequests ?? [])
+    .map((request) => {
+      const deal = data.deals.find((item) => item.id === request.dealId);
+      const participantRecord = participantMap.get(request.participantId);
+
+      if (!deal || !["investor", "contractor"].includes(participantRecord?.category ?? "")) {
+        return null;
+      }
+
+      const linkedUser = userMap.get(request.participantId);
+      const submittedBy = request.requestedByUserId
+        ? userMapById.get(request.requestedByUserId)
+        : null;
+      const reviewedBy = request.reviewedByUserId
+        ? userMapById.get(request.reviewedByUserId)
+        : null;
+      const position = data.positions.find(
+        (item) => item.dealId === request.dealId && item.participantId === request.participantId
+      );
+      const plan = buildEarlyWithdrawalPlan({
+        deal,
+        position,
+        participant: participantRecord,
+        request
+      });
+      let reviewStatus = "Pending review";
+
+      if (request.requestStatus === "approved") {
+        reviewStatus = "Approved";
+      } else if (request.requestStatus === "rejected") {
+        reviewStatus = "Rejected";
+      }
+
+      return {
+        dealId: deal.id,
+        dealName: deal.name,
+        participantId: request.participantId,
+        participantName: participantRecord?.name ?? "Investor",
+        participantEmail: linkedUser?.email ?? "",
+        payoutMethod: participantRecord?.payoutMethod ?? "",
+        requestStatus: request.requestStatus,
+        reviewStatus,
+        needsReview: request.requestStatus === "pending",
+        canReview: request.requestStatus === "pending",
+        classType: plan.classType,
+        currentContributionAmount: plan.currentContributionAmount,
+        requestedCapitalAmount: plan.requestedCapitalAmount,
+        penaltyRate: plan.penaltyRate,
+        penaltyAmount: plan.penaltyAmount,
+        estimatedPayoutAmount: plan.estimatedPayoutAmount,
+        approvedPayoutAmount: plan.approvedPayoutAmount,
+        payoutExpectedOn: plan.payoutExpectedOn,
+        investorNotes: plan.investorNotes,
+        managerNotes: plan.managerNotes,
+        submittedByName: submittedBy?.name ?? null,
+        reviewedByName: reviewedBy?.name ?? null,
+        reviewedAt: plan.reviewedAt,
+        updatedAt: plan.updatedAt
+      };
+    })
+    .filter(Boolean)
+    .sort((left, right) => {
+      if (left.needsReview !== right.needsReview) {
+        return left.needsReview ? -1 : 1;
+      }
+
+      return String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? ""));
+    });
+
   return {
     role: user.role,
     viewer: {
@@ -888,7 +1087,8 @@ export function buildManagerDashboard(user, data = seedData) {
       users: adminUsers,
       participants: adminParticipants,
       allocations: adminAllocations,
-      distributionReviews
+      distributionReviews,
+      earlyWithdrawalReviews
     },
     governance: {
       issues: governanceIssues
