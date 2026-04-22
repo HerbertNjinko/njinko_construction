@@ -2337,7 +2337,7 @@ async function applyClosedPenaltyRateIssueResolutions() {
           FROM positions
           JOIN participants ON participants.id = positions.participant_id
           WHERE positions.deal_id = $1
-            AND participants.category = 'investor'
+            AND participants.category IN ('investor', 'contractor')
           GROUP BY positions.participant_id
           HAVING COALESCE(SUM(positions.contribution_amount), 0) > 0
         `,
@@ -4405,7 +4405,7 @@ export async function createDealIssue(input, createdByUserId) {
       JOIN participants ON participants.id = positions.participant_id
       JOIN users ON users.participant_id = positions.participant_id
       WHERE positions.deal_id = $1
-        AND participants.category = 'investor'
+        AND participants.category IN ('investor', 'contractor')
         AND users.is_active = 1
       GROUP BY users.id, users.participant_id, users.email, participants.name
       HAVING COALESCE(SUM(positions.contribution_amount), 0) > 0
@@ -4537,12 +4537,12 @@ export async function castDealIssueVote(issueId, userId, voteChoiceInput) {
     throw new Error("Issue not found.");
   }
 
-  if (votingContext.category !== "investor") {
-    throw new Error("Only investor participants can vote on major issues.");
+  if (!["investor", "contractor"].includes(votingContext.category ?? "")) {
+    throw new Error("Only investor or contractor participants can vote on major issues.");
   }
 
   if (Number(votingContext.contributionAmount) <= 0) {
-    throw new Error("Only investors with capital in this deal can vote on this issue.");
+    throw new Error("Only participants with capital in this deal can vote on this issue.");
   }
 
   if (votingContext.closesOn && todayStamp() > votingContext.closesOn) {

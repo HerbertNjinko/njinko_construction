@@ -63,7 +63,7 @@ function buildIssueCreatedBody({
   return [
     `Hello ${fullName},`,
     "",
-    `A new investor voting issue has been opened for ${dealName}.`,
+    `A new major voting issue has been opened for ${dealName}.`,
     "",
     `Issue: ${issueTitle}`,
     `Approval required: ${Math.round(approvalThreshold * 100)}%`,
@@ -569,7 +569,7 @@ export async function sendIssueCreatedNotification({
     userId,
     participantId,
     recipientEmail: email,
-    subject: `New investor vote for ${dealName}`,
+    subject: `New major vote for ${dealName}`,
     bodyText: buildIssueCreatedBody({
       fullName,
       dealName,

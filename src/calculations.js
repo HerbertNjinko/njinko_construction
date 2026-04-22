@@ -370,21 +370,21 @@ function buildGovernanceIssues(data, viewerParticipantId, { includeAll = false }
   const participantMap = getParticipantMap(data);
   const dealMap = new Map(data.deals.map((deal) => [deal.id, deal]));
   const asOfDate = String(data.asOfDate ?? new Date().toISOString().slice(0, 10));
-  const investorCapitalByDeal = new Map();
+  const participantCapitalByDeal = new Map();
   const votesByIssue = new Map();
 
   for (const position of data.positions) {
     const participant = participantMap.get(position.participantId);
 
-    if (participant?.category !== "investor") {
+    if (!["investor", "contractor"].includes(participant?.category ?? "")) {
       continue;
     }
 
-    if (!investorCapitalByDeal.has(position.dealId)) {
-      investorCapitalByDeal.set(position.dealId, new Map());
+    if (!participantCapitalByDeal.has(position.dealId)) {
+      participantCapitalByDeal.set(position.dealId, new Map());
     }
 
-    const dealCapital = investorCapitalByDeal.get(position.dealId);
+    const dealCapital = participantCapitalByDeal.get(position.dealId);
     dealCapital.set(
       position.participantId,
       roundCurrency((dealCapital.get(position.participantId) ?? 0) + position.contributionAmount)
@@ -403,7 +403,7 @@ function buildGovernanceIssues(data, viewerParticipantId, { includeAll = false }
     .sort((left, right) => String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? "")))
     .map((issue) => {
       const deal = dealMap.get(issue.dealId);
-      const capitalByParticipant = investorCapitalByDeal.get(issue.dealId) ?? new Map();
+      const capitalByParticipant = participantCapitalByDeal.get(issue.dealId) ?? new Map();
       const eligibleInvestment = roundCurrency(
         [...capitalByParticipant.values()].reduce((sum, value) => sum + value, 0)
       );
@@ -468,7 +468,7 @@ function buildGovernanceIssues(data, viewerParticipantId, { includeAll = false }
 
           return {
             participantId,
-            participantName: participant?.name ?? "Investor",
+            participantName: participant?.name ?? "Participant",
             weightPct: eligibleInvestment > 0 ? investedAmount / eligibleInvestment : 0,
             explicitVote,
             finalVote,

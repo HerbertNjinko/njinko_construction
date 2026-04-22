@@ -438,9 +438,9 @@ function renderIssueVoteLedger(issue) {
     <div class="issue-results">
       <div class="section-head">
         <div>
-          <h4>Investor Vote Ledger</h4>
+          <h4>Participant Vote Ledger</h4>
           <p class="section-copy">
-            Track each investor’s response and vote weight for this issue.
+            Track each participant’s response and vote weight for this issue.
           </p>
         </div>
       </div>
@@ -448,7 +448,7 @@ function renderIssueVoteLedger(issue) {
         <table class="issue-results-table">
           <thead>
             <tr>
-              <th>Investor</th>
+              <th>Participant</th>
               <th>Response</th>
               <th>Final outcome</th>
               <th>Vote weight</th>
@@ -3093,7 +3093,7 @@ function renderDealEditorPanel() {
           sectionId: `admin-edit-deal-${draft.id}-issues`,
           title: "Major Issue Voting",
           copy:
-            "Create investor votes tied to this project. Approval is weighted by invested capital, and investors can update their response until voting closes.",
+            "Create participant votes tied to this project. Approval is weighted by invested capital, and eligible participants can update their response until voting closes.",
           panelClass: "editor-section",
           message: renderMessage(state.messages.issue),
           body: `
