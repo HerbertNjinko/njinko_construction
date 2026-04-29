@@ -225,6 +225,60 @@ export function setupEventListeners() {
       return;
     }
 
+    if (event.target.id === "pool-form") {
+      event.preventDefault();
+      const formData = new FormData(event.target);
+
+      try {
+        await api("/api/admin/pools", {
+          method: "POST",
+          body: JSON.stringify({
+            name: formData.get("name"),
+            minimumCapitalAmount: Number(formData.get("minimumCapitalAmount")),
+            voteClosesOn: formData.get("voteClosesOn")
+          })
+        });
+        await refreshDashboard();
+        setMessage("pool", "success", "Pooled capital group created.");
+        event.target.reset();
+      } catch (error) {
+        setMessage("pool", "error", error.message);
+      }
+
+      render();
+      return;
+    }
+
+    if (event.target.dataset.poolCommitmentForm === "true") {
+      event.preventDefault();
+      const formData = new FormData(event.target);
+      const poolId = String(event.target.dataset.poolId ?? "");
+
+      if (!poolId) {
+        setMessage("pool", "error", "A valid pooled capital group is required.");
+        render();
+        return;
+      }
+
+      try {
+        await api(`/api/admin/pools/${encodeURIComponent(poolId)}/commitments`, {
+          method: "POST",
+          body: JSON.stringify({
+            participantId: formData.get("participantId"),
+            commitmentAmount: Number(formData.get("commitmentAmount"))
+          })
+        });
+        await refreshDashboard();
+        setMessage("pool", "success", "Pool commitment saved.");
+        event.target.reset();
+      } catch (error) {
+        setMessage("pool", "error", error.message);
+      }
+
+      render();
+      return;
+    }
+
     if (event.target.id === "profile-form") {
       event.preventDefault();
       const formData = new FormData(event.target);
@@ -267,6 +321,62 @@ export function setupEventListeners() {
       return;
     }
 
+    if (event.target.dataset.userCategoryForm === "true") {
+      event.preventDefault();
+      const formData = new FormData(event.target);
+      const userId = String(event.target.dataset.userId ?? "");
+
+      if (!userId) {
+        setMessage("directory", "error", "A valid user account is required.");
+        render();
+        return;
+      }
+
+      try {
+        await api(`/api/admin/users/${encodeURIComponent(userId)}/category`, {
+          method: "PATCH",
+          body: JSON.stringify({
+            category: formData.get("category")
+          })
+        });
+        await refreshDashboard();
+        setMessage("directory", "success", "User category updated.");
+      } catch (error) {
+        setMessage("directory", "error", error.message);
+      }
+
+      render();
+      return;
+    }
+
+    if (event.target.dataset.poolVoteForm === "true") {
+      event.preventDefault();
+      const formData = new FormData(event.target);
+      const poolId = String(event.target.dataset.poolId ?? "");
+
+      if (!poolId) {
+        setMessage("pool", "error", "A valid pooled capital group is required.");
+        render();
+        return;
+      }
+
+      try {
+        await api(`/api/pools/${encodeURIComponent(poolId)}/vote`, {
+          method: "PUT",
+          body: JSON.stringify({
+            dealId: formData.get("dealId")
+          })
+        });
+        await refreshDashboard();
+        setMessage("pool", "success", "Weighted project vote saved.");
+      } catch (error) {
+        setMessage("pool", "error", error.message);
+      }
+
+      render();
+      return;
+    }
+
     if (event.target.id === "resource-form") {
       event.preventDefault();
       const formData = new FormData(event.target);
@@ -289,6 +399,34 @@ export function setupEventListeners() {
         event.target.reset();
       } catch (error) {
         setMessage("resource", "error", error.message);
+      }
+
+      render();
+      return;
+    }
+
+    if (event.target.dataset.poolFundForm === "true") {
+      event.preventDefault();
+      const formData = new FormData(event.target);
+      const poolId = String(event.target.dataset.poolId ?? "");
+
+      if (!poolId) {
+        setMessage("pool", "error", "A valid pooled capital group is required.");
+        render();
+        return;
+      }
+
+      try {
+        await api(`/api/admin/pools/${encodeURIComponent(poolId)}/fund`, {
+          method: "POST",
+          body: JSON.stringify({
+            dealId: formData.get("dealId")
+          })
+        });
+        await refreshDashboard();
+        setMessage("pool", "success", "Pooled capital group funded into the selected project.");
+      } catch (error) {
+        setMessage("pool", "error", error.message);
       }
 
       render();

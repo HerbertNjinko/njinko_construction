@@ -60,6 +60,7 @@ These accounts exist only after running `npm run seed`.
 - Postgres persistence using the `investors` database
 - Automatic bootstrap of the first manager account from `.env` when the database has no manager user
 - Personal investor portfolio totals and per-project breakdowns
+- Pooled-member portal for sub-minimum investors who combine capital, vote on project placement by contribution weight, track pro-rata returns from one shared project-facing position, and submit sold-project payout or reinvestment elections on their individual share
 - Limited project summary for investors without exposing the full cap table
 - Self-service profile editing for names, address, contact info, and payout instructions
 - Early withdrawal requests on active investor deals with per-project penalty rates, manager approval or rejection, and scheduled payout dates
@@ -68,8 +69,10 @@ These accounts exist only after running `npm run seed`.
 - Contractor tracking table for deferred compensation and Class C participation
 - Manager admin console to:
   - add manager, investor, and contractor users
+  - add pooled-member users for sub-minimum capital groups
   - capture driver's license number and attach an ID card at user creation
   - add deal allocations / Class C participation
+  - create pooled capital groups, record member commitments, fund the weighted vote winner into one project-facing pooled position, and review pooled-member sold-project payout or reinvestment elections
   - increase an existing participant position before the project investment close date
   - update project records and save changes to the database
   - define an investment close date for each project so new allocations stop after the window closes
@@ -89,6 +92,9 @@ These accounts exist only after running `npm run seed`.
 - `participants`: investors, contractors, sponsor entities
 - `users`: login credentials, email, first-login password reset state
 - `deals`: project-level financial and status fields
+- `investor_pools`: pooled-capital groups that collect smaller investor commitments and eventually map to one shared project-facing position
+- `investor_pool_commitments`: per-member pooled commitments that determine ownership weight, voting power, and payout splits
+- `investor_pool_votes`: weighted project-selection ballots cast by pooled members before the pooled vehicle is funded
 - `early_withdrawal_requests`: investor back-out requests, penalty amounts, review state, and payout scheduling
 - `promote_tiers`: promote hurdle structure per deal
 - `deal_timeline_items`: visible milestone timeline per deal

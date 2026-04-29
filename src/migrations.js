@@ -20,6 +20,9 @@ const REQUIRED_TABLES = [
   "early_withdrawal_requests",
   "deal_issues",
   "deal_issue_votes",
+  "investor_pools",
+  "investor_pool_commitments",
+  "investor_pool_votes",
   "archived_records"
 ];
 

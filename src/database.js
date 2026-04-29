@@ -1,6 +1,6 @@
 import { createHash, randomBytes, randomUUID, scryptSync } from "node:crypto";
 
-import { calculateWaterfall } from "./calculations.js";
+import { buildPoolDistributionContexts, calculateWaterfall } from "./calculations.js";
 import { seedData } from "./data.js";
 import { assertDatabaseReady } from "./migrations.js";
 import {
@@ -107,6 +107,194 @@ function computeEarlyWithdrawalAmounts(capitalAmount, penaltyRate) {
 
 function createId(prefix) {
   return `${prefix}-${randomUUID()}`;
+}
+
+function normalizePositiveCurrencyAmount(value, fieldLabel) {
+  const amount = roundNumber(Number(value));
+
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error(`${fieldLabel} must be greater than zero.`);
+  }
+
+  return amount;
+}
+
+function normalizePoolStatus(status) {
+  const normalized = String(status ?? "").trim();
+
+  if (!["open", "voting", "funded"].includes(normalized)) {
+    throw new Error("Pool status is invalid.");
+  }
+
+  return normalized;
+}
+
+function isPoolVotingClosed(voteClosesOn, asOfDate = todayStamp()) {
+  const normalizedCloseDate = normalizeOptionalText(voteClosesOn);
+  return Boolean(normalizedCloseDate && normalizedCloseDate < asOfDate);
+}
+
+async function getInvestorPoolById(poolId, executor = pool) {
+  const normalizedPoolId = String(poolId ?? "").trim();
+
+  if (!normalizedPoolId) {
+    return null;
+  }
+
+  const row = await queryOne(
+    `
+      SELECT
+        id,
+        name,
+        pool_participant_id AS "poolParticipantId",
+        minimum_capital_amount AS "minimumCapitalAmount",
+        status,
+        vote_closes_on AS "voteClosesOn",
+        selected_deal_id AS "selectedDealId",
+        funded_on AS "fundedOn",
+        created_by_user_id AS "createdByUserId",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM investor_pools
+      WHERE id = $1
+    `,
+    [normalizedPoolId],
+    executor
+  );
+
+  if (!row) {
+    return null;
+  }
+
+  return {
+    ...row,
+    minimumCapitalAmount: Number(row.minimumCapitalAmount)
+  };
+}
+
+async function getInvestorPoolCommitments(poolId, executor = pool) {
+  return (await queryAll(
+    `
+      SELECT
+        id,
+        pool_id AS "poolId",
+        participant_id AS "participantId",
+        commitment_amount AS "commitmentAmount",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM investor_pool_commitments
+      WHERE pool_id = $1
+      ORDER BY created_at, id
+    `,
+    [poolId],
+    executor
+  )).map((row) => ({
+    ...row,
+    commitmentAmount: Number(row.commitmentAmount)
+  }));
+}
+
+async function getInvestorPoolVoteSummary(poolId, executor = pool) {
+  return (await queryAll(
+    `
+      SELECT
+        votes.deal_id AS "dealId",
+        COALESCE(SUM(commitments.commitment_amount), 0)::float AS "voteWeightAmount",
+        COUNT(votes.id)::int AS "voteCount"
+      FROM investor_pool_votes votes
+      JOIN investor_pool_commitments commitments
+        ON commitments.pool_id = votes.pool_id
+       AND commitments.participant_id = votes.participant_id
+      WHERE votes.pool_id = $1
+      GROUP BY votes.deal_id
+      ORDER BY "voteWeightAmount" DESC, votes.deal_id
+    `,
+    [poolId],
+    executor
+  )).map((row) => ({
+    ...row,
+    voteWeightAmount: Number(row.voteWeightAmount),
+    voteCount: Number(row.voteCount)
+  }));
+}
+
+async function syncInvestorPoolStatus(poolId, executor = pool) {
+  const investmentPool = await getInvestorPoolById(poolId, executor);
+
+  if (!investmentPool) {
+    return null;
+  }
+
+  const commitmentTotalRow = await queryOne(
+    `
+      SELECT COALESCE(SUM(commitment_amount), 0)::float AS "totalCommitted"
+      FROM investor_pool_commitments
+      WHERE pool_id = $1
+    `,
+    [poolId],
+    executor
+  );
+  const totalCommitted = Number(commitmentTotalRow?.totalCommitted ?? 0);
+  const nextStatus = investmentPool.selectedDealId
+    ? "funded"
+    : totalCommitted >= investmentPool.minimumCapitalAmount
+      ? "voting"
+      : "open";
+
+  if (nextStatus !== investmentPool.status) {
+    await executor.query(
+      `
+        UPDATE investor_pools
+        SET status = $1, updated_at = $2
+        WHERE id = $3
+      `,
+      [nextStatus, nowTimestamp(), poolId]
+    );
+  }
+
+  return {
+    ...investmentPool,
+    status: nextStatus,
+    totalCommitted
+  };
+}
+
+async function getEligiblePoolTargetDeal(dealId, executor = pool) {
+  const normalizedDealId = String(dealId ?? "").trim();
+
+  if (!normalizedDealId) {
+    throw new Error("A valid target project is required.");
+  }
+
+  const deal = await queryOne(
+    `
+      SELECT
+        id,
+        name,
+        status,
+        investment_close_on AS "investmentCloseOn"
+      FROM deals
+      WHERE id = $1
+    `,
+    [normalizedDealId],
+    executor
+  );
+
+  if (!deal) {
+    throw new Error("Target project not found.");
+  }
+
+  if (deal.status === "sold") {
+    throw new Error("Sold projects cannot receive pooled capital.");
+  }
+
+  if (isInvestmentWindowClosed(deal.investmentCloseOn)) {
+    throw new Error(
+      `Investments for ${deal.name} closed on ${deal.investmentCloseOn}. This pool cannot be deployed there.`
+    );
+  }
+
+  return deal;
 }
 
 async function getArchiveActorSnapshot(userId, executor = pool) {
@@ -296,8 +484,8 @@ function normalizePersonInput(input) {
 }
 
 function validateUserProfileForCreation(profile, category) {
-  if (!["investor", "contractor", "manager"].includes(category)) {
-    throw new Error("User category must be investor, contractor, or manager.");
+  if (!["investor", "contractor", "manager", "pool_member"].includes(category)) {
+    throw new Error("User category must be investor, contractor, manager, or pool member.");
   }
 
   if (profile.firstName.length < 2) {
@@ -817,6 +1005,9 @@ export async function seedDatabase({ force = false } = {}) {
     if (force) {
       await client.query(`
         TRUNCATE TABLE
+          investor_pool_votes,
+          investor_pool_commitments,
+          investor_pools,
           deal_issue_votes,
           deal_issues,
           email_notifications,
@@ -1090,6 +1281,59 @@ export async function getAppDataSnapshot() {
     distributionsToDate: Number(row.distributionsToDate)
   }));
 
+  const investorPools = (await queryAll(
+    `
+      SELECT
+        id,
+        name,
+        pool_participant_id AS "poolParticipantId",
+        minimum_capital_amount AS "minimumCapitalAmount",
+        status,
+        vote_closes_on AS "voteClosesOn",
+        selected_deal_id AS "selectedDealId",
+        funded_on AS "fundedOn",
+        created_by_user_id AS "createdByUserId",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM investor_pools
+      ORDER BY created_at DESC, id
+    `
+  )).map((row) => ({
+    ...row,
+    minimumCapitalAmount: Number(row.minimumCapitalAmount)
+  }));
+
+  const investorPoolCommitments = (await queryAll(
+    `
+      SELECT
+        id,
+        pool_id AS "poolId",
+        participant_id AS "participantId",
+        commitment_amount AS "commitmentAmount",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM investor_pool_commitments
+      ORDER BY created_at, id
+    `
+  )).map((row) => ({
+    ...row,
+    commitmentAmount: Number(row.commitmentAmount)
+  }));
+
+  const investorPoolVotes = await queryAll(
+    `
+      SELECT
+        id,
+        pool_id AS "poolId",
+        participant_id AS "participantId",
+        deal_id AS "dealId",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM investor_pool_votes
+      ORDER BY updated_at DESC, id
+    `
+  );
+
   const contractors = (await queryAll(
     `
       SELECT
@@ -1271,6 +1515,9 @@ export async function getAppDataSnapshot() {
     users,
     deals,
     positions,
+    investorPools,
+    investorPoolCommitments,
+    investorPoolVotes,
     contractors,
     distributionElections,
     earlyWithdrawalRequests,
@@ -1415,6 +1662,460 @@ export async function createManagedUser(input) {
     mustChangePassword: true,
     sendNotification: true
   });
+}
+
+function normalizeInvestorPoolInput(input) {
+  const name = String(input?.name ?? "").trim();
+  const minimumCapitalAmount = normalizePositiveCurrencyAmount(
+    input?.minimumCapitalAmount,
+    "Minimum capital"
+  );
+  const voteClosesOn = normalizeOptionalDateInput(input?.voteClosesOn, "Vote close date");
+
+  if (name.length < 3) {
+    throw new Error("Pool name must be at least 3 characters.");
+  }
+
+  if (!voteClosesOn) {
+    throw new Error("Vote close date is required.");
+  }
+
+  return {
+    name,
+    minimumCapitalAmount,
+    voteClosesOn
+  };
+}
+
+export async function createInvestorPool(input, userId) {
+  const investmentPool = normalizeInvestorPoolInput(input);
+  const timestamp = nowTimestamp();
+  const poolId = createId("pool");
+  const poolParticipantId = createId("participant");
+
+  const existingPool = await queryOne(
+    `
+      SELECT id
+      FROM investor_pools
+      WHERE LOWER(name) = LOWER($1)
+    `,
+    [investmentPool.name]
+  );
+
+  if (existingPool) {
+    throw new Error("A pooled capital group with that name already exists.");
+  }
+
+  await withTransaction(async (client) => {
+    await client.query(
+      `
+        INSERT INTO participants (
+          id,
+          name,
+          category,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5)
+      `,
+      [poolParticipantId, investmentPool.name, "pool", timestamp, timestamp]
+    );
+
+    await client.query(
+      `
+        INSERT INTO investor_pools (
+          id,
+          name,
+          pool_participant_id,
+          minimum_capital_amount,
+          status,
+          vote_closes_on,
+          selected_deal_id,
+          funded_on,
+          created_by_user_id,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      `,
+      [
+        poolId,
+        investmentPool.name,
+        poolParticipantId,
+        investmentPool.minimumCapitalAmount,
+        "open",
+        investmentPool.voteClosesOn,
+        null,
+        null,
+        String(userId ?? "").trim() || null,
+        timestamp,
+        timestamp
+      ]
+    );
+  });
+
+  return {
+    pool: await getInvestorPoolById(poolId)
+  };
+}
+
+export async function upsertInvestorPoolCommitment(poolId, input) {
+  const normalizedPoolId = String(poolId ?? "").trim();
+  const participantId = String(input?.participantId ?? "").trim();
+  const commitmentAmount = normalizePositiveCurrencyAmount(
+    input?.commitmentAmount,
+    "Commitment amount"
+  );
+
+  if (!normalizedPoolId) {
+    throw new Error("A valid pooled capital group is required.");
+  }
+
+  if (!participantId) {
+    throw new Error("A valid pooled member is required.");
+  }
+
+  const member = await queryOne(
+    `
+      SELECT
+        participants.id AS id,
+        participants.name AS name,
+        participants.category AS category,
+        users.id AS "userId",
+        users.is_active AS "isActive"
+      FROM participants
+      LEFT JOIN users ON users.participant_id = participants.id
+      WHERE participants.id = $1
+    `,
+    [participantId]
+  );
+
+  if (!member || member.category !== "pool_member") {
+    throw new Error("Only pooled-member users can be added to a pooled capital group.");
+  }
+
+  if (!member.userId || !Boolean(member.isActive)) {
+    throw new Error("This pooled member must have an active portal login before being added.");
+  }
+
+  const investmentPool = await getInvestorPoolById(normalizedPoolId);
+
+  if (!investmentPool) {
+    throw new Error("Pooled capital group not found.");
+  }
+
+  if (normalizePoolStatus(investmentPool.status) === "funded" || investmentPool.selectedDealId) {
+    throw new Error("This pooled capital group has already been funded and can no longer change.");
+  }
+
+  const timestamp = nowTimestamp();
+  let action = "created";
+
+  await withTransaction(async (client) => {
+    const existingCommitment = await queryOne(
+      `
+        SELECT id
+        FROM investor_pool_commitments
+        WHERE pool_id = $1
+          AND participant_id = $2
+      `,
+      [normalizedPoolId, participantId],
+      client
+    );
+
+    if (existingCommitment) {
+      action = "updated";
+      await client.query(
+        `
+          UPDATE investor_pool_commitments
+          SET commitment_amount = $1, updated_at = $2
+          WHERE id = $3
+        `,
+        [commitmentAmount, timestamp, existingCommitment.id]
+      );
+    } else {
+      await client.query(
+        `
+          INSERT INTO investor_pool_commitments (
+            id,
+            pool_id,
+            participant_id,
+            commitment_amount,
+            created_at,
+            updated_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6)
+        `,
+        [createId("pool-commitment"), normalizedPoolId, participantId, commitmentAmount, timestamp, timestamp]
+      );
+    }
+
+    await syncInvestorPoolStatus(normalizedPoolId, client);
+  });
+
+  const updatedPool = await getInvestorPoolById(normalizedPoolId);
+  const updatedCommitments = await getInvestorPoolCommitments(normalizedPoolId);
+  const totalCommitted = roundNumber(
+    updatedCommitments.reduce((sum, commitment) => sum + commitment.commitmentAmount, 0)
+  );
+
+  return {
+    action,
+    poolId: normalizedPoolId,
+    participantId,
+    participantName: member.name,
+    commitmentAmount,
+    totalCommitted,
+    poolStatus: updatedPool?.status ?? "open"
+  };
+}
+
+export async function castInvestorPoolVote(poolId, userId, dealId) {
+  const normalizedPoolId = String(poolId ?? "").trim();
+  const normalizedUserId = String(userId ?? "").trim();
+  const normalizedDealId = String(dealId ?? "").trim();
+
+  if (!normalizedPoolId) {
+    throw new Error("A valid pooled capital group is required.");
+  }
+
+  if (!normalizedDealId) {
+    throw new Error("Select a project before voting.");
+  }
+
+  const user = await getUserAccountById(normalizedUserId);
+
+  if (!user || user.category !== "pool_member") {
+    throw new Error("Only pooled-member users can vote on pooled capital placements.");
+  }
+
+  const investmentPool = await getInvestorPoolById(normalizedPoolId);
+
+  if (!investmentPool) {
+    throw new Error("Pooled capital group not found.");
+  }
+
+  if (investmentPool.status !== "voting" || investmentPool.selectedDealId) {
+    throw new Error("This pooled capital group is not currently open for voting.");
+  }
+
+  if (isPoolVotingClosed(investmentPool.voteClosesOn)) {
+    throw new Error("Voting for this pooled capital group has already closed.");
+  }
+
+  const memberCommitment = await queryOne(
+    `
+      SELECT commitment_amount AS "commitmentAmount"
+      FROM investor_pool_commitments
+      WHERE pool_id = $1
+        AND participant_id = $2
+    `,
+    [normalizedPoolId, user.participantId]
+  );
+
+  if (!memberCommitment || Number(memberCommitment.commitmentAmount) <= 0) {
+    throw new Error("You must be an assigned member of this pooled capital group before voting.");
+  }
+
+  await getEligiblePoolTargetDeal(normalizedDealId);
+
+  const timestamp = nowTimestamp();
+
+  await withTransaction(async (client) => {
+    const existingVote = await queryOne(
+      `
+        SELECT id
+        FROM investor_pool_votes
+        WHERE pool_id = $1
+          AND participant_id = $2
+      `,
+      [normalizedPoolId, user.participantId],
+      client
+    );
+
+    if (existingVote) {
+      await client.query(
+        `
+          UPDATE investor_pool_votes
+          SET deal_id = $1, updated_at = $2
+          WHERE id = $3
+        `,
+        [normalizedDealId, timestamp, existingVote.id]
+      );
+    } else {
+      await client.query(
+        `
+          INSERT INTO investor_pool_votes (
+            id,
+            pool_id,
+            participant_id,
+            deal_id,
+            created_at,
+            updated_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6)
+        `,
+        [createId("pool-vote"), normalizedPoolId, user.participantId, normalizedDealId, timestamp, timestamp]
+      );
+    }
+  });
+
+  return {
+    vote: {
+      poolId: normalizedPoolId,
+      participantId: user.participantId,
+      dealId: normalizedDealId
+    }
+  };
+}
+
+export async function fundInvestorPool(poolId, userId, input = {}) {
+  const normalizedPoolId = String(poolId ?? "").trim();
+  const requestedDealId = normalizeOptionalText(input?.dealId);
+
+  if (!normalizedPoolId) {
+    throw new Error("A valid pooled capital group is required.");
+  }
+
+  const timestamp = nowTimestamp();
+  let fundedPoolSummary = null;
+
+  await withTransaction(async (client) => {
+    const investmentPool = await getInvestorPoolById(normalizedPoolId, client);
+
+    if (!investmentPool) {
+      throw new Error("Pooled capital group not found.");
+    }
+
+    if (investmentPool.status === "funded" || investmentPool.selectedDealId) {
+      throw new Error("This pooled capital group has already been funded.");
+    }
+
+    const commitments = await getInvestorPoolCommitments(normalizedPoolId, client);
+
+    if (!commitments.length) {
+      throw new Error("Add pooled-member commitments before funding this group.");
+    }
+
+    const totalCommitted = roundNumber(
+      commitments.reduce((sum, commitment) => sum + commitment.commitmentAmount, 0)
+    );
+
+    if (totalCommitted < investmentPool.minimumCapitalAmount) {
+      throw new Error(
+        `This pooled capital group has only raised ${totalCommitted.toFixed(
+          2
+        )} and cannot be funded until it reaches the minimum capital target.`
+      );
+    }
+
+    const voteRows = await queryAll(
+      `
+        SELECT COUNT(*)::int AS count
+        FROM investor_pool_votes
+        WHERE pool_id = $1
+      `,
+      [normalizedPoolId],
+      client
+    );
+    const totalVotes = Number(voteRows[0]?.count ?? 0);
+
+    if (!isPoolVotingClosed(investmentPool.voteClosesOn) && totalVotes < commitments.length) {
+      throw new Error(
+        "Funding is only allowed after the vote closes or after every pooled member has voted."
+      );
+    }
+
+    const voteSummary = await getInvestorPoolVoteSummary(normalizedPoolId, client);
+
+    if (!voteSummary.length) {
+      throw new Error("This pooled capital group does not yet have any recorded project votes.");
+    }
+
+    const topWeight = voteSummary[0].voteWeightAmount;
+    const leaders = voteSummary.filter((row) => row.voteWeightAmount === topWeight);
+
+    if (leaders.length !== 1) {
+      throw new Error("This pooled capital group is tied across multiple projects and cannot be funded yet.");
+    }
+
+    const winningDealId = leaders[0].dealId;
+
+    if (requestedDealId && requestedDealId !== winningDealId) {
+      throw new Error("The selected project does not match the current weighted vote winner.");
+    }
+
+    const targetDeal = await getEligiblePoolTargetDeal(requestedDealId ?? winningDealId, client);
+    const existingPoolPosition = await queryOne(
+      `
+        SELECT id
+        FROM positions
+        WHERE participant_id = $1
+      `,
+      [investmentPool.poolParticipantId],
+      client
+    );
+
+    if (existingPoolPosition) {
+      throw new Error("This pooled capital group already has a linked deal position.");
+    }
+
+    const positionId = createId("position");
+    await client.query(
+      `
+        INSERT INTO positions (
+          id,
+          deal_id,
+          participant_id,
+          class_type,
+          contribution_type,
+          contribution_amount,
+          distributions_to_date,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      `,
+      [
+        positionId,
+        targetDeal.id,
+        investmentPool.poolParticipantId,
+        "Class A",
+        "Pooled member capital",
+        totalCommitted,
+        0,
+        timestamp,
+        timestamp
+      ]
+    );
+
+    await client.query(
+      `
+        UPDATE investor_pools
+        SET
+          selected_deal_id = $1,
+          funded_on = $2,
+          status = $3,
+          updated_at = $4
+        WHERE id = $5
+      `,
+      [targetDeal.id, timestamp, "funded", timestamp, normalizedPoolId]
+    );
+
+    await syncDealEquity(targetDeal.id, client);
+
+    fundedPoolSummary = {
+      poolId: normalizedPoolId,
+      dealId: targetDeal.id,
+      dealName: targetDeal.name,
+      totalCommitted,
+      fundedByUserId: String(userId ?? "").trim() || null
+    };
+  });
+
+  return {
+    pool: fundedPoolSummary
+  };
 }
 
 export async function ensureInitialManagerUser() {
@@ -3506,6 +4207,103 @@ function participantHasPayoutInstructions(participant) {
   );
 }
 
+function resolveDistributionElectionContext(snapshot, dealId, participantId) {
+  const deal = snapshot.deals.find((item) => item.id === dealId);
+
+  if (!deal) {
+    throw new Error("Deal not found.");
+  }
+
+  const participant = snapshot.participants.find((item) => item.id === participantId);
+  const position = snapshot.positions.find(
+    (item) => item.dealId === dealId && item.participantId === participantId
+  );
+
+  if (position && participant?.category === "investor") {
+    const dealPositions = snapshot.positions.filter((item) => item.dealId === dealId);
+    const waterfall = calculateWaterfall({ deal, positions: dealPositions });
+    const positionResult = waterfall.participantResults.find(
+      (item) => item.positionId === position.id
+    );
+
+    if (!positionResult || positionResult.totalPayout <= 0) {
+      throw new Error("No exited proceeds are available for this position.");
+    }
+
+    return {
+      kind: "direct",
+      deal,
+      participant,
+      position,
+      classType: position.classType,
+      totalPayout: roundNumber(positionResult.totalPayout),
+      capitalReturned: roundNumber(positionResult.capitalReturned),
+      profitReturned: roundNumber(positionResult.prefEarned + positionResult.profitShare),
+      sourcePoolNames: []
+    };
+  }
+
+  const pooledContext = buildPoolDistributionContexts(snapshot, {
+    participantId,
+    dealId
+  })[0];
+
+  if (pooledContext) {
+    return {
+      kind: "pooled",
+      deal,
+      participant,
+      position: null,
+      classType: "Class A",
+      totalPayout: roundNumber(pooledContext.totalPayout),
+      capitalReturned: roundNumber(pooledContext.capitalReturned),
+      profitReturned: roundNumber(pooledContext.profitReturned),
+      sourcePoolNames: pooledContext.sourcePoolNames
+    };
+  }
+
+  throw new Error("You do not have an eligible distribution balance in this deal.");
+}
+
+function getPoolMemberReinvestmentConflictIssues(snapshot, participantId, sourceDealId) {
+  const poolMap = new Map((snapshot.investorPools ?? []).map((pool) => [pool.id, pool]));
+  const dealMap = new Map((snapshot.deals ?? []).map((deal) => [deal.id, deal]));
+  const commitments = (snapshot.investorPoolCommitments ?? []).filter(
+    (commitment) => commitment.participantId === participantId
+  );
+  const issues = [];
+
+  for (const commitment of commitments) {
+    const investmentPool = poolMap.get(commitment.poolId);
+
+    if (!investmentPool) {
+      continue;
+    }
+
+    if (investmentPool.selectedDealId === sourceDealId) {
+      continue;
+    }
+
+    if (!investmentPool.selectedDealId) {
+      issues.push(`${investmentPool.name} is still raising capital or waiting on a vote.`);
+      continue;
+    }
+
+    const linkedDeal = dealMap.get(investmentPool.selectedDealId);
+
+    if (!linkedDeal || linkedDeal.status !== "sold") {
+      issues.push(`${investmentPool.name} is still tied to an active pooled project.`);
+      continue;
+    }
+
+    issues.push(
+      `${investmentPool.name} still exists as a separate pooled distribution history on another sold project.`
+    );
+  }
+
+  return issues;
+}
+
 function normalizeEarlyWithdrawalRequestInput(input) {
   return {
     investorNotes: normalizeOptionalText(input?.investorNotes ?? input?.notes)
@@ -3971,34 +4769,23 @@ export async function upsertDistributionElection(dealId, userId, input) {
     throw new Error("Reinvestment elections can only be saved after the project has sold.");
   }
 
-  const participant = snapshot.participants.find((item) => item.id === targetParticipantId);
-  const position = snapshot.positions.find(
-    (item) => item.dealId === normalizedDealId && item.participantId === targetParticipantId
+  const distributionContext = resolveDistributionElectionContext(
+    snapshot,
+    normalizedDealId,
+    targetParticipantId
   );
-
-  if (!position || position.contributionAmount <= 0) {
-    throw new Error("You do not have an eligible position in this deal.");
-  }
-
-  if (participant?.category !== "investor") {
-    throw new Error("Distribution elections are only supported for investor positions.");
-  }
-
-  const dealPositions = snapshot.positions.filter((item) => item.dealId === normalizedDealId);
-  const waterfall = calculateWaterfall({ deal, positions: dealPositions });
-  const positionResult = waterfall.participantResults.find(
-    (item) => item.positionId === position.id
-  );
-
-  if (!positionResult || positionResult.totalPayout <= 0) {
-    throw new Error("No exited proceeds are available for this position.");
-  }
+  const participant = distributionContext.participant;
+  const position = distributionContext.position;
 
   const { totalPayout, reinvestAmount, cashPayoutAmount } = computeDistributionAmounts(
     election,
-    positionResult.totalPayout
+    distributionContext.totalPayout
   );
   const rolloverTargetDealId = reinvestAmount > 0 ? election.targetDealId : null;
+
+  if (reinvestAmount > 0 && !rolloverTargetDealId) {
+    throw new Error("Choose a target project for reinvestment.");
+  }
 
   if (rolloverTargetDealId) {
     const rolloverTarget = snapshot.deals.find((item) => item.id === rolloverTargetDealId);
@@ -4307,11 +5094,41 @@ export async function upsertDistributionElection(dealId, userId, input) {
       );
     }
 
+    if (
+      distributionContext.kind === "pooled" &&
+      reinvestAmount > 0 &&
+      rolloverTargetDealId &&
+      participant?.category !== "investor"
+    ) {
+      const reinvestmentConflicts = getPoolMemberReinvestmentConflictIssues(
+        snapshot,
+        targetParticipantId,
+        normalizedDealId
+      );
+
+      if (reinvestmentConflicts.length) {
+        throw new Error(
+          `This pooled member cannot roll proceeds into a direct investor position yet. ${reinvestmentConflicts.join(
+            " "
+          )}`
+        );
+      }
+
+      await client.query(
+        `
+          UPDATE participants
+          SET category = 'investor', updated_at = $1
+          WHERE id = $2
+        `,
+        [timestamp, targetParticipantId]
+      );
+    }
+
     return applyApprovedReinvestmentAllocation({
       client,
       targetDealId: rolloverTargetDealId,
       participantId: targetParticipantId,
-      classType: position.classType,
+      classType: distributionContext.classType,
       amount: reinvestAmount
     });
   });
@@ -4624,6 +5441,137 @@ export async function deleteDeal(dealId, actingUserId = null) {
     deletedDealId: id,
     archivedRecordId: archive.id
   };
+}
+
+function getSettledPoolMemberCommitmentIssues(snapshot, participantId) {
+  const poolMap = new Map((snapshot.investorPools ?? []).map((pool) => [pool.id, pool]));
+  const dealMap = new Map((snapshot.deals ?? []).map((deal) => [deal.id, deal]));
+  const commitments = (snapshot.investorPoolCommitments ?? []).filter(
+    (commitment) => commitment.participantId === participantId
+  );
+  const issues = [];
+
+  for (const commitment of commitments) {
+    const investmentPool = poolMap.get(commitment.poolId);
+
+    if (!investmentPool) {
+      continue;
+    }
+
+    if (!investmentPool.selectedDealId) {
+      issues.push(`${investmentPool.name} is still raising capital or waiting on a vote.`);
+      continue;
+    }
+
+    const deal = dealMap.get(investmentPool.selectedDealId);
+
+    if (!deal || deal.status !== "sold") {
+      issues.push(`${investmentPool.name} is still tied to an active project.`);
+      continue;
+    }
+
+    const poolPosition = (snapshot.positions ?? []).find(
+      (position) =>
+        position.dealId === investmentPool.selectedDealId &&
+        position.participantId === investmentPool.poolParticipantId
+    );
+
+    if (!poolPosition) {
+      issues.push(`${investmentPool.name} does not have a settled pooled position on file.`);
+      continue;
+    }
+
+    const dealPositions = (snapshot.positions ?? []).filter(
+      (position) => position.dealId === investmentPool.selectedDealId
+    );
+    const waterfall = calculateWaterfall({ deal, positions: dealPositions });
+    const poolResult = waterfall.participantResults.find(
+      (result) => result.positionId === poolPosition.id
+    );
+    const expectedTotalPayout = roundNumber(poolResult?.totalPayout ?? 0);
+    const actualPayout = roundNumber(poolPosition.distributionsToDate ?? 0);
+
+    if (actualPayout + 0.01 < expectedTotalPayout) {
+      issues.push(
+        `${investmentPool.name} has not been fully paid out yet (${actualPayout.toFixed(
+          2
+        )} of ${expectedTotalPayout.toFixed(2)} distributed).`
+      );
+    }
+  }
+
+  return issues;
+}
+
+export async function updateUserCategory(userId, nextCategoryInput, actingUserId) {
+  const targetUser = await getUserAccountById(userId, { includeInactive: true });
+
+  if (!targetUser) {
+    throw new Error("User not found.");
+  }
+
+  const nextCategory = normalizeCategory(nextCategoryInput);
+  const currentCategory = normalizeCategory(targetUser.category);
+
+  if (targetUser.id === actingUserId) {
+    throw new Error("You cannot change your own category.");
+  }
+
+  if (!["investor", "pool_member"].includes(nextCategory)) {
+    throw new Error("Only investor and pooled-member categories can be assigned here.");
+  }
+
+  if (!["investor", "pool_member"].includes(currentCategory)) {
+    throw new Error(
+      "Only investor and pooled-member accounts can be converted with this workflow."
+    );
+  }
+
+  if (targetUser.role !== "investor") {
+    throw new Error("Manager accounts cannot be reclassified with this workflow.");
+  }
+
+  if (currentCategory === nextCategory) {
+    return targetUser;
+  }
+
+  const snapshot = await getAppDataSnapshot();
+
+  if (currentCategory === "pool_member" && nextCategory === "investor") {
+    const issues = getSettledPoolMemberCommitmentIssues(snapshot, targetUser.participantId);
+
+    if (issues.length) {
+      throw new Error(
+        `This pooled member cannot become a direct investor yet. ${issues.join(" ")}`
+      );
+    }
+  }
+
+  if (currentCategory === "investor" && nextCategory === "pool_member") {
+    const directPositions = (snapshot.positions ?? []).filter(
+      (position) =>
+        position.participantId === targetUser.participantId &&
+        (Number(position.contributionAmount ?? 0) > 0 ||
+          Number(position.distributionsToDate ?? 0) > 0)
+    );
+
+    if (directPositions.length) {
+      throw new Error(
+        "This investor already has direct project history. Keep the account in the investor category so the standard investor portfolio remains visible."
+      );
+    }
+  }
+
+  await pool.query(
+    `
+      UPDATE participants
+      SET category = $1, updated_at = $2
+      WHERE id = $3
+    `,
+    [nextCategory, nowTimestamp(), targetUser.participantId]
+  );
+
+  return getUserAccountById(userId, { includeInactive: true });
 }
 
 export async function setUserAccountActive(userId, isActive, actingUserId) {

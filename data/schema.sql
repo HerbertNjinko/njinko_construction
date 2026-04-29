@@ -1,7 +1,9 @@
 CREATE TABLE IF NOT EXISTS participants (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
-  category TEXT NOT NULL CHECK (category IN ('sponsor', 'investor', 'contractor', 'manager')),
+  category TEXT NOT NULL CHECK (
+    category IN ('sponsor', 'investor', 'contractor', 'manager', 'pool_member', 'pool')
+  ),
   first_name TEXT,
   middle_name TEXT,
   last_name TEXT,
@@ -115,6 +117,48 @@ CREATE TABLE IF NOT EXISTS positions (
   FOREIGN KEY (deal_id) REFERENCES deals(id) ON DELETE CASCADE,
   FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE,
   UNIQUE (deal_id, participant_id)
+);
+
+CREATE TABLE IF NOT EXISTS investor_pools (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  pool_participant_id TEXT NOT NULL UNIQUE,
+  minimum_capital_amount REAL NOT NULL CHECK (minimum_capital_amount > 0),
+  status TEXT NOT NULL CHECK (status IN ('open', 'voting', 'funded')),
+  vote_closes_on TEXT,
+  selected_deal_id TEXT,
+  funded_on TEXT,
+  created_by_user_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (pool_participant_id) REFERENCES participants(id) ON DELETE CASCADE,
+  FOREIGN KEY (selected_deal_id) REFERENCES deals(id) ON DELETE SET NULL,
+  FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS investor_pool_commitments (
+  id TEXT PRIMARY KEY,
+  pool_id TEXT NOT NULL,
+  participant_id TEXT NOT NULL,
+  commitment_amount REAL NOT NULL CHECK (commitment_amount > 0),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (pool_id) REFERENCES investor_pools(id) ON DELETE CASCADE,
+  FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE,
+  UNIQUE (pool_id, participant_id)
+);
+
+CREATE TABLE IF NOT EXISTS investor_pool_votes (
+  id TEXT PRIMARY KEY,
+  pool_id TEXT NOT NULL,
+  participant_id TEXT NOT NULL,
+  deal_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (pool_id) REFERENCES investor_pools(id) ON DELETE CASCADE,
+  FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE,
+  FOREIGN KEY (deal_id) REFERENCES deals(id) ON DELETE CASCADE,
+  UNIQUE (pool_id, participant_id)
 );
 
 CREATE TABLE IF NOT EXISTS distribution_elections (
@@ -287,6 +331,11 @@ CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_expires_at
   ON password_reset_tokens(expires_at);
 CREATE INDEX IF NOT EXISTS idx_positions_deal_id ON positions(deal_id);
 CREATE INDEX IF NOT EXISTS idx_positions_participant_id ON positions(participant_id);
+CREATE INDEX IF NOT EXISTS idx_investor_pools_status ON investor_pools(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_investor_pool_commitments_pool_id
+  ON investor_pool_commitments(pool_id, participant_id);
+CREATE INDEX IF NOT EXISTS idx_investor_pool_votes_pool_id
+  ON investor_pool_votes(pool_id, deal_id);
 CREATE INDEX IF NOT EXISTS idx_distribution_elections_deal_id
   ON distribution_elections(deal_id, participant_id);
 CREATE INDEX IF NOT EXISTS idx_early_withdrawal_requests_deal_id

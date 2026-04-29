@@ -110,7 +110,7 @@ function renderLogin() {
       eyebrow: "Secure access",
       title: "Log in",
       copy:
-        "Access the investor, contractor, or manager portal with your assigned email and password.",
+        "Access the investor, pooled-member, contractor, or manager portal with your assigned email and password.",
       formMarkup: loginForm
     },
     forgot: {
@@ -139,12 +139,12 @@ function renderLogin() {
           <p class="hero-kicker">Investor reporting, project oversight, and governance in one secure workspace.</p>
           <h1>${escapeHtml(LOGIN_PAGE_TITLE)}</h1>
           <p>
-            ${escapeHtml(COMPANY_NAME)} provides a secure portal for investors, contractor
-            participants, and internal managers to review project performance, monitor capital
+            ${escapeHtml(COMPANY_NAME)} provides a secure portal for investors, pooled-capital
+            members, contractor participants, and internal managers to review project performance, monitor capital
             positions, manage voting items, and maintain payout details without exposing the full cap table.
           </p>
           <ul class="feature-list">
-            <li>Role-based access for investors, contractor participants, and managers.</li>
+            <li>Role-based access for investors, pooled members, contractor participants, and managers.</li>
             <li>Per-project reporting, distributions, timeline milestones, and governance tracking.</li>
             <li>Secure profile, payout, and password-management workflows backed by Postgres.</li>
           </ul>
@@ -1224,6 +1224,11 @@ function renderManagerDistributionReviewCard(review) {
                 <p><strong>Approval status:</strong> ${escapeHtml(
                   distributionApprovalStatusLabel(review.approvalStatus)
                 )}</p>
+                ${
+                  review.sourcePoolNames?.length
+                    ? `<p><strong>Pooled groups:</strong> ${escapeHtml(review.sourcePoolNames.join(", "))}</p>`
+                    : ""
+                }
                 <p><strong>Expected payout date:</strong> ${escapeHtml(
                   review.payoutExpectedOn ? formatDate(review.payoutExpectedOn) : "Not scheduled"
                 )}</p>
@@ -1728,12 +1733,21 @@ function renderInvestorProject(project) {
 }
 
 function renderInvestorDashboard() {
-  const { viewer, portfolio, projects, withdrawalRequests = [] } = state.dashboard;
+  const {
+    viewer,
+    portfolio,
+    projects,
+    pooledDistributionProjects = [],
+    withdrawalRequests = []
+  } = state.dashboard;
   const filteredProjects = applyInvestorProjectFilters(projects);
   const projectFilterOptions = getInvestorProjectFilterOptions(projects);
-  const distributionProjects = projects.filter(
-    (project) => project.status === "sold" && project.personalPosition.totalPayout > 0
-  );
+  const distributionProjects = [
+    ...projects.filter(
+      (project) => project.status === "sold" && project.personalPosition.totalPayout > 0
+    ),
+    ...pooledDistributionProjects
+  ];
 
   return `
     <div class="shell">
@@ -1864,6 +1878,370 @@ function renderInvestorDashboard() {
                 : projects.length
                   ? '<div class="empty-state">No project breakdowns match the current project and status filters.</div>'
                   : '<div class="empty-state">No positions are linked to this login.</div>'
+            }
+          </div>
+        `
+      })}
+    </div>
+  `;
+}
+
+function renderPoolMemberVotingCard(pool) {
+  const sectionId = `pool-member-vote-${pool.id}`;
+  const collapsed = Boolean(state.collapsedSections?.[sectionId]);
+  const selectedDealId = pool.myVoteDealId || pool.leadingDealId || "";
+
+  return `
+    <article class="distribution-review-card">
+      <div class="distribution-review-head">
+        <div>
+          <p class="eyebrow">Pooled Capital Group</p>
+          <h4>${escapeHtml(pool.name)}</h4>
+          <p class="deal-location">
+            ${escapeHtml(
+              pool.selectedDealName
+                ? `Funded into ${pool.selectedDealName}`
+                : `Minimum ${formatCurrency(pool.minimumCapitalAmount)} · ${pool.memberCount} member${
+                    pool.memberCount === 1 ? "" : "s"
+                  }`
+            )}
+          </p>
+          <div class="mini-head">
+            <span class="class-pill">${escapeHtml(titleCase(pool.status))}</span>
+            <span class="read-only-tag">My share ${escapeHtml(formatPercent(pool.mySharePct))}</span>
+            <span class="read-only-tag">
+              Committed ${escapeHtml(formatCurrency(pool.myCommitmentAmount))}
+            </span>
+          </div>
+        </div>
+        <div class="distribution-review-toolbar">
+          <div>
+            <p class="metric-label">Group committed</p>
+            <p class="metric-value">${escapeHtml(formatCurrency(pool.totalCommitted))}</p>
+          </div>
+          ${renderSectionToggle(sectionId)}
+        </div>
+      </div>
+      ${
+        collapsed
+          ? '<div class="deal-card-collapsed-note">Voting details minimized. Use Maximize to reopen this pooled capital group.</div>'
+          : `
+            <div class="distribution-review-body">
+              <div class="summary-grid">
+                ${summaryItem("Minimum capital", formatCurrency(pool.minimumCapitalAmount))}
+                ${summaryItem("Still needed", formatCurrency(pool.amountRemaining))}
+                ${summaryItem("My contribution", formatCurrency(pool.myCommitmentAmount))}
+                ${summaryItem("My ownership share", formatPercent(pool.mySharePct))}
+                ${summaryItem(
+                  "Vote closes",
+                  pool.voteClosesOn ? formatDate(pool.voteClosesOn) : "Not scheduled"
+                )}
+                ${summaryItem("Leading project", pool.leadingDealName || "No votes yet")}
+              </div>
+              <div class="distribution-review-meta">
+                <p><strong>Status:</strong> ${escapeHtml(titleCase(pool.status))}</p>
+                <p><strong>Voting complete:</strong> ${escapeHtml(pool.allMembersVoted ? "Yes" : "Not yet")}</p>
+                <p><strong>Current vote:</strong> ${escapeHtml(
+                  pool.myVoteDealId
+                    ? pool.availableDeals.find((deal) => deal.id === pool.myVoteDealId)?.name || "Saved"
+                    : "No vote saved"
+                )}</p>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Project</th>
+                      <th>Weight</th>
+                      <th>Votes</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${
+                      pool.voteSummary.length
+                        ? pool.voteSummary
+                            .map(
+                              (result) => `
+                                <tr>
+                                  <td>${escapeHtml(
+                                    `${result.dealName}${result.dealId === pool.leadingDealId ? " (Leading)" : ""}`
+                                  )}</td>
+                                  <td>${escapeHtml(
+                                    `${formatCurrency(result.voteWeightAmount)} · ${formatPercent(
+                                      result.voteWeightPct
+                                    )}`
+                                  )}</td>
+                                  <td>${escapeHtml(String(result.voteCount))}</td>
+                                </tr>
+                              `
+                            )
+                            .join("")
+                        : '<tr><td colspan="3">No weighted votes have been recorded yet.</td></tr>'
+                    }
+                  </tbody>
+                </table>
+              </div>
+              ${
+                pool.canVote
+                  ? `
+                    <form class="distribution-form" data-pool-vote-form="true" data-pool-id="${escapeHtml(
+                      pool.id
+                    )}">
+                      <label>
+                        Choose project
+                        <select name="dealId" required>
+                          <option value="">Select project</option>
+                          ${pool.availableDeals
+                            .map(
+                              (deal) => `
+                                <option value="${escapeHtml(deal.id)}" ${
+                                  deal.id === selectedDealId ? "selected" : ""
+                                }>
+                                  ${escapeHtml(
+                                    deal.investmentCloseOn
+                                      ? `${deal.name} · closes ${formatDate(deal.investmentCloseOn)}`
+                                      : `${deal.name} · open`
+                                  )}
+                                </option>
+                              `
+                            )
+                            .join("")}
+                        </select>
+                      </label>
+                      <p class="helper-copy">
+                        Your vote weight is based on your contribution percentage inside this pooled capital group.
+                      </p>
+                      <button class="button-primary" type="submit">Save weighted vote</button>
+                    </form>
+                  `
+                  : '<p class="helper-copy">Voting is closed or this pooled capital group has already been funded into a project.</p>'
+              }
+            </div>
+          `
+      }
+    </article>
+  `;
+}
+
+function renderPoolMemberProjectCard(pool) {
+  const sectionId = `pool-member-project-${pool.id}`;
+  const collapsed = Boolean(state.collapsedSections?.[sectionId]);
+
+  return `
+    <article class="deal-card">
+      <div class="deal-head">
+        <div>
+          <p class="eyebrow">${escapeHtml(pool.project?.location || "Awaiting project selection")}</p>
+          <h3 class="deal-name">${escapeHtml(pool.name)}</h3>
+          <p class="deal-location">${escapeHtml(
+            pool.project?.name || "This pooled capital group has not yet been deployed into a project."
+          )}</p>
+          <div class="mini-head">
+            <span class="class-pill">${escapeHtml(titleCase(pool.status))}</span>
+            ${
+              pool.project
+                ? `<span class="status-pill status-${escapeHtml(pool.project.status)}">${escapeHtml(
+                    pool.project.statusLabel
+                  )}</span>`
+                : ""
+            }
+          </div>
+        </div>
+        <div>
+          <p class="metric-label">My estimated return</p>
+          <p class="metric-value">${escapeHtml(
+            formatCurrency(pool.myPosition.estimatedTotalReturn)
+          )}</p>
+          <div class="button-row deal-card-actions">
+            ${renderSectionToggle(sectionId)}
+          </div>
+        </div>
+      </div>
+      ${
+        collapsed
+          ? '<div class="deal-card-collapsed-note">Pool details minimized. Use Maximize to reopen this pooled position.</div>'
+          : `
+            <div class="deal-card-body">
+              <div class="summary-grid">
+                ${summaryItem("My contribution", formatCurrency(pool.myCommitmentAmount))}
+                ${summaryItem("My ownership share", formatPercent(pool.mySharePct))}
+                ${summaryItem(
+                  "Total group capital",
+                  formatCurrency(pool.jointPosition?.amountInvested || pool.totalCommitted)
+                )}
+                ${summaryItem(
+                  "My amount payout",
+                  formatCurrency(pool.myPosition.totalAmountPayout)
+                )}
+                ${summaryItem(
+                  "My returned profit",
+                  formatCurrency(pool.myPosition.profitReturned)
+                )}
+                ${summaryItem(
+                  "My current pref",
+                  formatCurrency(pool.myPosition.currentPrefEarned)
+                )}
+              </div>
+              ${
+                pool.project
+                  ? `
+                    <div class="project-breakdown-grid">
+                      <div>
+                        <div class="section-head">
+                          <div>
+                            <h4>Pooled Position</h4>
+                            <p class="section-copy">
+                              The project sees this group as one investor while your portal shows your pro-rata slice.
+                            </p>
+                          </div>
+                        </div>
+                        <div class="summary-grid">
+                          ${summaryItem("Project status", pool.project.statusLabel)}
+                          ${summaryItem("Current phase", pool.project.currentPhase)}
+                          ${summaryItem(
+                            "Joint estimated payout",
+                            formatCurrency(pool.jointPosition?.estimatedTotalReturn || 0)
+                          )}
+                          ${summaryItem(
+                            "Joint actual payout",
+                            formatCurrency(pool.jointPosition?.actualPayoutAmount || 0)
+                          )}
+                          ${summaryItem(
+                            pool.project.salePriceLabel,
+                            formatCurrency(pool.project.salePrice)
+                          )}
+                          ${summaryItem("Tracked equity", formatCurrency(pool.project.totalEquity))}
+                        </div>
+                      </div>
+                      <div>
+                        <div class="section-head">
+                          <div>
+                            <h4>Timeline</h4>
+                            <p class="section-copy">Project milestones tied to this pooled capital position.</p>
+                          </div>
+                        </div>
+                        <div class="timeline-grid">
+                          ${pool.project.timeline
+                            .map(
+                              (step) => `
+                                <article class="timeline-step ${escapeHtml(step.status)}">
+                                  <h4>${escapeHtml(step.label)}</h4>
+                                  <p>${escapeHtml(step.date)}</p>
+                                </article>
+                              `
+                            )
+                            .join("")}
+                        </div>
+                      </div>
+                    </div>
+                  `
+                  : '<p class="helper-copy">This group is still gathering capital or waiting for the vote outcome.</p>'
+              }
+            </div>
+          `
+      }
+    </article>
+  `;
+}
+
+function renderPoolMemberDashboard() {
+  const { viewer, poolPortfolio, pools, pooledDistributionProjects = [] } = state.dashboard;
+  const votingPools = pools.filter((pool) => !pool.selectedDealId);
+
+  return `
+    <div class="shell">
+      <section class="panel app-header">
+        <div>
+          <p class="eyebrow">Pooled Member View</p>
+          <h2>${escapeHtml(viewer.name)}</h2>
+          <p class="meta-line">${escapeHtml(viewer.email)} · Joint-capital investor portal</p>
+        </div>
+        <div class="button-row">
+          <span class="read-only-tag">Project allocations remain pooled</span>
+          <button class="button-secondary" id="logout-button" type="button">Log out</button>
+        </div>
+      </section>
+
+      ${renderProfilePanel()}
+      ${renderCompanyLibraryPanel()}
+
+      ${renderCollapsibleSection({
+        sectionId: "pool-member-joint-overview",
+        title: "Joint Portfolio Overview",
+        copy:
+          "These totals reflect the pooled capital groups you belong to before splitting your individual share.",
+        body: `
+          <div class="metrics-grid">
+            ${metricCard("My committed capital", formatCurrency(poolPortfolio.totalCommitted))}
+            ${metricCard("Joint capital deployed", formatCurrency(poolPortfolio.jointCapitalDeployed))}
+            ${metricCard("Active pooled positions", String(poolPortfolio.activePools))}
+            ${metricCard("Pending pooled groups", String(poolPortfolio.pendingPools))}
+          </div>
+        `
+      })}
+
+      ${renderCollapsibleSection({
+        sectionId: "pool-member-personal-portfolio",
+        title: "Personal Portfolio View",
+        copy:
+          "Your pro-rata totals across every pooled capital group tied to this login. Total returned reflects profit only, while total amount payout reflects cash already distributed to the pooled position and attributable to you.",
+        body: `
+          <div class="metrics-grid">
+            ${metricCard("Total invested", formatCurrency(poolPortfolio.totalInvested))}
+            ${metricCard("Total returned", formatCurrency(poolPortfolio.totalReturned))}
+            ${metricCard("Total amount payout", formatCurrency(poolPortfolio.totalAmountPayout))}
+            ${metricCard("Current pref earned", formatCurrency(poolPortfolio.currentPrefEarned))}
+          </div>
+        `
+      })}
+
+      ${renderCollapsibleSection({
+        sectionId: "pool-member-voting",
+        title: "Project Voting",
+        copy:
+          "Once a pooled capital group reaches the minimum target, members can vote on which open project should receive the capital. Your weight follows your contribution percentage.",
+        message: renderMessage(state.messages.pool),
+        body: `
+          <div class="distribution-review-list">
+            ${
+              votingPools.length
+                ? votingPools.map((pool) => renderPoolMemberVotingCard(pool)).join("")
+                : '<div class="empty-state">No pooled capital groups are currently waiting on a project vote.</div>'
+            }
+          </div>
+        `
+      })}
+
+      ${renderCollapsibleSection({
+        sectionId: "pool-member-distribution-elections",
+        title: "Reinvestment or Payout Elections",
+        copy:
+          "Once a pooled project has sold, request a cash payout or choose to roll your pro-rata share into the next project as a direct investor.",
+        message: renderMessage(state.messages.distribution),
+        body: `
+          <div class="distribution-review-list">
+            ${
+              pooledDistributionProjects.length
+                ? pooledDistributionProjects
+                    .map((project) => renderInvestorDistributionElectionCard(project))
+                    .join("")
+                : '<div class="empty-state">No sold pooled positions currently require a reinvestment or payout election.</div>'
+            }
+          </div>
+        `
+      })}
+
+      ${renderCollapsibleSection({
+        sectionId: "pool-member-projects",
+        title: "Pooled Project Breakdown",
+        copy:
+          "Each pooled capital group shows the shared project position alongside your personal slice of the invested capital, projected returns, and payout activity.",
+        body: `
+          <div class="deal-grid">
+            ${
+              pools.length
+                ? pools.map((pool) => renderPoolMemberProjectCard(pool)).join("")
+                : '<div class="empty-state">No pooled capital groups are linked to this login yet.</div>'
             }
           </div>
         `
@@ -2289,6 +2667,7 @@ function renderCreateUserPanel() {
           Category
           <select name="category" required>
             <option value="investor">Investor</option>
+            <option value="pool_member">Pooled member</option>
             <option value="contractor">Contractor participant</option>
             <option value="manager">Manager</option>
           </select>
@@ -2348,7 +2727,7 @@ function renderCreateUserPanel() {
 }
 
 function renderAllocationPanel() {
-  const participants = state.dashboard.admin.participants;
+  const participants = state.dashboard.admin.allocationParticipants ?? state.dashboard.admin.participants;
   const deals = getAllocatableDeals(state.dashboard.deals);
 
   return renderCollapsibleSection({
@@ -3211,7 +3590,7 @@ function renderUserDirectory() {
     sectionId: "manager-user-directory",
     title: "User Directory",
     copy:
-      "Manage login access, status, and credential-delivery history without touching deal records.",
+      "Manage login access, investor-versus-pooled-member category changes, and credential-delivery history without touching deal records.",
     message: renderMessage(state.messages.directory),
     body: `
       <div class="table-toolbar">
@@ -3268,6 +3647,11 @@ function renderUserDirectory() {
             </select>
           </label>
         </div>
+        <p class="helper-copy">
+          Category conversion is limited to <code>Investor</code> and <code>Pooled member</code>.
+          A pooled member can only become a direct investor after every pooled commitment tied to
+          that account has fully settled and paid out.
+        </p>
         <span class="read-only-tag">Showing ${escapeHtml(String(filteredRows.length))} of ${escapeHtml(String(rows.length))}</span>
       </div>
       ${
@@ -3294,10 +3678,34 @@ function renderUserDirectory() {
             ${filteredRows
               .map(
                 (row) => {
+                  const canEditCategory =
+                    row.role === "investor" && ["investor", "pool_member"].includes(row.category);
+                  const categoryMarkup = canEditCategory
+                    ? `
+                        <form
+                          class="table-actions"
+                          data-user-category-form="true"
+                          data-user-id="${escapeHtml(row.id)}"
+                        >
+                          <select name="category">
+                            <option value="investor" ${
+                              row.category === "investor" ? "selected" : ""
+                            }>Investor</option>
+                            <option value="pool_member" ${
+                              row.category === "pool_member" ? "selected" : ""
+                            }>Pooled member</option>
+                          </select>
+                          <button class="button-secondary button-inline" type="submit">
+                            Update
+                          </button>
+                        </form>
+                      `
+                    : escapeHtml(titleCase(row.category));
+
                   return `
                   <tr>
                     <td>${escapeHtml(row.name)}</td>
-                    <td>${escapeHtml(titleCase(row.category))}</td>
+                    <td>${categoryMarkup}</td>
                     <td>${escapeHtml(row.email)}</td>
                     <td>${escapeHtml(row.contactPhone || "—")}</td>
                     <td>${escapeHtml(titleCase(row.role))}</td>
@@ -3533,6 +3941,11 @@ const MANAGER_PAGE_ITEMS = [
     copy: "Create users and manage account access."
   },
   {
+    id: "pooled-investors",
+    label: "Pooled Investors",
+    copy: "Create pooled groups, assign commitments, and fund the weighted vote winner."
+  },
+  {
     id: "allocations",
     label: "Deal Allocations",
     copy: "Create allocations and review the current participation ledger."
@@ -3618,6 +4031,8 @@ function renderManagerOverviewPage(overview) {
           ${metricCard("Tracked deals", String(overview.totalDeals))}
           ${metricCard("Active deals", String(overview.activeDeals))}
           ${metricCard("Tracked equity", formatCurrency(overview.totalTrackedEquity))}
+          ${metricCard("Pooled groups", String(overview.totalInvestorPools || 0))}
+          ${metricCard("Pooled capital", formatCurrency(overview.totalPooledCapital || 0))}
           ${metricCard(
             "Projected sponsor promote",
             formatCurrency(overview.projectedSponsorPromote)
@@ -3653,6 +4068,292 @@ function renderManagerUserDirectoryPage() {
       ${renderCreateUserPanel()}
     </div>
     ${renderUserDirectory()}
+  `;
+}
+
+function renderCreatePoolPanel() {
+  const defaultVoteCloseDate = getDefaultVoteCloseDate();
+
+  return renderCollapsibleSection({
+    sectionId: "admin-create-pool",
+    title: "Create Pooled Capital Group",
+    copy:
+      "Create a pooled vehicle that collects smaller commitments, runs a weighted project vote, and then lands in the cap table as one project-facing investor.",
+    message: renderMessage(state.messages.pool),
+    panelClass: "admin-card",
+    body: `
+      <p class="eyebrow">Manager Control</p>
+      <form id="pool-form">
+        <div class="form-grid-2">
+          <label>
+            Group name
+            <input type="text" name="name" placeholder="Main Street Pooled Capital Group" required />
+          </label>
+          <label>
+            Minimum capital target
+            <input type="number" name="minimumCapitalAmount" min="0" step="1000" placeholder="10000" required />
+          </label>
+        </div>
+        <label>
+          Vote close date
+          <input type="date" name="voteClosesOn" value="${inputValue(defaultVoteCloseDate)}" required />
+        </label>
+        <p class="helper-copy">
+          Members are added after creation. The group automatically moves into voting once commitments meet the minimum target.
+        </p>
+        <button class="button-primary" type="submit">Create pooled group</button>
+      </form>
+    `
+  });
+}
+
+function renderManagerInvestorPoolCard(pool) {
+  const sectionId = `manager-pool-${pool.id}`;
+  const collapsed = Boolean(state.collapsedSections?.[sectionId]);
+  const availablePoolMembers = state.dashboard.admin.poolMembers ?? [];
+
+  return `
+    <article class="deal-card">
+      <div class="deal-head">
+        <div>
+          <p class="eyebrow">Pooled Capital Group</p>
+          <h3 class="deal-name">${escapeHtml(pool.name)}</h3>
+          <p class="deal-location">${escapeHtml(
+            pool.selectedDealName
+              ? `Funded into ${pool.selectedDealName}`
+              : `Voting closes ${pool.voteClosesOn ? formatDate(pool.voteClosesOn) : "not scheduled"}`
+          )}</p>
+          <div class="mini-head">
+            <span class="class-pill">${escapeHtml(titleCase(pool.status))}</span>
+            <span class="read-only-tag">${escapeHtml(`${pool.memberCount} member${pool.memberCount === 1 ? "" : "s"}`)}</span>
+            <span class="read-only-tag">${escapeHtml(`Leading: ${pool.leadingDealName || "None"}`)}</span>
+          </div>
+        </div>
+        <div>
+          <p class="metric-label">Committed capital</p>
+          <p class="metric-value">${escapeHtml(formatCurrency(pool.totalCommitted))}</p>
+          <div class="button-row deal-card-actions">
+            ${renderSectionToggle(sectionId)}
+          </div>
+        </div>
+      </div>
+      ${
+        collapsed
+          ? '<div class="deal-card-collapsed-note">Pool details minimized. Use Maximize to reopen this pooled capital group.</div>'
+          : `
+            <div class="deal-card-body">
+              <div class="summary-grid">
+                ${summaryItem("Minimum target", formatCurrency(pool.minimumCapitalAmount))}
+                ${summaryItem("Amount remaining", formatCurrency(pool.amountRemaining))}
+                ${summaryItem("Members", String(pool.memberCount))}
+                ${summaryItem(
+                  "Funding readiness",
+                  pool.canFund ? "Ready to fund" : "Not ready"
+                )}
+                ${summaryItem("Leading project", pool.leadingDealName || "No votes yet")}
+                ${summaryItem(
+                  "Vote closes",
+                  pool.voteClosesOn ? formatDate(pool.voteClosesOn) : "Not scheduled"
+                )}
+              </div>
+              <div class="project-breakdown-grid">
+                <div>
+                  <div class="section-head">
+                    <div>
+                      <h4>Members</h4>
+                      <p class="section-copy">Each commitment drives ownership, voting weight, and final payout split.</p>
+                    </div>
+                  </div>
+                  <div class="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Member</th>
+                          <th>Commitment</th>
+                          <th>Share</th>
+                          <th>Vote</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        ${
+                          pool.members.length
+                            ? pool.members
+                                .map(
+                                  (member) => `
+                                    <tr>
+                                      <td>${escapeHtml(
+                                        member.participantEmail
+                                          ? `${member.participantName} · ${member.participantEmail}`
+                                          : member.participantName
+                                      )}</td>
+                                      <td>${escapeHtml(formatCurrency(member.commitmentAmount))}</td>
+                                      <td>${escapeHtml(formatPercent(member.sharePct))}</td>
+                                      <td>${escapeHtml(member.votedDealName || "Not voted")}</td>
+                                    </tr>
+                                  `
+                                )
+                                .join("")
+                            : '<tr><td colspan="4">No pooled members assigned yet.</td></tr>'
+                        }
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+                <div>
+                  <div class="section-head">
+                    <div>
+                      <h4>Weighted Vote</h4>
+                      <p class="section-copy">The winning project can be funded once the vote closes or all members have voted.</p>
+                    </div>
+                  </div>
+                  <div class="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Project</th>
+                          <th>Weighted capital</th>
+                          <th>Votes</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        ${
+                          pool.voteSummary.length
+                            ? pool.voteSummary
+                                .map(
+                                  (vote) => `
+                                    <tr>
+                                      <td>${escapeHtml(
+                                        `${vote.dealName}${vote.dealId === pool.leadingDealId ? " (Leading)" : ""}`
+                                      )}</td>
+                                      <td>${escapeHtml(
+                                        `${formatCurrency(vote.voteWeightAmount)} · ${formatPercent(
+                                          vote.voteWeightPct
+                                        )}`
+                                      )}</td>
+                                      <td>${escapeHtml(String(vote.voteCount))}</td>
+                                    </tr>
+                                  `
+                                )
+                                .join("")
+                            : '<tr><td colspan="3">No weighted votes recorded yet.</td></tr>'
+                        }
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+              ${
+                pool.status !== "funded"
+                  ? `
+                    <div class="admin-grid">
+                      ${renderCollapsibleSection({
+                        sectionId: `admin-pool-commitment-${pool.id}`,
+                        title: "Add or Update Commitment",
+                        copy:
+                          "Select a pooled-member user and record the capital they are contributing to this group.",
+                        panelClass: "admin-card",
+                        body: `
+                          <form data-pool-commitment-form="true" data-pool-id="${escapeHtml(pool.id)}">
+                            <label>
+                              Pooled member
+                              <select name="participantId" required>
+                                <option value="">Select member</option>
+                                ${availablePoolMembers
+                                  .map(
+                                    (member) => `
+                                      <option value="${escapeHtml(member.id)}">
+                                        ${escapeHtml(member.name)} · ${escapeHtml(member.email || "No email")}
+                                      </option>
+                                    `
+                                  )
+                                  .join("")}
+                              </select>
+                            </label>
+                            <label>
+                              Commitment amount
+                              <input type="number" name="commitmentAmount" min="0" step="1000" required />
+                            </label>
+                            <button class="button-primary" type="submit">Save commitment</button>
+                          </form>
+                        `
+                      })}
+                      ${renderCollapsibleSection({
+                        sectionId: `admin-pool-fund-${pool.id}`,
+                        title: "Fund Winning Project",
+                        copy:
+                          "Deploy this pooled capital group into the weighted vote winner once the group is eligible.",
+                        panelClass: "admin-card",
+                        body: pool.canFund
+                          ? `
+                              <form data-pool-fund-form="true" data-pool-id="${escapeHtml(pool.id)}">
+                                <label>
+                                  Winning project
+                                  <select name="dealId" required>
+                                    ${pool.voteSummary
+                                      .map(
+                                        (vote) => `
+                                          <option value="${escapeHtml(vote.dealId)}" ${
+                                            vote.dealId === pool.leadingDealId ? "selected" : ""
+                                          }>
+                                            ${escapeHtml(vote.dealName)}
+                                          </option>
+                                        `
+                                      )
+                                      .join("")}
+                                  </select>
+                                </label>
+                                <p class="helper-copy">
+                                  Funding creates one project-facing Class A position for the pooled vehicle using the full committed amount.
+                                </p>
+                                <button class="button-primary" type="submit">Fund pooled group</button>
+                              </form>
+                            `
+                          : `
+                              <p class="helper-copy">
+                                This group can be funded after it reaches the minimum target and either all members vote or the vote close date passes.
+                              </p>
+                            `
+                      })}
+                    </div>
+                  `
+                  : `
+                    <p class="helper-copy">
+                      This pooled capital group is already funded into ${escapeHtml(
+                        pool.selectedDealName || "its selected project"
+                      )}. Use the deal rollup to monitor the project-facing position.
+                    </p>
+                  `
+              }
+            </div>
+          `
+      }
+    </article>
+  `;
+}
+
+function renderManagerInvestorPoolsPage() {
+  const pools = state.dashboard.admin.investorPools ?? [];
+
+  return `
+    <div class="admin-grid">
+      ${renderCreatePoolPanel()}
+    </div>
+    ${renderCollapsibleSection({
+      sectionId: "manager-investor-pools",
+      title: "Pooled Capital Groups",
+      copy:
+        "Track sub-minimum investors, their weighted project votes, and the pooled positions that eventually land in the deal ledger as one investor.",
+      message: renderMessage(state.messages.pool),
+      body: `
+        <div class="project-grid">
+          ${
+            pools.length
+              ? pools.map((pool) => renderManagerInvestorPoolCard(pool)).join("")
+              : '<div class="empty-state">No pooled capital groups have been created yet.</div>'
+          }
+        </div>
+      `
+    })}
   `;
 }
 
@@ -3715,6 +4416,8 @@ function renderManagerPageContent(page, { overview, deals }) {
       return renderManagerCompanyLibraryPage();
     case "user-directory":
       return renderManagerUserDirectoryPage();
+    case "pooled-investors":
+      return renderManagerInvestorPoolsPage();
     case "allocations":
       return renderManagerAllocationsPage();
     case "deal-rollup":
@@ -3785,5 +4488,9 @@ export function render() {
   }
 
   app.innerHTML =
-    state.dashboard?.role === "manager" ? renderManagerDashboard() : renderInvestorDashboard();
+    state.dashboard?.role === "manager"
+      ? renderManagerDashboard()
+      : state.dashboard?.viewer?.category === "pool_member"
+        ? renderPoolMemberDashboard()
+        : renderInvestorDashboard();
 }

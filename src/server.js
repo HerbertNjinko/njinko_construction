@@ -8,15 +8,18 @@ import { assertDatabaseReady } from "./migrations.js";
 import { closeDatabasePool } from "./postgres.js";
 import {
   castDealIssueVote,
+  castInvestorPoolVote,
   createCompanyResource,
   createDeal,
   createDealAllocation,
   createDealIssue,
+  createInvestorPool,
   createManagedUser,
   deleteCompanyResource,
   deleteDeal,
   deleteUserAccount,
   ensureInitialManagerUser,
+  fundInvestorPool,
   getAppDataSnapshot,
   getCompanyResourceDownload,
   getUserByEmail,
@@ -26,6 +29,8 @@ import {
   reviewEarlyWithdrawalRequest,
   resetPasswordWithToken,
   setUserAccountActive,
+  updateUserCategory,
+  upsertInvestorPoolCommitment,
   upsertEarlyWithdrawalRequest,
   upsertDistributionElection,
   updateOwnProfile,
@@ -328,6 +333,7 @@ const server = createServer(async (request, response) => {
     const dealUpdateMatch = url.pathname.match(/^\/api\/admin\/deals\/([^/]+)$/);
     const issueVoteMatch = url.pathname.match(/^\/api\/issues\/([^/]+)\/vote$/);
     const userStatusMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)\/status$/);
+    const userCategoryMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)\/category$/);
     const userDeleteMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)$/);
     const resourceDeleteMatch = url.pathname.match(/^\/api\/admin\/resources\/([^/]+)$/);
     const resourceDownloadMatch = url.pathname.match(/^\/api\/resources\/([^/]+)\/download$/);
@@ -341,6 +347,11 @@ const server = createServer(async (request, response) => {
       /^\/api\/deals\/([^/]+)\/distribution-election$/
     );
     const earlyWithdrawalMatch = url.pathname.match(/^\/api\/deals\/([^/]+)\/withdrawal-request$/);
+    const poolVoteMatch = url.pathname.match(/^\/api\/pools\/([^/]+)\/vote$/);
+    const adminPoolCommitmentMatch = url.pathname.match(
+      /^\/api\/admin\/pools\/([^/]+)\/commitments$/
+    );
+    const adminPoolFundMatch = url.pathname.match(/^\/api\/admin\/pools\/([^/]+)\/fund$/);
 
     if (method === "POST" && url.pathname === "/api/password/forgot") {
       const body = await readJsonBody(request);
@@ -457,6 +468,34 @@ const server = createServer(async (request, response) => {
 
       const snapshot = await getAppDataSnapshot();
       sendJson(response, 200, buildDashboardForUser(user, snapshot));
+      return;
+    }
+
+    if (method === "PUT" && poolVoteMatch) {
+      const user = await requireUnlockedUser(request, response);
+
+      if (!user) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body || typeof body.dealId !== "string") {
+        sendJson(response, 400, { error: "A valid project selection is required." });
+        return;
+      }
+
+      try {
+        const result = await castInvestorPoolVote(
+          decodeURIComponent(poolVoteMatch[1]),
+          user.id,
+          body.dealId
+        );
+        sendJson(response, 200, result);
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
       return;
     }
 
@@ -682,6 +721,80 @@ const server = createServer(async (request, response) => {
           user: stripUserSecrets(createdUser.user),
           notification: createdUser.notification
         });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/admin/pools") {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const result = await createInvestorPool(body, manager.id);
+        sendJson(response, 201, result);
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "POST" && adminPoolCommitmentMatch) {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const result = await upsertInvestorPoolCommitment(
+          decodeURIComponent(adminPoolCommitmentMatch[1]),
+          body
+        );
+        sendJson(response, 200, result);
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "POST" && adminPoolFundMatch) {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      try {
+        const result = await fundInvestorPool(
+          decodeURIComponent(adminPoolFundMatch[1]),
+          manager.id,
+          body ?? {}
+        );
+        sendJson(response, 200, result);
       } catch (error) {
         sendJson(response, 400, { error: error.message });
       }
@@ -930,6 +1043,34 @@ const server = createServer(async (request, response) => {
         const user = await setUserAccountActive(
           decodeURIComponent(userStatusMatch[1]),
           body.isActive,
+          manager.id
+        );
+        sendJson(response, 200, { user: stripUserSecrets(user) });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "PATCH" && userCategoryMatch) {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body || typeof body.category !== "string") {
+        sendJson(response, 400, { error: "A valid user category is required." });
+        return;
+      }
+
+      try {
+        const user = await updateUserCategory(
+          decodeURIComponent(userCategoryMatch[1]),
+          body.category,
           manager.id
         );
         sendJson(response, 200, { user: stripUserSecrets(user) });

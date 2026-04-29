@@ -61,6 +61,7 @@ export function createInitialMessages() {
     deal: null,
     dealCreate: null,
     issue: null,
+    pool: null,
     vote: null,
     distribution: null,
     withdrawal: null,
