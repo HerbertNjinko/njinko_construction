@@ -50,6 +50,102 @@ function resolveTimelineProgress(status, timelineProgress) {
   return status === "sold" ? 100 : progress;
 }
 
+function normalizeProjectCost(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  return roundCurrency(Math.max(0, resolveNumber(value, 0)));
+}
+
+function sortDebtServiceEntries(entries = []) {
+  return [...entries].sort((left, right) =>
+    String(left?.serviceMonth ?? "").localeCompare(String(right?.serviceMonth ?? ""))
+  );
+}
+
+function sortExpenseEntries(entries = []) {
+  return [...entries].sort(
+    (left, right) => resolveNumber(left?.sortOrder, 0) - resolveNumber(right?.sortOrder, 0)
+  );
+}
+
+function summarizeDealFinancing(deal, overrides = {}) {
+  const budgetedProjectCost = roundCurrency(
+    Math.max(
+      0,
+      resolveNumber(
+        overrides.budgetedProjectCost,
+        deal.budgetedProjectCost ?? deal.totalProjectCost ?? 0
+      )
+    )
+  );
+  const explicitProjectCostOverride = normalizeProjectCost(overrides.totalProjectCost);
+  const expenseEntries = Array.isArray(overrides.expenseEntries)
+    ? sortExpenseEntries(overrides.expenseEntries)
+    : sortExpenseEntries(deal.expenseEntries ?? []);
+  const actualOverride =
+    explicitProjectCostOverride !== null
+      ? explicitProjectCostOverride
+      : overrides.actualProjectCost === undefined
+        ? deal.actualProjectCost
+        : overrides.actualProjectCost;
+  const normalizedActualOverride = normalizeProjectCost(actualOverride);
+  const hasTrackedProjectCost =
+    explicitProjectCostOverride !== null ||
+    expenseEntries.length > 0 ||
+    normalizedActualOverride !== null;
+  const actualProjectCost = hasTrackedProjectCost
+    ? roundCurrency(
+        explicitProjectCostOverride !== null
+          ? explicitProjectCostOverride
+          : expenseEntries.length
+          ? expenseEntries.reduce((sum, entry) => sum + resolveNumber(entry?.amountPaid, 0), 0)
+          : normalizedActualOverride
+      )
+    : 0;
+  const debtServiceEntries = Array.isArray(overrides.debtServiceEntries)
+    ? sortDebtServiceEntries(overrides.debtServiceEntries)
+    : sortDebtServiceEntries(deal.debtServiceEntries ?? []);
+  const derivedInterestPaid = roundCurrency(
+    debtServiceEntries.reduce((sum, entry) => sum + resolveNumber(entry?.interestPaid, 0), 0)
+  );
+  const totalInterestPaid = roundCurrency(
+    Math.max(
+      0,
+      resolveNumber(
+        overrides.totalInterestPaid,
+        debtServiceEntries.length ? derivedInterestPaid : deal.totalInterestPaid ?? 0
+      )
+    )
+  );
+  const latestDebtServiceEntry = debtServiceEntries.at(-1) ?? null;
+  const latestDrawBalance = roundCurrency(
+    Math.max(0, resolveNumber(overrides.latestDrawBalance, latestDebtServiceEntry?.drawBalance ?? 0))
+  );
+  const effectiveProjectCost = hasTrackedProjectCost ? actualProjectCost : budgetedProjectCost;
+  const projectCostVariance =
+    hasTrackedProjectCost ? roundCurrency(actualProjectCost - budgetedProjectCost) : null;
+  const projectCostVariancePct =
+    !hasTrackedProjectCost || budgetedProjectCost <= 0
+      ? null
+      : projectCostVariance / budgetedProjectCost;
+
+  return {
+    budgetedProjectCost,
+    actualProjectCost,
+    hasTrackedProjectCost,
+    effectiveProjectCost,
+    projectCostVariance,
+    projectCostVariancePct,
+    totalInterestPaid,
+    expenseEntries,
+    debtServiceEntries,
+    latestDebtServiceEntry,
+    latestDrawBalance
+  };
+}
+
 export function getTriggeredTier(projectIrr, tiers) {
   if (!tiers.length) {
     return null;
@@ -72,12 +168,16 @@ export function calculateWaterfall({ deal, positions, overrides = {} }) {
   const prefRate = resolveNumber(overrides.prefRate, deal.prefRate);
   const debt = resolveNumber(overrides.debt, deal.debt);
   const taxExpense = roundCurrency(Math.max(0, resolveNumber(overrides.taxExpense, deal.taxExpense)));
+  const financing = summarizeDealFinancing(deal, overrides);
+  const totalInterestPaid = financing.totalInterestPaid;
   const promoteTiers = (deal.promoteTiers ?? []).filter((tier) => tier.isEnabled !== false);
 
   const totalEquity = roundCurrency(
     positions.reduce((sum, position) => sum + position.contributionAmount, 0)
   );
-  const distributableEquity = roundCurrency(Math.max(0, salePrice - debt - taxExpense));
+  const distributableEquity = roundCurrency(
+    Math.max(0, salePrice - debt - taxExpense - totalInterestPaid)
+  );
   const capitalPool = roundCurrency(Math.min(distributableEquity, totalEquity));
   const prefTargets = positions.map((position) => ({
     positionId: position.id,
@@ -98,6 +198,11 @@ export function calculateWaterfall({ deal, positions, overrides = {} }) {
     remainingAfterPref * (activeTier?.sponsorShare ?? 0)
   );
   const investorProfitPool = roundCurrency(remainingAfterPref - sponsorPromote);
+  const projectCostBasis = roundCurrency(
+    financing.effectiveProjectCost + taxExpense + totalInterestPaid
+  );
+  const netProjectProfit = roundCurrency(salePrice - projectCostBasis);
+  const returnOnCost = projectCostBasis > 0 ? netProjectProfit / projectCostBasis : 0;
 
   const participantResults = positions.map((position) => {
     const ownershipShare = totalEquity > 0 ? position.contributionAmount / totalEquity : 0;
@@ -146,11 +251,25 @@ export function calculateWaterfall({ deal, positions, overrides = {} }) {
     salePrice,
     debt,
     taxExpense,
+    totalInterestPaid,
     holdMonths,
     prefRate,
     totalEquity,
     distributableEquity,
     projectProfit: roundCurrency(distributableEquity - totalEquity),
+    budgetedProjectCost: financing.budgetedProjectCost,
+    actualProjectCost: financing.actualProjectCost,
+    totalProjectCost: financing.actualProjectCost,
+    hasTrackedProjectCost: financing.hasTrackedProjectCost,
+    effectiveProjectCost: financing.effectiveProjectCost,
+    projectCostVariance: financing.projectCostVariance,
+    projectCostVariancePct: financing.projectCostVariancePct,
+    expenseEntries: financing.expenseEntries,
+    debtServiceEntries: financing.debtServiceEntries,
+    latestDrawBalance: financing.latestDrawBalance,
+    projectCostBasis,
+    netProjectProfit,
+    returnOnCost,
     totalPrefTarget,
     projectIrr,
     activeTier,
@@ -159,6 +278,10 @@ export function calculateWaterfall({ deal, positions, overrides = {} }) {
     participantResults,
     classBreakdown,
     waterfallSteps: [
+      {
+        label: "Interest paid",
+        amount: totalInterestPaid
+      },
       {
         label: "Tax expense",
         amount: taxExpense
@@ -753,14 +876,27 @@ function buildInvestorPoolViews(data, viewerParticipantId = null) {
             investmentCloseOn: selectedDeal.investmentCloseOn ?? null,
             timelineProgress: selectedDeal.status === "sold" ? 100 : selectedDeal.timelineProgress,
             timeline: selectedDeal.timeline,
-            totalProjectCost: selectedDeal.totalProjectCost,
+            budgetedProjectCost:
+              poolWaterfall?.waterfall?.budgetedProjectCost ??
+              selectedDeal.budgetedProjectCost ??
+              0,
+            totalProjectCost:
+              poolWaterfall?.waterfall?.totalProjectCost ?? selectedDeal.actualProjectCost ?? 0,
+            effectiveProjectCost:
+              poolWaterfall?.waterfall?.effectiveProjectCost ??
+              selectedDeal.actualProjectCost ??
+              selectedDeal.budgetedProjectCost ??
+              0,
+            projectCostVariance: poolWaterfall?.waterfall?.projectCostVariance ?? null,
+            latestDrawBalance: poolWaterfall?.waterfall?.latestDrawBalance ?? 0,
             salePrice: poolWaterfall?.waterfall?.salePrice ?? selectedDeal.salePrice,
             salePriceLabel: selectedDeal.status === "sold" ? "Actual at exit" : "Projected at exit",
             totalEquity: poolWaterfall?.waterfall?.totalEquity ?? selectedDeal.totalEquity,
             debt: selectedDeal.debt,
             taxExpense: selectedDeal.taxExpense ?? 0,
             debtInterestRate: selectedDeal.debtInterestRate ?? 0,
-            totalInterestPaid: selectedDeal.totalInterestPaid ?? 0,
+            totalInterestPaid:
+              poolWaterfall?.waterfall?.totalInterestPaid ?? selectedDeal.totalInterestPaid ?? 0,
             holdMonths: selectedDeal.holdMonths,
             fundedOn: selectedDeal.fundedOn,
             exitOn: selectedDeal.actualExitOn ?? selectedDeal.projectedExitOn
@@ -1089,14 +1225,25 @@ export function buildInvestorDashboard(user, data = seedData) {
         distributionElection: distributionPlan
       },
       projectSummary: {
-        totalProjectCost: deal.totalProjectCost,
+        budgetedProjectCost: waterfall.budgetedProjectCost,
+        totalProjectCost: waterfall.totalProjectCost,
+        hasTrackedProjectCost: waterfall.hasTrackedProjectCost,
+        effectiveProjectCost: waterfall.effectiveProjectCost,
+        projectCostVariance: waterfall.projectCostVariance,
+        projectCostVariancePct: waterfall.projectCostVariancePct,
         salePrice: waterfall.salePrice,
         salePriceLabel: exitLabel,
         totalEquity: waterfall.totalEquity,
         debt: deal.debt,
         taxExpense: deal.taxExpense ?? 0,
         debtInterestRate: deal.debtInterestRate ?? 0,
-        totalInterestPaid: deal.totalInterestPaid ?? 0,
+        totalInterestPaid: waterfall.totalInterestPaid,
+        expenseEntries: waterfall.expenseEntries,
+        latestDrawBalance: waterfall.latestDrawBalance,
+        debtServiceEntries: waterfall.debtServiceEntries,
+        projectCostBasis: waterfall.projectCostBasis,
+        netProjectProfit: waterfall.netProjectProfit,
+        returnOnCost: waterfall.returnOnCost,
         holdMonths: deal.holdMonths,
         projectIrr: waterfall.projectIrr,
         fundedOn: deal.fundedOn,
@@ -1104,7 +1251,7 @@ export function buildInvestorDashboard(user, data = seedData) {
       },
       reinvestmentTargets: reinvestmentTargets.filter((item) => item.id !== deal.id),
       privacyNote:
-        "Other investor contributions, bank balances, and internal cost detail remain hidden."
+        "Other investor contributions, bank balances, and the detailed monthly financing ledger remain hidden."
     };
   });
 
@@ -1264,9 +1411,20 @@ export function buildManagerDashboard(user, data = seedData) {
       debt: deal.debt,
       taxExpense: deal.taxExpense ?? 0,
       debtInterestRate: deal.debtInterestRate ?? 0,
-      totalInterestPaid: deal.totalInterestPaid ?? 0,
+      totalInterestPaid: waterfall.totalInterestPaid,
       earlyWithdrawalPenaltyRate: deal.earlyWithdrawalPenaltyRate ?? 0.3,
-      totalProjectCost: deal.totalProjectCost,
+      budgetedProjectCost: waterfall.budgetedProjectCost,
+      totalProjectCost: waterfall.totalProjectCost,
+      hasTrackedProjectCost: waterfall.hasTrackedProjectCost,
+      effectiveProjectCost: waterfall.effectiveProjectCost,
+      projectCostVariance: waterfall.projectCostVariance,
+      projectCostVariancePct: waterfall.projectCostVariancePct,
+      expenseEntries: waterfall.expenseEntries,
+      latestDrawBalance: waterfall.latestDrawBalance,
+      debtServiceEntries: waterfall.debtServiceEntries,
+      projectCostBasis: waterfall.projectCostBasis,
+      netProjectProfit: waterfall.netProjectProfit,
+      returnOnCost: waterfall.returnOnCost,
       salePrice: deal.salePrice,
       holdMonths: deal.holdMonths,
       prefRate: deal.prefRate,
@@ -1692,6 +1850,9 @@ export function buildManagerDashboard(user, data = seedData) {
         id: deal.id,
         name: deal.name,
         salePrice: deal.salePrice,
+        totalProjectCost: deal.hasTrackedProjectCost
+          ? deal.totalProjectCost
+          : deal.effectiveProjectCost,
         holdMonths: deal.holdMonths,
         prefRate: deal.prefRate,
         debt: deal.debt,
@@ -1735,6 +1896,9 @@ export function calculateScenarioForDeal(dealId, overrides = {}, data = seedData
     },
     inputs: {
       salePrice: waterfall.salePrice,
+      totalProjectCost: waterfall.hasTrackedProjectCost
+        ? waterfall.totalProjectCost
+        : waterfall.effectiveProjectCost,
       holdMonths: waterfall.holdMonths,
       prefRate: waterfall.prefRate,
       debt: waterfall.debt,
@@ -1743,6 +1907,13 @@ export function calculateScenarioForDeal(dealId, overrides = {}, data = seedData
     outputs: {
       projectIrr: waterfall.projectIrr,
       distributableEquity: waterfall.distributableEquity,
+      totalInterestPaid: waterfall.totalInterestPaid,
+      budgetedProjectCost: waterfall.budgetedProjectCost,
+      totalProjectCost: waterfall.totalProjectCost,
+      effectiveProjectCost: waterfall.effectiveProjectCost,
+      projectCostBasis: waterfall.projectCostBasis,
+      netProjectProfit: waterfall.netProjectProfit,
+      returnOnCost: waterfall.returnOnCost,
       taxExpense: waterfall.taxExpense,
       sponsorPromote: waterfall.sponsorPromote,
       investorProfitPool: waterfall.investorProfitPool,

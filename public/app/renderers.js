@@ -5,7 +5,7 @@ import {
   LOGIN_PAGE_TITLE,
   app,
   state
-} from "./state.js?v=20260417-frontend-2";
+} from "./state.js?v=20260429-frontend-4";
 import {
   breakdownItem,
   escapeHtml,
@@ -21,7 +21,7 @@ import {
   renderSectionToggle,
   summaryItem,
   titleCase
-} from "./helpers.js?v=20260417-frontend-2";
+} from "./helpers.js?v=20260429-frontend-4";
 import {
   applyAllocationFilters,
   applyContractorFilters,
@@ -33,7 +33,7 @@ import {
   getAllocationFilterOptions,
   getAllocatableDeals,
   getContractorFilterOptions,
-  getCreateDealDefaults,
+  getCreateDealDraft,
   getDealEditorDraft,
   getDistributionReviewFilterOptions,
   getDefaultVoteCloseDate,
@@ -42,7 +42,7 @@ import {
   getInvestorProjectFilterOptions,
   getManagerEditableDeal,
   getUserFilterOptions
-} from "./data.js?v=20260417-frontend-2";
+} from "./data.js?v=20260429-frontend-4";
 
 function renderLogin() {
   const errorMarkup = state.loginError
@@ -213,6 +213,25 @@ function renderPasswordResetGate() {
       </section>
     </div>
   `;
+}
+
+function formatOptionalCurrency(value, fallback = "Pending") {
+  return value === null || value === undefined || value === "" ? fallback : formatCurrency(value);
+}
+
+function formatOptionalPercent(value, fallback = "Pending") {
+  return value === null || value === undefined || value === "" ? fallback : formatPercent(value);
+}
+
+function formatCostVariance(amount, pct) {
+  if (amount === null || amount === undefined) {
+    return "Pending actual";
+  }
+
+  const amountLabel = formatCurrency(amount);
+  return pct === null || pct === undefined
+    ? amountLabel
+    : `${amountLabel} · ${formatPercent(pct)}`;
 }
 
 function renderProfilePanel() {
@@ -1684,8 +1703,20 @@ function renderInvestorProject(project) {
           </div>
           <div class="summary-grid">
             ${summaryItem(
-              "Total project cost",
-              formatCurrency(project.projectSummary.totalProjectCost)
+              "Budgeted project cost",
+              formatCurrency(project.projectSummary.budgetedProjectCost)
+            )}
+            ${summaryItem("Total project cost", formatCurrency(project.projectSummary.totalProjectCost))}
+            ${summaryItem(
+              "Cost variance",
+              formatCostVariance(
+                project.projectSummary.projectCostVariance,
+                project.projectSummary.projectCostVariancePct
+              )
+            )}
+            ${summaryItem(
+              "Effective cost basis",
+              formatCurrency(project.projectSummary.projectCostBasis)
             )}
             ${summaryItem(
               project.projectSummary.salePriceLabel,
@@ -1694,10 +1725,22 @@ function renderInvestorProject(project) {
             ${summaryItem("Tracked equity", formatCurrency(project.projectSummary.totalEquity))}
             ${summaryItem("Debt balance", formatCurrency(project.projectSummary.debt))}
             ${summaryItem("Tax expense", formatCurrency(project.projectSummary.taxExpense))}
+            ${summaryItem(
+              "Latest draw balance",
+              formatCurrency(project.projectSummary.latestDrawBalance)
+            )}
             ${summaryItem("Loan interest rate", formatRate(project.projectSummary.debtInterestRate))}
             ${summaryItem(
-              "Interest paid",
+              "Total interest paid",
               formatCurrency(project.projectSummary.totalInterestPaid)
+            )}
+            ${summaryItem(
+              "Net project profit",
+              formatCurrency(project.projectSummary.netProjectProfit)
+            )}
+            ${summaryItem(
+              "Return on cost",
+              formatOptionalPercent(project.projectSummary.returnOnCost, "0.0%")
             )}
             ${summaryItem(
               "Early withdrawal penalty",
@@ -2292,10 +2335,19 @@ function renderManagerDeal(deal) {
           : `<div class="deal-body">
         <div class="summary-grid">
           ${summaryItem("Tracked equity", formatCurrency(deal.totalEquity))}
+          ${summaryItem("Budgeted cost", formatCurrency(deal.budgetedProjectCost))}
+          ${summaryItem("Total project cost", formatCurrency(deal.totalProjectCost))}
+          ${summaryItem(
+            "Cost variance",
+            formatCostVariance(deal.projectCostVariance, deal.projectCostVariancePct)
+          )}
           ${summaryItem("Debt", formatCurrency(deal.debt))}
+          ${summaryItem("Latest draw balance", formatCurrency(deal.latestDrawBalance))}
           ${summaryItem("Tax expense", formatCurrency(deal.taxExpense))}
           ${summaryItem("Loan rate", formatRate(deal.debtInterestRate))}
-          ${summaryItem("Interest paid", formatCurrency(deal.totalInterestPaid))}
+          ${summaryItem("Total interest paid", formatCurrency(deal.totalInterestPaid))}
+          ${summaryItem("Effective cost basis", formatCurrency(deal.projectCostBasis))}
+          ${summaryItem("Net project profit", formatCurrency(deal.netProjectProfit))}
           ${summaryItem(
             "Early withdrawal penalty",
             formatRate(deal.earlyWithdrawalPenaltyRate)
@@ -2330,6 +2382,7 @@ function renderCalculator() {
     deals[0] ?? {
       id: "",
       salePrice: 0,
+      totalProjectCost: 0,
       holdMonths: 0,
       prefRate: 0,
       taxExpense: 0
@@ -2341,7 +2394,7 @@ function renderCalculator() {
     sectionId: "manager-calculator",
     title: "Promote IRR Trigger Calculator",
     copy:
-      "Plug in a sale price, hold length, and pref rate to see investor distributions, Class A vs Class C outputs, and the sponsor promote tier that gets triggered.",
+      "Plug in sale price, total project cost, hold length, and pref rate to see investor distributions, Class A vs Class C outputs, and the sponsor promote tier that gets triggered.",
     bodyClass: "calculator-section-body",
     body: `
       <div class="calculator-layout">
@@ -2372,6 +2425,19 @@ function renderCalculator() {
                 step="1000"
                 name="salePrice"
                 value="${escapeHtml(String(result?.inputs.salePrice ?? selectedPreset.salePrice))}"
+                required
+              />
+            </label>
+            <label>
+              Total project cost
+              <input
+                type="number"
+                min="0"
+                step="0.01"
+                name="totalProjectCost"
+                value="${escapeHtml(
+                  String(result?.inputs.totalProjectCost ?? selectedPreset.totalProjectCost ?? 0)
+                )}"
                 required
               />
             </label>
@@ -2432,6 +2498,18 @@ function renderCalculator() {
                     "Distributable equity",
                     formatCurrency(result.outputs.distributableEquity)
                   )}
+                  ${metricCard(
+                    "Total project cost",
+                    formatCurrency(result.outputs.totalProjectCost)
+                  )}
+                  ${metricCard(
+                    "Interest paid",
+                    formatCurrency(result.outputs.totalInterestPaid)
+                  )}
+                  ${metricCard(
+                    "Effective cost basis",
+                    formatCurrency(result.outputs.projectCostBasis)
+                  )}
                   ${metricCard("Tax expense", formatCurrency(result.outputs.taxExpense))}
                   ${metricCard(
                     "Investor profit pool",
@@ -2440,6 +2518,10 @@ function renderCalculator() {
                   ${metricCard(
                     "Sponsor promote",
                     formatCurrency(result.outputs.sponsorPromote)
+                  )}
+                  ${metricCard(
+                    "Net project profit",
+                    formatCurrency(result.outputs.netProjectProfit)
                   )}
                 </div>
                 <div class="panel panel-inline">
@@ -2828,12 +2910,13 @@ function renderAllocationPanel() {
 }
 
 function renderCreateDealPanel() {
-  const defaults = getCreateDealDefaults();
+  const draft = getCreateDealDraft();
 
   return renderCollapsibleSection({
     sectionId: "admin-create-deal",
     title: "Create Project",
-    copy: "Add a new deal to the database so it can be allocated to investors and contractors.",
+    copy:
+      "Add a new deal with a budgeted cost target, staged expense ledger, and monthly interest tracking.",
     message: renderMessage(state.messages.dealCreate),
     panelClass: "admin-card",
     body: `
@@ -2842,35 +2925,74 @@ function renderCreateDealPanel() {
         <div class="form-grid-2">
           <label>
             Deal name
-            <input type="text" name="name" placeholder="237_Ville Development" required />
+            <input
+              type="text"
+              name="name"
+              value="${inputValue(draft.name)}"
+              data-create-deal-field="name"
+              placeholder="237_Ville Development"
+              required
+            />
           </label>
           <label>
             Location
-            <input type="text" name="location" placeholder="City, State" required />
+            <input
+              type="text"
+              name="location"
+              value="${inputValue(draft.location)}"
+              data-create-deal-field="location"
+              placeholder="City, State"
+              required
+            />
           </label>
         </div>
         <div class="form-grid-2">
           <label>
             Current phase
-            <input type="text" name="currentPhase" placeholder="Pre-construction" required />
+            <input
+              type="text"
+              name="currentPhase"
+              value="${inputValue(draft.currentPhase)}"
+              data-create-deal-field="currentPhase"
+              placeholder="Pre-construction"
+              required
+            />
           </label>
           <label>
             Status
-            <select name="status" required>
-              <option value="under_construction">Under construction</option>
-              <option value="listed">Listed</option>
-              <option value="sold">Sold</option>
+            <select name="status" data-create-deal-field="status" required>
+              <option value="under_construction" ${
+                draft.status === "under_construction" ? "selected" : ""
+              }>Under construction</option>
+              <option value="listed" ${draft.status === "listed" ? "selected" : ""}>Listed</option>
+              <option value="sold" ${draft.status === "sold" ? "selected" : ""}>Sold</option>
             </select>
           </label>
         </div>
         <div class="form-grid-2">
           <label>
-            Total project cost
-            <input type="number" name="totalProjectCost" min="0" step="1000" required />
+            Budgeted project cost
+            <input
+              type="number"
+              name="budgetedProjectCost"
+              min="0"
+              step="1000"
+              value="${inputValue(draft.budgetedProjectCost)}"
+              data-create-deal-field="budgetedProjectCost"
+              required
+            />
           </label>
           <label>
             Debt
-            <input type="number" name="debt" min="0" step="1000" value="0" required />
+            <input
+              type="number"
+              name="debt"
+              min="0"
+              step="1000"
+              value="${inputValue(draft.debt)}"
+              data-create-deal-field="debt"
+              required
+            />
           </label>
         </div>
         <div class="form-grid-2">
@@ -2881,10 +3003,13 @@ function renderCreateDealPanel() {
               name="taxExpense"
               min="0"
               step="1000"
-              value="${escapeHtml(String(defaults.taxExpense))}"
+              value="${inputValue(draft.taxExpense)}"
+              data-create-deal-field="taxExpense"
               required
             />
           </label>
+        </div>
+        <div class="form-grid-2">
           <label>
             Early withdrawal penalty rate
             <input
@@ -2893,12 +3018,11 @@ function renderCreateDealPanel() {
               min="0"
               max="1"
               step="0.01"
-              value="${escapeHtml(String(defaults.earlyWithdrawalPenaltyRate))}"
+              value="${inputValue(draft.earlyWithdrawalPenaltyRate)}"
+              data-create-deal-field="earlyWithdrawalPenaltyRate"
               required
             />
           </label>
-        </div>
-        <div class="form-grid-2">
           <label>
             Loan interest rate
             <input
@@ -2907,18 +3031,8 @@ function renderCreateDealPanel() {
               min="0"
               max="1"
               step="0.0001"
-              value="${escapeHtml(String(defaults.debtInterestRate))}"
-              required
-            />
-          </label>
-          <label>
-            Total interest paid
-            <input
-              type="number"
-              name="totalInterestPaid"
-              min="0"
-              step="1000"
-              value="${escapeHtml(String(defaults.totalInterestPaid))}"
+              value="${inputValue(draft.debtInterestRate)}"
+              data-create-deal-field="debtInterestRate"
               required
             />
           </label>
@@ -2926,10 +3040,64 @@ function renderCreateDealPanel() {
         <p class="helper-copy">
           Use decimal format for the loan rate. Example: <code>0.1025</code> = 10.25%.
         </p>
+        <div>
+          <div class="section-head">
+            <div>
+              <h4>Project expenses</h4>
+              <p class="section-copy">
+                Record contractor and development payments by stage. Total project cost is derived from these rows.
+              </p>
+            </div>
+          </div>
+          ${renderExpenseEditorRows(draft.expenseEntries, {
+            actionPrefix: "data-create-deal-action",
+            fieldPrefix: "data-create-expense-field"
+          })}
+          <div class="button-row">
+            <button
+              class="button-secondary button-inline"
+              type="button"
+              data-create-deal-action="add-expense"
+            >
+              Add expense
+            </button>
+          </div>
+        </div>
+        <div>
+            <div class="section-head">
+              <div>
+              <h4>Monthly interest paid</h4>
+              <p class="section-copy">
+                Capture each month&apos;s draw balance and the interest actually paid so the deal total is derived from the schedule.
+              </p>
+            </div>
+          </div>
+          ${renderDebtServiceEditorRows(draft.debtServiceEntries, {
+            actionPrefix: "data-create-deal-action",
+            fieldPrefix: "data-create-debt-service-field"
+          })}
+          <div class="button-row">
+            <button
+              class="button-secondary button-inline"
+              type="button"
+              data-create-deal-action="add-debt-service"
+            >
+              Add debt-service month
+            </button>
+          </div>
+        </div>
         <div class="form-grid-2">
           <label>
             Sale price
-            <input type="number" name="salePrice" min="0" step="1000" required />
+            <input
+              type="number"
+              name="salePrice"
+              min="0"
+              step="1000"
+              value="${inputValue(draft.salePrice)}"
+              data-create-deal-field="salePrice"
+              required
+            />
           </label>
           <label>
             Hold months
@@ -2938,7 +3106,8 @@ function renderCreateDealPanel() {
               name="holdMonths"
               min="1"
               step="1"
-              value="${escapeHtml(String(defaults.holdMonths))}"
+              value="${inputValue(draft.holdMonths)}"
+              data-create-deal-field="holdMonths"
               required
             />
           </label>
@@ -2952,7 +3121,8 @@ function renderCreateDealPanel() {
               min="0"
               max="0.3"
               step="0.005"
-              value="${escapeHtml(String(defaults.prefRate))}"
+              value="${inputValue(draft.prefRate)}"
+              data-create-deal-field="prefRate"
               required
             />
           </label>
@@ -2964,7 +3134,8 @@ function renderCreateDealPanel() {
               min="0"
               max="100"
               step="1"
-              value="${escapeHtml(String(defaults.timelineProgress))}"
+              value="${inputValue(draft.timelineProgress)}"
+              data-create-deal-field="timelineProgress"
               required
             />
           </label>
@@ -2972,14 +3143,21 @@ function renderCreateDealPanel() {
         <div class="form-grid-2">
           <label>
             Funded on
-            <input type="date" name="fundedOn" value="${escapeHtml(defaults.fundedOn)}" required />
+            <input
+              type="date"
+              name="fundedOn"
+              value="${inputValue(draft.fundedOn)}"
+              data-create-deal-field="fundedOn"
+              required
+            />
           </label>
           <label>
             Investment close date
             <input
               type="date"
               name="investmentCloseOn"
-              value="${escapeHtml(defaults.investmentCloseOn)}"
+              value="${inputValue(draft.investmentCloseOn)}"
+              data-create-deal-field="investmentCloseOn"
               required
             />
           </label>
@@ -2987,11 +3165,21 @@ function renderCreateDealPanel() {
         <div class="form-grid-2">
           <label>
             Projected exit
-            <input type="date" name="projectedExitOn" />
+            <input
+              type="date"
+              name="projectedExitOn"
+              value="${inputValue(draft.projectedExitOn)}"
+              data-create-deal-field="projectedExitOn"
+            />
           </label>
           <label>
             Actual exit
-            <input type="date" name="actualExitOn" />
+            <input
+              type="date"
+              name="actualExitOn"
+              value="${inputValue(draft.actualExitOn)}"
+              data-create-deal-field="actualExitOn"
+            />
           </label>
         </div>
         <button class="button-primary" type="submit">Create project</button>
@@ -3051,6 +3239,148 @@ function renderTimelineEditorRows(draft) {
                   data-deal-id="${escapeHtml(draft.id)}"
                 >
                   Remove step
+                </button>
+              </div>
+            </article>
+          `
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderDebtServiceEditorRows(entries, { actionPrefix, fieldPrefix, dealId = "" } = {}) {
+  return `
+    <div class="editor-stack">
+      ${entries
+        .map(
+          (entry, index) => `
+            <article class="editor-row">
+              <div class="form-grid-3">
+                <label>
+                  Interest month
+                  <input
+                    type="month"
+                    value="${inputValue(entry.serviceMonth)}"
+                    data-index="${index}"
+                    ${fieldPrefix}="serviceMonth"
+                  />
+                </label>
+                <label>
+                  Draw balance
+                  <input
+                    type="number"
+                    min="0"
+                    step="1000"
+                    value="${inputValue(entry.drawBalance)}"
+                    data-index="${index}"
+                    ${fieldPrefix}="drawBalance"
+                    placeholder="325000"
+                  />
+                </label>
+                <label>
+                  Interest paid
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value="${inputValue(entry.interestPaid)}"
+                    data-index="${index}"
+                    ${fieldPrefix}="interestPaid"
+                    placeholder="333.33"
+                  />
+                </label>
+              </div>
+              <div class="button-row">
+                <button
+                  class="button-secondary button-inline"
+                  type="button"
+                  ${actionPrefix}="remove-debt-service"
+                  data-index="${index}"
+                  ${dealId ? `data-deal-id="${escapeHtml(dealId)}"` : ""}
+                >
+                  Remove month
+                </button>
+              </div>
+            </article>
+          `
+        )
+        .join("")}
+    </div>
+  `;
+}
+
+function renderExpenseEditorRows(entries, { actionPrefix, fieldPrefix, dealId = "" } = {}) {
+  return `
+    <div class="editor-stack">
+      ${entries
+        .map(
+          (entry, index) => `
+            <article class="editor-row">
+              <div class="form-grid-3">
+                <label>
+                  Stage
+                  <input
+                    type="text"
+                    value="${inputValue(entry.stageLabel)}"
+                    data-index="${index}"
+                    ${fieldPrefix}="stageLabel"
+                    placeholder="Foundation"
+                  />
+                </label>
+                <label>
+                  Contractor or payee
+                  <input
+                    type="text"
+                    value="${inputValue(entry.payeeName)}"
+                    data-index="${index}"
+                    ${fieldPrefix}="payeeName"
+                    placeholder="SolidSet Concrete"
+                  />
+                </label>
+                <label>
+                  Amount paid
+                  <input
+                    type="number"
+                    min="0"
+                    step="1000"
+                    value="${inputValue(entry.amountPaid)}"
+                    data-index="${index}"
+                    ${fieldPrefix}="amountPaid"
+                    placeholder="85000"
+                  />
+                </label>
+              </div>
+              <div class="form-grid-2">
+                <label>
+                  Paid on
+                  <input
+                    type="date"
+                    value="${inputValue(entry.paidOn)}"
+                    data-index="${index}"
+                    ${fieldPrefix}="paidOn"
+                  />
+                </label>
+                <label>
+                  Notes
+                  <input
+                    type="text"
+                    value="${inputValue(entry.notes)}"
+                    data-index="${index}"
+                    ${fieldPrefix}="notes"
+                    placeholder="Change order, retainage release, permit overrun"
+                  />
+                </label>
+              </div>
+              <div class="button-row">
+                <button
+                  class="button-secondary button-inline"
+                  type="button"
+                  ${actionPrefix}="remove-expense"
+                  data-index="${index}"
+                  ${dealId ? `data-deal-id="${escapeHtml(dealId)}"` : ""}
+                >
+                  Remove expense
                 </button>
               </div>
             </article>
@@ -3157,7 +3487,8 @@ function renderDealEditorPanel() {
     return renderCollapsibleSection({
       sectionId: "admin-edit-deal",
       title: "Update Project",
-      copy: "Save project status, phase, financial assumptions, timeline milestones, and promote tiers.",
+      copy:
+        "Save project status, budget targets, staged expenses, monthly interest, timeline milestones, and promote tiers.",
       panelClass: "admin-card",
       body: '<div class="empty-state">No deals are available to edit.</div>'
     });
@@ -3166,7 +3497,8 @@ function renderDealEditorPanel() {
   return renderCollapsibleSection({
     sectionId: "admin-edit-deal",
     title: "Update Project",
-    copy: "Save project status, phase, financial assumptions, timeline milestones, and promote tiers.",
+    copy:
+      "Save project status, budget targets, staged expenses, monthly interest, timeline milestones, and promote tiers.",
     message: renderMessage(state.messages.deal),
     panelClass: "admin-card admin-card-wide",
     body: `
@@ -3192,6 +3524,14 @@ function renderDealEditorPanel() {
           ${summaryItem("Tracked equity", formatCurrency(deal.totalEquity))}
           ${summaryItem("Gross project IRR", formatPercent(deal.projectIrr))}
           ${summaryItem("Sponsor promote", formatCurrency(deal.sponsorPromote))}
+          ${summaryItem("Budgeted cost", formatCurrency(deal.budgetedProjectCost))}
+          ${summaryItem("Total project cost", formatCurrency(deal.totalProjectCost))}
+          ${summaryItem(
+            "Cost variance",
+            formatCostVariance(deal.projectCostVariance, deal.projectCostVariancePct)
+          )}
+          ${summaryItem("Total interest paid", formatCurrency(deal.totalInterestPaid))}
+          ${summaryItem("Latest draw balance", formatCurrency(deal.latestDrawBalance))}
           ${summaryItem("Timeline progress", `${deal.timelineProgress}%`)}
           ${summaryItem(
             "Investment closes",
@@ -3248,14 +3588,14 @@ function renderDealEditorPanel() {
         </div>
         <div class="form-grid-2">
           <label>
-            Total project cost
+            Budgeted project cost
             <input
               type="number"
-              name="totalProjectCost"
+              name="budgetedProjectCost"
               min="0"
               step="1000"
-              value="${inputValue(draft.totalProjectCost)}"
-              data-deal-field="totalProjectCost"
+              value="${inputValue(draft.budgetedProjectCost)}"
+              data-deal-field="budgetedProjectCost"
               required
             />
           </label>
@@ -3298,8 +3638,6 @@ function renderDealEditorPanel() {
               required
             />
           </label>
-        </div>
-        <div class="form-grid-2">
           <label>
             Loan interest rate
             <input
@@ -3313,22 +3651,57 @@ function renderDealEditorPanel() {
               required
             />
           </label>
-          <label>
-            Total interest paid
-            <input
-              type="number"
-              name="totalInterestPaid"
-              min="0"
-              step="1000"
-              value="${inputValue(draft.totalInterestPaid)}"
-              data-deal-field="totalInterestPaid"
-              required
-            />
-          </label>
         </div>
         <p class="helper-copy">
           Use decimal format for the loan rate. Example: <code>0.1025</code> = 10.25%.
         </p>
+
+        ${renderCollapsibleSection({
+          sectionId: `admin-edit-deal-${draft.id}-expenses`,
+          title: "Project Expenses",
+          copy:
+            "Track contractor and development payments by stage. Total project cost is derived from this ledger.",
+          panelClass: "editor-section",
+          headerActions: `
+            <button
+              class="button-secondary button-inline"
+              type="button"
+              data-deal-editor-action="add-expense"
+              data-deal-id="${escapeHtml(draft.id)}"
+            >
+              Add expense
+            </button>
+          `,
+          body: `${renderExpenseEditorRows(draft.expenseEntries, {
+            actionPrefix: "data-deal-editor-action",
+            fieldPrefix: "data-expense-field",
+            dealId: draft.id
+          })}`
+        })}
+
+        ${renderCollapsibleSection({
+          sectionId: `admin-edit-deal-${draft.id}-debt-service`,
+          title: "Monthly Interest Paid",
+          copy:
+            "Track each month&apos;s draw balance and interest paid. The project total interest is derived from these rows.",
+          panelClass: "editor-section",
+          headerActions: `
+            <button
+              class="button-secondary button-inline"
+              type="button"
+              data-deal-editor-action="add-debt-service"
+              data-deal-id="${escapeHtml(draft.id)}"
+            >
+              Add month
+            </button>
+          `,
+          body: `${renderDebtServiceEditorRows(draft.debtServiceEntries, {
+            actionPrefix: "data-deal-editor-action",
+            fieldPrefix: "data-debt-service-field",
+            dealId: draft.id
+          })}`
+        })}
+
         <div class="form-grid-2">
           <label>
             Sale price

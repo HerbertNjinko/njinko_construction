@@ -1,21 +1,28 @@
-import { state } from "./state.js?v=20260417-frontend-2";
-import { roundMoney } from "./helpers.js?v=20260417-frontend-2";
+import { state } from "./state.js?v=20260429-frontend-4";
+import { roundMoney } from "./helpers.js?v=20260429-frontend-4";
 
 export function getCreateDealDefaults() {
   const investmentCloseOn = new Date();
   investmentCloseOn.setDate(investmentCloseOn.getDate() + 30);
 
   return {
+    name: "",
+    location: "",
+    currentPhase: "",
     status: "under_construction",
+    budgetedProjectCost: "",
+    debt: "0",
     holdMonths: 18,
     prefRate: 0.08,
     taxExpense: 0,
     debtInterestRate: 0,
-    totalInterestPaid: 0,
     earlyWithdrawalPenaltyRate: 0.3,
+    salePrice: "",
     timelineProgress: 0,
     fundedOn: new Date().toISOString().slice(0, 10),
-    investmentCloseOn: investmentCloseOn.toISOString().slice(0, 10)
+    investmentCloseOn: investmentCloseOn.toISOString().slice(0, 10),
+    projectedExitOn: "",
+    actualExitOn: ""
   };
 }
 
@@ -25,6 +32,10 @@ function todayStamp() {
   const month = String(now.getMonth() + 1).padStart(2, "0");
   const day = String(now.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
+}
+
+function currentMonthStamp() {
+  return todayStamp().slice(0, 7);
 }
 
 export function isDealOpenForAllocation(deal) {
@@ -309,6 +320,26 @@ export function createTimelineDraft(step = {}) {
   };
 }
 
+export function createDebtServiceDraft(entry = {}) {
+  return {
+    serviceMonth: String(entry.serviceMonth ?? ""),
+    drawBalance:
+      entry.drawBalance === 0 || entry.drawBalance ? String(entry.drawBalance) : "",
+    interestPaid:
+      entry.interestPaid === 0 || entry.interestPaid ? String(entry.interestPaid) : ""
+  };
+}
+
+export function createExpenseDraft(entry = {}) {
+  return {
+    stageLabel: String(entry.stageLabel ?? ""),
+    payeeName: String(entry.payeeName ?? ""),
+    amountPaid: entry.amountPaid === 0 || entry.amountPaid ? String(entry.amountPaid) : "",
+    paidOn: String(entry.paidOn ?? ""),
+    notes: String(entry.notes ?? "")
+  };
+}
+
 export function createTierDraft(tier = {}) {
   return {
     label: String(tier.label ?? ""),
@@ -321,6 +352,22 @@ export function createTierDraft(tier = {}) {
   };
 }
 
+export function buildCreateDealDraft() {
+  const defaults = getCreateDealDefaults();
+
+  return {
+    ...defaults,
+    holdMonths: String(defaults.holdMonths),
+    prefRate: String(defaults.prefRate),
+    taxExpense: String(defaults.taxExpense),
+    debtInterestRate: String(defaults.debtInterestRate),
+    earlyWithdrawalPenaltyRate: String(defaults.earlyWithdrawalPenaltyRate),
+    timelineProgress: String(defaults.timelineProgress),
+    expenseEntries: [createExpenseDraft()],
+    debtServiceEntries: [createDebtServiceDraft({ serviceMonth: currentMonthStamp() })]
+  };
+}
+
 export function buildDealEditorDraft(deal) {
   return {
     id: deal.id,
@@ -328,11 +375,10 @@ export function buildDealEditorDraft(deal) {
     location: String(deal.location ?? ""),
     currentPhase: String(deal.currentPhase ?? ""),
     status: String(deal.status ?? "under_construction"),
-    totalProjectCost: String(deal.totalProjectCost ?? 0),
+    budgetedProjectCost: String(deal.budgetedProjectCost ?? deal.totalProjectCost ?? 0),
     debt: String(deal.debt ?? 0),
     taxExpense: String(deal.taxExpense ?? 0),
     debtInterestRate: String(deal.debtInterestRate ?? 0),
-    totalInterestPaid: String(deal.totalInterestPaid ?? 0),
     earlyWithdrawalPenaltyRate: String(deal.earlyWithdrawalPenaltyRate ?? 0.3),
     salePrice: String(deal.salePrice ?? 0),
     holdMonths: String(deal.holdMonths ?? 1),
@@ -342,6 +388,14 @@ export function buildDealEditorDraft(deal) {
     investmentCloseOn: String(deal.investmentCloseOn ?? ""),
     projectedExitOn: String(deal.projectedExitOn ?? ""),
     actualExitOn: String(deal.actualExitOn ?? ""),
+    expenseEntries:
+      deal.expenseEntries?.length
+        ? deal.expenseEntries.map((entry) => createExpenseDraft(entry))
+        : [createExpenseDraft()],
+    debtServiceEntries:
+      deal.debtServiceEntries?.length
+        ? deal.debtServiceEntries.map((entry) => createDebtServiceDraft(entry))
+        : [createDebtServiceDraft({ serviceMonth: currentMonthStamp() })],
     timeline:
       deal.timeline?.length
         ? deal.timeline.map((step) => createTimelineDraft(step))
@@ -351,6 +405,83 @@ export function buildDealEditorDraft(deal) {
         ? deal.promoteTiers.map((tier) => createTierDraft(tier))
         : [createTierDraft({ investorShare: 0.7, sponsorShare: 0.3, isEnabled: true })]
   };
+}
+
+export function getCreateDealDraft() {
+  if (!state.createDealDraft) {
+    state.createDealDraft = buildCreateDealDraft();
+  }
+
+  return state.createDealDraft;
+}
+
+export function updateCreateDealDraft(updater) {
+  const current = getCreateDealDraft();
+  const nextDraft = updater({
+    ...current,
+    expenseEntries: current.expenseEntries.map((entry) => ({ ...entry })),
+    debtServiceEntries: current.debtServiceEntries.map((entry) => ({ ...entry }))
+  });
+
+  state.createDealDraft = nextDraft;
+  return nextDraft;
+}
+
+export function syncCreateDealField(target) {
+  const form = target.closest("#create-deal-form");
+
+  if (!form) {
+    return false;
+  }
+
+  if (target.dataset.createDealField) {
+    updateCreateDealDraft((draft) => ({
+      ...draft,
+      [target.dataset.createDealField]: target.value,
+      ...(target.dataset.createDealField === "status" && target.value === "sold"
+        ? { timelineProgress: "100" }
+        : {})
+    }));
+    return true;
+  }
+
+  if (target.dataset.createDebtServiceField) {
+    const index = Number(target.dataset.index);
+
+    if (!Number.isFinite(index)) {
+      return false;
+    }
+
+    updateCreateDealDraft((draft) => ({
+      ...draft,
+      debtServiceEntries: draft.debtServiceEntries.map((entry, entryIndex) =>
+        entryIndex === index
+          ? { ...entry, [target.dataset.createDebtServiceField]: target.value }
+          : entry
+      )
+    }));
+    return true;
+  }
+
+  if (target.dataset.createExpenseField) {
+    const index = Number(target.dataset.index);
+
+    if (!Number.isFinite(index)) {
+      return false;
+    }
+
+    updateCreateDealDraft((draft) => ({
+      ...draft,
+      expenseEntries: draft.expenseEntries.map((entry, entryIndex) =>
+        entryIndex === index
+          ? { ...entry, [target.dataset.createExpenseField]: target.value }
+          : entry
+      )
+    }));
+    return true;
+  }
+
+  return false;
 }
 
 export function getDealById(dealId) {
@@ -379,6 +510,8 @@ export function updateDealEditorDraft(dealId, updater) {
   const current = getDealEditorDraft(deal);
   const nextDraft = updater({
     ...current,
+    expenseEntries: current.expenseEntries.map((entry) => ({ ...entry })),
+    debtServiceEntries: current.debtServiceEntries.map((entry) => ({ ...entry })),
     timeline: current.timeline.map((step) => ({ ...step })),
     promoteTiers: current.promoteTiers.map((tier) => ({ ...tier }))
   });
@@ -434,6 +567,40 @@ export function syncDealEditorField(target) {
         timeline
       };
     });
+    return true;
+  }
+
+  if (target.dataset.debtServiceField) {
+    const index = Number(target.dataset.index);
+
+    if (!Number.isFinite(index)) {
+      return false;
+    }
+
+    updateDealEditorDraft(dealId, (draft) => ({
+      ...draft,
+      debtServiceEntries: draft.debtServiceEntries.map((entry, entryIndex) =>
+        entryIndex === index
+          ? { ...entry, [target.dataset.debtServiceField]: target.value }
+          : entry
+      )
+    }));
+    return true;
+  }
+
+  if (target.dataset.expenseField) {
+    const index = Number(target.dataset.index);
+
+    if (!Number.isFinite(index)) {
+      return false;
+    }
+
+    updateDealEditorDraft(dealId, (draft) => ({
+      ...draft,
+      expenseEntries: draft.expenseEntries.map((entry, entryIndex) =>
+        entryIndex === index ? { ...entry, [target.dataset.expenseField]: target.value } : entry
+      )
+    }));
     return true;
   }
 

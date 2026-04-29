@@ -79,6 +79,7 @@ export const state = {
   calculatorSelectionId: null,
   managerPage: DEFAULT_MANAGER_PAGE,
   adminDealId: null,
+  createDealDraft: null,
   dealEditorDrafts: {},
   rollupDealFilter: "",
   contractorDealFilter: "",

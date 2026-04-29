@@ -1,4 +1,4 @@
-import { state } from "./state.js?v=20260417-frontend-2";
+import { state } from "./state.js?v=20260429-frontend-4";
 import {
   clearAuthFeedback,
   clearMessages,
@@ -10,15 +10,21 @@ import {
   setAuthMode,
   setMessage,
   toggleSectionCollapsed
-} from "./helpers.js?v=20260417-frontend-2";
+} from "./helpers.js?v=20260429-frontend-4";
 import {
+  buildCreateDealDraft,
+  createDebtServiceDraft,
+  createExpenseDraft,
   createTierDraft,
   createTimelineDraft,
   getDealById,
+  getCreateDealDraft,
   getDealEditorDraft,
+  syncCreateDealField,
   syncDealEditorField,
+  updateCreateDealDraft,
   updateDealEditorDraft
-} from "./data.js?v=20260417-frontend-2";
+} from "./data.js?v=20260429-frontend-4";
 import {
   api,
   applyLoggedOutState,
@@ -26,8 +32,8 @@ import {
   loadSession,
   recordSessionActivity,
   refreshDashboard
-} from "./session.js?v=20260417-frontend-2";
-import { render } from "./renderers.js?v=20260417-frontend-2";
+} from "./session.js?v=20260429-frontend-6";
+import { render } from "./renderers.js?v=20260429-frontend-6";
 
 let listenersBound = false;
 
@@ -175,6 +181,7 @@ export function setupEventListeners() {
         await loadCalculator(String(formData.get("dealId")), {
           dealId: formData.get("dealId"),
           salePrice: Number(formData.get("salePrice")),
+          totalProjectCost: Number(formData.get("totalProjectCost")),
           holdMonths: Number(formData.get("holdMonths")),
           prefRate: Number(formData.get("prefRate")),
           taxExpense: Number(formData.get("taxExpense"))
@@ -650,34 +657,36 @@ export function setupEventListeners() {
 
     if (event.target.id === "create-deal-form") {
       event.preventDefault();
-      const formData = new FormData(event.target);
+      const draft = getCreateDealDraft();
 
       try {
         const result = await api("/api/admin/deals", {
           method: "POST",
           body: JSON.stringify({
-            name: formData.get("name"),
-            location: formData.get("location"),
-            currentPhase: formData.get("currentPhase"),
-            status: formData.get("status"),
-            totalProjectCost: Number(formData.get("totalProjectCost")),
-            debt: Number(formData.get("debt")),
-            taxExpense: Number(formData.get("taxExpense")),
-            earlyWithdrawalPenaltyRate: Number(formData.get("earlyWithdrawalPenaltyRate")),
-            debtInterestRate: Number(formData.get("debtInterestRate")),
-            totalInterestPaid: Number(formData.get("totalInterestPaid")),
-            salePrice: Number(formData.get("salePrice")),
-            holdMonths: Number(formData.get("holdMonths")),
-            prefRate: Number(formData.get("prefRate")),
-            timelineProgress: Number(formData.get("timelineProgress")),
-            fundedOn: formData.get("fundedOn"),
-            investmentCloseOn: formData.get("investmentCloseOn"),
-            projectedExitOn: formData.get("projectedExitOn"),
-            actualExitOn: formData.get("actualExitOn")
+            name: draft.name,
+            location: draft.location,
+            currentPhase: draft.currentPhase,
+            status: draft.status,
+            budgetedProjectCost: draft.budgetedProjectCost,
+            debt: draft.debt,
+            taxExpense: draft.taxExpense,
+            earlyWithdrawalPenaltyRate: draft.earlyWithdrawalPenaltyRate,
+            debtInterestRate: draft.debtInterestRate,
+            salePrice: draft.salePrice,
+            holdMonths: draft.holdMonths,
+            prefRate: draft.prefRate,
+            timelineProgress: draft.timelineProgress,
+            fundedOn: draft.fundedOn,
+            investmentCloseOn: draft.investmentCloseOn,
+            projectedExitOn: draft.projectedExitOn,
+            actualExitOn: draft.actualExitOn,
+            expenseEntries: draft.expenseEntries,
+            debtServiceEntries: draft.debtServiceEntries
           })
         });
         state.adminDealId = result.deal.id;
         state.rollupDealFilter = result.deal.id;
+        state.createDealDraft = buildCreateDealDraft();
         await refreshDashboard();
         setMessage(
           "dealCreate",
@@ -708,12 +717,11 @@ export function setupEventListeners() {
             location: draft.location,
             currentPhase: draft.currentPhase,
             status: draft.status,
-            totalProjectCost: draft.totalProjectCost,
+            budgetedProjectCost: draft.budgetedProjectCost,
             debt: draft.debt,
             taxExpense: draft.taxExpense,
             earlyWithdrawalPenaltyRate: draft.earlyWithdrawalPenaltyRate,
             debtInterestRate: draft.debtInterestRate,
-            totalInterestPaid: draft.totalInterestPaid,
             salePrice: draft.salePrice,
             holdMonths: draft.holdMonths,
             prefRate: draft.prefRate,
@@ -722,6 +730,8 @@ export function setupEventListeners() {
             investmentCloseOn: draft.investmentCloseOn,
             projectedExitOn: draft.projectedExitOn,
             actualExitOn: draft.actualExitOn,
+            expenseEntries: draft.expenseEntries,
+            debtServiceEntries: draft.debtServiceEntries,
             timeline: draft.timeline,
             promoteTiers: draft.promoteTiers
           })
@@ -738,6 +748,10 @@ export function setupEventListeners() {
   });
 
   document.addEventListener("change", async (event) => {
+    if (syncCreateDealField(event.target)) {
+      return;
+    }
+
     if (syncDealEditorField(event.target)) {
       return;
     }
@@ -858,6 +872,10 @@ export function setupEventListeners() {
       return;
     }
 
+    if (syncCreateDealField(event.target)) {
+      return;
+    }
+
     syncDealEditorField(event.target);
   });
 
@@ -940,6 +958,52 @@ export function setupEventListeners() {
             draft.timeline.length > 1
               ? draft.timeline.filter((_, itemIndex) => itemIndex !== index)
               : [createTimelineDraft()]
+        }));
+        render();
+        return;
+      }
+
+      if (action === "add-debt-service") {
+        updateDealEditorDraft(dealId, (draft) => ({
+          ...draft,
+          debtServiceEntries: [...draft.debtServiceEntries, createDebtServiceDraft()]
+        }));
+        render();
+        return;
+      }
+
+      if (action === "remove-debt-service") {
+        const index = Number(dealEditorAction.dataset.index);
+
+        updateDealEditorDraft(dealId, (draft) => ({
+          ...draft,
+          debtServiceEntries:
+            draft.debtServiceEntries.length > 1
+              ? draft.debtServiceEntries.filter((_, entryIndex) => entryIndex !== index)
+              : [createDebtServiceDraft()]
+        }));
+        render();
+        return;
+      }
+
+      if (action === "add-expense") {
+        updateDealEditorDraft(dealId, (draft) => ({
+          ...draft,
+          expenseEntries: [...draft.expenseEntries, createExpenseDraft()]
+        }));
+        render();
+        return;
+      }
+
+      if (action === "remove-expense") {
+        const index = Number(dealEditorAction.dataset.index);
+
+        updateDealEditorDraft(dealId, (draft) => ({
+          ...draft,
+          expenseEntries:
+            draft.expenseEntries.length > 1
+              ? draft.expenseEntries.filter((_, entryIndex) => entryIndex !== index)
+              : [createExpenseDraft()]
         }));
         render();
         return;
@@ -1030,7 +1094,7 @@ export function setupEventListeners() {
       if (action === "delete-deal") {
         const deal = getDealById(dealId);
         const confirmed = window.confirm(
-          `Delete ${deal?.name ?? "this deal"}? All allocations, timeline items, contractor entries, and tiers tied to it will be removed.`
+          `Delete ${deal?.name ?? "this deal"}? All allocations, expenses, interest rows, timeline items, contractor entries, and tiers tied to it will be removed.`
         );
 
         if (!confirmed) {
@@ -1048,6 +1112,58 @@ export function setupEventListeners() {
           setMessage("deal", "error", error.message);
         }
 
+        render();
+        return;
+      }
+    }
+
+    const createDealAction = event.target.closest("[data-create-deal-action]");
+
+    if (createDealAction) {
+      const action = createDealAction.dataset.createDealAction;
+
+      if (action === "add-debt-service") {
+        updateCreateDealDraft((draft) => ({
+          ...draft,
+          debtServiceEntries: [...draft.debtServiceEntries, createDebtServiceDraft()]
+        }));
+        render();
+        return;
+      }
+
+      if (action === "remove-debt-service") {
+        const index = Number(createDealAction.dataset.index);
+
+        updateCreateDealDraft((draft) => ({
+          ...draft,
+          debtServiceEntries:
+            draft.debtServiceEntries.length > 1
+              ? draft.debtServiceEntries.filter((_, entryIndex) => entryIndex !== index)
+              : [createDebtServiceDraft()]
+        }));
+        render();
+        return;
+      }
+
+      if (action === "add-expense") {
+        updateCreateDealDraft((draft) => ({
+          ...draft,
+          expenseEntries: [...draft.expenseEntries, createExpenseDraft()]
+        }));
+        render();
+        return;
+      }
+
+      if (action === "remove-expense") {
+        const index = Number(createDealAction.dataset.index);
+
+        updateCreateDealDraft((draft) => ({
+          ...draft,
+          expenseEntries:
+            draft.expenseEntries.length > 1
+              ? draft.expenseEntries.filter((_, entryIndex) => entryIndex !== index)
+              : [createExpenseDraft()]
+        }));
         render();
         return;
       }

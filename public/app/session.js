@@ -12,11 +12,11 @@ import {
   createInitialUserFilters,
   sessionRuntime,
   state
-} from "./state.js?v=20260417-frontend-2";
+} from "./state.js?v=20260429-frontend-4";
 import {
   clearAuthFeedback,
   clearMessages
-} from "./helpers.js?v=20260417-frontend-2";
+} from "./helpers.js?v=20260429-frontend-4";
 import {
   applyAllocationFilters,
   getAllocationFilterOptions,
@@ -26,8 +26,8 @@ import {
   getInvestorIssueFilterOptions,
   getInvestorProjectFilterOptions,
   getUserFilterOptions
-} from "./data.js?v=20260417-frontend-2";
-import { render } from "./renderers.js?v=20260417-frontend-2";
+} from "./data.js?v=20260429-frontend-4";
+import { render } from "./renderers.js?v=20260429-frontend-6";
 
 export async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -189,6 +189,7 @@ export async function loadCalculator(dealId, overrides = null) {
       overrides ?? {
         dealId: preset.id,
         salePrice: preset.salePrice,
+        totalProjectCost: preset.totalProjectCost,
         holdMonths: preset.holdMonths,
         prefRate: preset.prefRate,
         taxExpense: preset.taxExpense

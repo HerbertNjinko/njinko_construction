@@ -25,6 +25,82 @@ const buildPromoteTiers = () => [
   }
 ];
 
+const buildDebtServiceEntries = (rows) =>
+  rows.map(([serviceMonth, drawBalance, interestPaid]) => ({
+    serviceMonth,
+    drawBalance,
+    interestPaid
+  }));
+
+const buildExpenseEntries = (rows) =>
+  rows.map(([stageLabel, payeeName, amountPaid, paidOn, notes]) => ({
+    stageLabel,
+    payeeName,
+    amountPaid,
+    paidOn,
+    notes
+  }));
+
+const totalInterestPaidFor = (entries) =>
+  entries.reduce((sum, entry) => sum + Number(entry.interestPaid ?? 0), 0);
+
+const totalProjectCostFor = (entries) =>
+  entries.reduce((sum, entry) => sum + Number(entry.amountPaid ?? 0), 0);
+
+const villeDebtServiceEntries = buildDebtServiceEntries([
+  ["2025-11", 220000, 8200],
+  ["2025-12", 315000, 9400],
+  ["2026-01", 430000, 10300],
+  ["2026-02", 545000, 11600],
+  ["2026-03", 658000, 13300],
+  ["2026-04", 712000, 15700]
+]);
+
+const oakDebtServiceEntries = buildDebtServiceEntries([
+  ["2025-10", 245000, 6400],
+  ["2025-11", 318000, 7000],
+  ["2025-12", 386000, 7300],
+  ["2026-01", 448000, 7600],
+  ["2026-02", 506000, 7900],
+  ["2026-03", 542000, 8000]
+]);
+
+const mapleDebtServiceEntries = buildDebtServiceEntries([
+  ["2024-06", 180000, 4600],
+  ["2024-07", 244000, 4900],
+  ["2024-08", 301000, 5200],
+  ["2024-09", 352000, 5400],
+  ["2024-10", 398000, 5600],
+  ["2024-11", 421000, 6100]
+]);
+
+const villeExpenseEntries = buildExpenseEntries([
+  ["Land close", "Bluecrest Land Holdings", 265000, "2025-07-15", "Acquisition closing"],
+  ["Site work", "Northgate Demo", 118000, "2025-08-18", "Clearing, grading, and utilities"],
+  ["Foundation", "SolidSet Concrete", 176000, "2025-10-10", "Slab and foundation package"],
+  ["Framing", "Elite Interiors", 248000, "2026-03-30", "Framing and dry-in labor"],
+  ["MEP rough-ins", "Queen City Mechanical", 142000, "2026-04-20", "Mechanical, electrical, and plumbing rough-ins"],
+  ["Contingency work", "Metro Build Services", 260000, "2026-04-27", "Change orders and unexpected field conditions"]
+]);
+
+const oakExpenseEntries = buildExpenseEntries([
+  ["Acquisition", "Oak Ridge Seller", 242000, "2025-05-01", "Property acquisition"],
+  ["Renovation demo", "Northgate Demo", 94000, "2025-06-15", "Interior demolition and debris haul-off"],
+  ["Exterior improvements", "Piedmont Roofing", 126000, "2025-09-20", "Roof, siding, and site improvements"],
+  ["Interior build-out", "Elite Interiors", 188500, "2025-11-10", "Unit renovation package"],
+  ["Lease-up punch", "Triad Finish Group", 134000, "2026-02-18", "Punch list and stabilization work"],
+  ["Broker prep", "MarketReady Services", 100000, "2026-03-25", "Listing preparation and staging updates"]
+]);
+
+const mapleExpenseEntries = buildExpenseEntries([
+  ["Acquisition", "Maple Seller LLC", 205000, "2024-03-01", "Property purchase"],
+  ["Interior conversion", "Durham Build Co.", 168000, "2024-06-10", "Interior unit conversion"],
+  ["Exterior envelope", "Bull City Masonry", 94000, "2024-08-05", "Exterior repairs and waterproofing"],
+  ["Lease-up prep", "Triangle Finish Group", 76000, "2024-11-14", "Finish carpentry and punch"],
+  ["Stabilization", "Bluecrest Operations", 82000, "2025-02-10", "Final improvements and close-out"],
+  ["Contingency", "Project Reserve", 76000, "2025-03-28", "Unexpected construction and permit costs"]
+]);
+
 export const seedData = {
   asOfDate: "2026-04-09",
   participants: [
@@ -130,9 +206,10 @@ export const seedData = {
       debt: 750000,
       taxExpense: 28000,
       debtInterestRate: 0.1025,
-      totalInterestPaid: 68500,
+      totalInterestPaid: totalInterestPaidFor(villeDebtServiceEntries),
       earlyWithdrawalPenaltyRate: 0.3,
-      totalProjectCost: 1150000,
+      budgetedProjectCost: 1150000,
+      actualProjectCost: totalProjectCostFor(villeExpenseEntries),
       salePrice: 1650000,
       holdMonths: 18,
       prefRate: 0.08,
@@ -142,6 +219,8 @@ export const seedData = {
       investmentCloseOn: "2026-06-15",
       projectedExitOn: "2026-12-20",
       timelineProgress: 62,
+      expenseEntries: villeExpenseEntries,
+      debtServiceEntries: villeDebtServiceEntries,
       promoteTiers: buildPromoteTiers(),
       timeline: [
         {
@@ -179,9 +258,10 @@ export const seedData = {
       debt: 560000,
       taxExpense: 18000,
       debtInterestRate: 0.0975,
-      totalInterestPaid: 44200,
+      totalInterestPaid: totalInterestPaidFor(oakDebtServiceEntries),
       earlyWithdrawalPenaltyRate: 0.3,
-      totalProjectCost: 860000,
+      budgetedProjectCost: 860000,
+      actualProjectCost: totalProjectCostFor(oakExpenseEntries),
       salePrice: 1095000,
       holdMonths: 14,
       prefRate: 0.08,
@@ -191,6 +271,8 @@ export const seedData = {
       investmentCloseOn: "2026-04-30",
       projectedExitOn: "2026-06-30",
       timelineProgress: 88,
+      expenseEntries: oakExpenseEntries,
+      debtServiceEntries: oakDebtServiceEntries,
       promoteTiers: buildPromoteTiers(),
       timeline: [
         {
@@ -228,9 +310,10 @@ export const seedData = {
       debt: 430000,
       taxExpense: 22000,
       debtInterestRate: 0.09,
-      totalInterestPaid: 31800,
+      totalInterestPaid: totalInterestPaidFor(mapleDebtServiceEntries),
       earlyWithdrawalPenaltyRate: 0.3,
-      totalProjectCost: 680000,
+      budgetedProjectCost: 680000,
+      actualProjectCost: totalProjectCostFor(mapleExpenseEntries),
       salePrice: 920000,
       holdMonths: 13,
       prefRate: 0.08,
@@ -240,6 +323,8 @@ export const seedData = {
       investmentCloseOn: "2024-08-31",
       actualExitOn: "2025-04-15",
       timelineProgress: 100,
+      expenseEntries: mapleExpenseEntries,
+      debtServiceEntries: mapleDebtServiceEntries,
       promoteTiers: buildPromoteTiers(),
       timeline: [
         {

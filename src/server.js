@@ -549,6 +549,7 @@ const server = createServer(async (request, response) => {
         body.dealId,
         {
           salePrice: body.salePrice,
+          totalProjectCost: body.totalProjectCost,
           holdMonths: body.holdMonths,
           prefRate: body.prefRate,
           taxExpense: body.taxExpense

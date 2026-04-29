@@ -51,6 +51,22 @@ function normalizeOptionalDateInput(value, fieldLabel) {
   return normalized;
 }
 
+function normalizeMonthInput(value, fieldLabel) {
+  const normalized = String(value ?? "").trim();
+
+  if (!/^\d{4}-\d{2}$/.test(normalized)) {
+    throw new Error(`${fieldLabel} must use the YYYY-MM format.`);
+  }
+
+  const [year, month] = normalized.split("-").map((item) => Number(item));
+
+  if (!Number.isFinite(year) || !Number.isFinite(month) || month < 1 || month > 12) {
+    throw new Error(`${fieldLabel} must be a valid calendar month.`);
+  }
+
+  return normalized;
+}
+
 function isInvestmentWindowClosed(investmentCloseOn, asOfDate = todayStamp()) {
   const normalizedCloseDate = normalizeOptionalText(investmentCloseOn);
   return Boolean(normalizedCloseDate && normalizedCloseDate < asOfDate);
@@ -65,6 +81,16 @@ function normalizeConfigValue(value) {
 
 function roundNumber(value) {
   return Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+}
+
+function sumDebtServiceInterest(entries = []) {
+  return roundNumber(
+    entries.reduce((sum, entry) => sum + Number(entry?.interestPaid ?? 0), 0)
+  );
+}
+
+function sumDealExpenses(entries = []) {
+  return roundNumber(entries.reduce((sum, entry) => sum + Number(entry?.amountPaid ?? 0), 0));
 }
 
 function computeDistributionAmounts(election, totalPayout) {
@@ -644,7 +670,8 @@ async function insertSeedData(executor) {
           debt_interest_rate,
           total_interest_paid,
           early_withdrawal_penalty_rate,
-          total_project_cost,
+          budgeted_project_cost,
+          actual_project_cost,
           sale_price,
           hold_months,
           pref_rate,
@@ -680,7 +707,8 @@ async function insertSeedData(executor) {
           $19,
           $20,
           $21,
-          $22
+          $22,
+          $23
         )
       `,
       [
@@ -691,9 +719,10 @@ async function insertSeedData(executor) {
         deal.debt,
         deal.taxExpense ?? 0,
         deal.debtInterestRate ?? 0,
-        deal.totalInterestPaid ?? 0,
+        deal.totalInterestPaid ?? sumDebtServiceInterest(deal.debtServiceEntries),
         deal.earlyWithdrawalPenaltyRate ?? DEFAULT_EARLY_WITHDRAWAL_PENALTY_RATE,
-        deal.totalProjectCost,
+        deal.budgetedProjectCost ?? deal.totalProjectCost,
+        deal.actualProjectCost ?? deal.budgetedProjectCost ?? deal.totalProjectCost,
         deal.salePrice,
         deal.holdMonths,
         deal.prefRate,
@@ -762,6 +791,64 @@ async function insertSeedData(executor) {
           milestone.label,
           milestone.date,
           milestone.status,
+          index + 1,
+          timestamp,
+          timestamp
+        ]
+      );
+    }
+
+    for (const entry of deal.debtServiceEntries ?? []) {
+      await executor.query(
+        `
+          INSERT INTO deal_debt_service_entries (
+            id,
+            deal_id,
+            interest_month,
+            draw_balance,
+            interest_paid,
+            created_at,
+            updated_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `,
+        [
+          createId("debt-service"),
+          deal.id,
+          entry.serviceMonth,
+          entry.drawBalance ?? 0,
+          entry.interestPaid ?? 0,
+          timestamp,
+          timestamp
+        ]
+      );
+    }
+
+    for (const [index, entry] of (deal.expenseEntries ?? []).entries()) {
+      await executor.query(
+        `
+          INSERT INTO deal_expense_entries (
+            id,
+            deal_id,
+            stage_label,
+            payee_name,
+            amount_paid,
+            paid_on,
+            notes,
+            sort_order,
+            created_at,
+            updated_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        `,
+        [
+          createId("expense"),
+          deal.id,
+          entry.stageLabel,
+          entry.payeeName,
+          entry.amountPaid ?? 0,
+          entry.paidOn ?? null,
+          entry.notes ?? null,
           index + 1,
           timestamp,
           timestamp
@@ -1016,6 +1103,8 @@ export async function seedDatabase({ force = false } = {}) {
           distribution_elections,
           early_withdrawal_requests,
           positions,
+          deal_expense_entries,
+          deal_debt_service_entries,
           deal_timeline_items,
           promote_tiers,
           users,
@@ -1184,7 +1273,8 @@ export async function getAppDataSnapshot() {
         debt_interest_rate AS "debtInterestRate",
         total_interest_paid AS "totalInterestPaid",
         early_withdrawal_penalty_rate AS "earlyWithdrawalPenaltyRate",
-        total_project_cost AS "totalProjectCost",
+        budgeted_project_cost AS "budgetedProjectCost",
+        actual_project_cost AS "actualProjectCost",
         sale_price AS "salePrice",
         hold_months AS "holdMonths",
         pref_rate AS "prefRate",
@@ -1206,13 +1296,19 @@ export async function getAppDataSnapshot() {
     debtInterestRate: Number(row.debtInterestRate),
     totalInterestPaid: Number(row.totalInterestPaid),
     earlyWithdrawalPenaltyRate: Number(row.earlyWithdrawalPenaltyRate),
-    totalProjectCost: Number(row.totalProjectCost),
+    budgetedProjectCost: Number(row.budgetedProjectCost),
+    actualProjectCost:
+      row.actualProjectCost === null || row.actualProjectCost === undefined
+        ? null
+        : Number(row.actualProjectCost),
     salePrice: Number(row.salePrice),
     holdMonths: Number(row.holdMonths),
     prefRate: Number(row.prefRate),
     timelineProgress: Number(row.timelineProgress),
     promoteTiers: [],
-    timeline: []
+    timeline: [],
+    expenseEntries: [],
+    debtServiceEntries: []
   }));
 
   const dealMap = new Map(deals.map((deal) => [deal.id, deal]));
@@ -1259,6 +1355,48 @@ export async function getAppDataSnapshot() {
       date: row.date,
       status: row.status,
       sortOrder: Number(row.sortOrder)
+    });
+  }
+
+  for (const row of await queryAll(
+    `
+      SELECT
+        deal_id AS "dealId",
+        stage_label AS "stageLabel",
+        payee_name AS "payeeName",
+        amount_paid AS "amountPaid",
+        paid_on AS "paidOn",
+        notes,
+        sort_order AS "sortOrder"
+      FROM deal_expense_entries
+      ORDER BY deal_id, sort_order
+    `
+  )) {
+    dealMap.get(row.dealId)?.expenseEntries.push({
+      stageLabel: row.stageLabel,
+      payeeName: row.payeeName,
+      amountPaid: Number(row.amountPaid),
+      paidOn: row.paidOn,
+      notes: row.notes ?? "",
+      sortOrder: Number(row.sortOrder)
+    });
+  }
+
+  for (const row of await queryAll(
+    `
+      SELECT
+        deal_id AS "dealId",
+        interest_month AS "serviceMonth",
+        draw_balance AS "drawBalance",
+        interest_paid AS "interestPaid"
+      FROM deal_debt_service_entries
+      ORDER BY deal_id, interest_month
+    `
+  )) {
+    dealMap.get(row.dealId)?.debtServiceEntries.push({
+      serviceMonth: row.serviceMonth,
+      drawBalance: Number(row.drawBalance),
+      interestPaid: Number(row.interestPaid)
     });
   }
 
@@ -2826,11 +2964,25 @@ function normalizeDealInput(input) {
   const debt = Number(input.debt);
   const taxExpense = Number(input.taxExpense ?? 0);
   const debtInterestRate = Number(input.debtInterestRate ?? 0);
-  const totalInterestPaid = Number(input.totalInterestPaid ?? 0);
+  const expenseEntries = normalizeDealExpenseEntries(input.expenseEntries);
+  const debtServiceEntries = normalizeDealDebtServiceEntries(input.debtServiceEntries);
+  const totalInterestPaid =
+    debtServiceEntries === null
+      ? Number(input.totalInterestPaid ?? 0)
+      : sumDebtServiceInterest(debtServiceEntries);
   const earlyWithdrawalPenaltyRate = Number(
     input.earlyWithdrawalPenaltyRate ?? DEFAULT_EARLY_WITHDRAWAL_PENALTY_RATE
   );
-  const totalProjectCost = Number(input.totalProjectCost);
+  const budgetedProjectCost = Number(input.budgetedProjectCost ?? input.totalProjectCost);
+  const actualProjectCost =
+    expenseEntries === null
+      ? (() => {
+          const actualProjectCostRaw = normalizeOptionalText(
+            input.actualProjectCost ?? input.actual_project_cost
+          );
+          return actualProjectCostRaw === null ? null : Number(actualProjectCostRaw);
+        })()
+      : sumDealExpenses(expenseEntries);
   const salePrice = Number(input.salePrice);
   const holdMonths = Number(input.holdMonths);
   const prefRate = Number(input.prefRate);
@@ -2868,8 +3020,15 @@ function normalizeDealInput(input) {
     throw new Error("Early withdrawal penalty rate must be between 0 and 1.");
   }
 
-  if (!Number.isFinite(totalProjectCost) || totalProjectCost < 0) {
-    throw new Error("Total project cost must be zero or greater.");
+  if (!Number.isFinite(budgetedProjectCost) || budgetedProjectCost < 0) {
+    throw new Error("Budgeted project cost must be zero or greater.");
+  }
+
+  if (
+    actualProjectCost !== null &&
+    (!Number.isFinite(actualProjectCost) || actualProjectCost < 0)
+  ) {
+    throw new Error("Actual project cost must be zero or greater.");
   }
 
   if (!Number.isFinite(salePrice) || salePrice < 0) {
@@ -2900,9 +3059,12 @@ function normalizeDealInput(input) {
     debt: roundNumber(debt),
     taxExpense: roundNumber(taxExpense),
     debtInterestRate: roundNumber(debtInterestRate),
+    expenseEntries,
     totalInterestPaid: roundNumber(totalInterestPaid),
+    debtServiceEntries,
     earlyWithdrawalPenaltyRate: roundNumber(earlyWithdrawalPenaltyRate),
-    totalProjectCost: roundNumber(totalProjectCost),
+    budgetedProjectCost: roundNumber(budgetedProjectCost),
+    actualProjectCost: actualProjectCost === null ? null : roundNumber(actualProjectCost),
     salePrice: roundNumber(salePrice),
     holdMonths: Math.round(holdMonths),
     prefRate: roundNumber(prefRate),
@@ -3207,6 +3369,97 @@ function normalizeDistributionElectionInput(input) {
   };
 }
 
+function normalizeDealDebtServiceEntries(items) {
+  if (!Array.isArray(items)) {
+    return null;
+  }
+
+  const entries = items.reduce((rows, item, index) => {
+    const serviceMonthRaw = String(item?.serviceMonth ?? "").trim();
+    const drawBalanceRaw = String(item?.drawBalance ?? "").trim();
+    const interestPaidRaw = String(item?.interestPaid ?? "").trim();
+    const isBlank = !serviceMonthRaw && !drawBalanceRaw && !interestPaidRaw;
+
+    if (isBlank) {
+      return rows;
+    }
+
+    const serviceMonth = normalizeMonthInput(serviceMonthRaw, `Debt service month ${index + 1}`);
+    const drawBalance = Number(drawBalanceRaw);
+    const interestPaid = Number(interestPaidRaw);
+
+    if (!Number.isFinite(drawBalance) || drawBalance < 0) {
+      throw new Error(`Debt service month ${index + 1} must have a valid draw balance.`);
+    }
+
+    if (!Number.isFinite(interestPaid) || interestPaid < 0) {
+      throw new Error(`Debt service month ${index + 1} must have a valid interest paid amount.`);
+    }
+
+    rows.push({
+      serviceMonth,
+      drawBalance: roundNumber(drawBalance),
+      interestPaid: roundNumber(interestPaid)
+    });
+
+    return rows;
+  }, []);
+
+  const seenMonths = new Set();
+
+  for (const entry of entries) {
+    if (seenMonths.has(entry.serviceMonth)) {
+      throw new Error(`Debt service month ${entry.serviceMonth} was entered more than once.`);
+    }
+
+    seenMonths.add(entry.serviceMonth);
+  }
+
+  return entries.sort((left, right) => left.serviceMonth.localeCompare(right.serviceMonth));
+}
+
+function normalizeDealExpenseEntries(items) {
+  if (!Array.isArray(items)) {
+    return null;
+  }
+
+  return items.reduce((entries, item, index) => {
+    const stageLabel = String(item?.stageLabel ?? "").trim();
+    const payeeName = String(item?.payeeName ?? "").trim();
+    const amountPaidRaw = String(item?.amountPaid ?? "").trim();
+    const paidOnRaw = String(item?.paidOn ?? "").trim();
+    const notes = String(item?.notes ?? "").trim();
+    const isBlank = !stageLabel && !payeeName && !amountPaidRaw && !paidOnRaw && !notes;
+
+    if (isBlank) {
+      return entries;
+    }
+
+    const amountPaid = Number(amountPaidRaw);
+
+    if (!stageLabel || !payeeName || !amountPaidRaw) {
+      throw new Error(
+        `Expense row ${index + 1} must include a stage, payee, and amount paid.`
+      );
+    }
+
+    if (!Number.isFinite(amountPaid) || amountPaid < 0) {
+      throw new Error(`Expense row ${index + 1} must have a valid amount paid.`);
+    }
+
+    entries.push({
+      stageLabel,
+      payeeName,
+      amountPaid: roundNumber(amountPaid),
+      paidOn: paidOnRaw ? normalizeOptionalDateInput(paidOnRaw, `Expense date ${index + 1}`) : null,
+      notes,
+      sortOrder: entries.length + 1
+    });
+
+    return entries;
+  }, []);
+}
+
 function normalizeTimelineItems(items) {
   if (!Array.isArray(items)) {
     return null;
@@ -3337,6 +3590,88 @@ async function replaceDealTimeline(dealId, timelineItems, executor) {
   }
 }
 
+async function replaceDealDebtServiceEntries(dealId, entries, executor) {
+  const timestamp = nowTimestamp();
+
+  await executor.query(
+    `
+      DELETE FROM deal_debt_service_entries
+      WHERE deal_id = $1
+    `,
+    [dealId]
+  );
+
+  for (const entry of entries) {
+    await executor.query(
+      `
+        INSERT INTO deal_debt_service_entries (
+          id,
+          deal_id,
+          interest_month,
+          draw_balance,
+          interest_paid,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `,
+      [
+        createId("debt-service"),
+        dealId,
+        entry.serviceMonth,
+        entry.drawBalance,
+        entry.interestPaid,
+        timestamp,
+        timestamp
+      ]
+    );
+  }
+}
+
+async function replaceDealExpenseEntries(dealId, entries, executor) {
+  const timestamp = nowTimestamp();
+
+  await executor.query(
+    `
+      DELETE FROM deal_expense_entries
+      WHERE deal_id = $1
+    `,
+    [dealId]
+  );
+
+  for (const entry of entries) {
+    await executor.query(
+      `
+        INSERT INTO deal_expense_entries (
+          id,
+          deal_id,
+          stage_label,
+          payee_name,
+          amount_paid,
+          paid_on,
+          notes,
+          sort_order,
+          created_at,
+          updated_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `,
+      [
+        createId("expense"),
+        dealId,
+        entry.stageLabel,
+        entry.payeeName,
+        entry.amountPaid,
+        entry.paidOn,
+        entry.notes || null,
+        entry.sortOrder,
+        timestamp,
+        timestamp
+      ]
+    );
+  }
+}
+
 async function replacePromoteTiers(dealId, tiers, executor) {
   const timestamp = nowTimestamp();
 
@@ -3383,6 +3718,8 @@ async function replacePromoteTiers(dealId, tiers, executor) {
 
 export async function createDeal(input) {
   const deal = normalizeDealInput(input);
+  const expenseEntries = deal.expenseEntries;
+  const debtServiceEntries = deal.debtServiceEntries;
   const timelineItems = normalizeTimelineItems(input.timeline);
   const promoteTiers = normalizePromoteTiers(input.promoteTiers);
   const existingDeal = await queryOne(
@@ -3414,17 +3751,18 @@ export async function createDeal(input) {
           debt_interest_rate,
           total_interest_paid,
           early_withdrawal_penalty_rate,
-          total_project_cost,
+          budgeted_project_cost,
+          actual_project_cost,
           sale_price,
           hold_months,
           pref_rate,
-        status,
-        current_phase,
-        funded_on,
-        investment_close_on,
-        projected_exit_on,
-        actual_exit_on,
-        timeline_progress,
+          status,
+          current_phase,
+          funded_on,
+          investment_close_on,
+          projected_exit_on,
+          actual_exit_on,
+          timeline_progress,
           created_at,
           updated_at
         )
@@ -3450,7 +3788,8 @@ export async function createDeal(input) {
           $19,
           $20,
           $21,
-          $22
+          $22,
+          $23
         )
       `,
       [
@@ -3463,7 +3802,8 @@ export async function createDeal(input) {
         deal.debtInterestRate,
         deal.totalInterestPaid,
         deal.earlyWithdrawalPenaltyRate,
-        deal.totalProjectCost,
+        deal.budgetedProjectCost,
+        deal.actualProjectCost,
         deal.salePrice,
         deal.holdMonths,
         deal.prefRate,
@@ -3481,6 +3821,14 @@ export async function createDeal(input) {
 
     if (timelineItems) {
       await replaceDealTimeline(dealId, timelineItems, client);
+    }
+
+    if (expenseEntries !== null) {
+      await replaceDealExpenseEntries(dealId, expenseEntries, client);
+    }
+
+    if (debtServiceEntries !== null) {
+      await replaceDealDebtServiceEntries(dealId, debtServiceEntries, client);
     }
 
     if (promoteTiers) {
@@ -3564,6 +3912,8 @@ export async function updateDeal(dealId, input) {
   }
 
   const deal = normalizeDealInput(input);
+  const expenseEntries = deal.expenseEntries;
+  const debtServiceEntries = deal.debtServiceEntries;
   const timelineItems = normalizeTimelineItems(input.timeline);
   const promoteTiers = normalizePromoteTiers(input.promoteTiers);
   const duplicateDeal = await queryOne(
@@ -3592,19 +3942,20 @@ export async function updateDeal(dealId, input) {
           debt_interest_rate = $5,
           total_interest_paid = $6,
           early_withdrawal_penalty_rate = $7,
-          total_project_cost = $8,
-          sale_price = $9,
-          hold_months = $10,
-          pref_rate = $11,
-          status = $12,
-          current_phase = $13,
-          funded_on = $14,
-          investment_close_on = $15,
-          projected_exit_on = $16,
-          actual_exit_on = $17,
-          timeline_progress = $18,
-          updated_at = $19
-        WHERE id = $20
+          budgeted_project_cost = $8,
+          actual_project_cost = $9,
+          sale_price = $10,
+          hold_months = $11,
+          pref_rate = $12,
+          status = $13,
+          current_phase = $14,
+          funded_on = $15,
+          investment_close_on = $16,
+          projected_exit_on = $17,
+          actual_exit_on = $18,
+          timeline_progress = $19,
+          updated_at = $20
+        WHERE id = $21
       `,
       [
         deal.name,
@@ -3614,7 +3965,8 @@ export async function updateDeal(dealId, input) {
         deal.debtInterestRate,
         deal.totalInterestPaid,
         deal.earlyWithdrawalPenaltyRate,
-        deal.totalProjectCost,
+        deal.budgetedProjectCost,
+        deal.actualProjectCost,
         deal.salePrice,
         deal.holdMonths,
         deal.prefRate,
@@ -3632,6 +3984,14 @@ export async function updateDeal(dealId, input) {
 
     if (timelineItems) {
       await replaceDealTimeline(id, timelineItems, client);
+    }
+
+    if (expenseEntries !== null) {
+      await replaceDealExpenseEntries(id, expenseEntries, client);
+    }
+
+    if (debtServiceEntries !== null) {
+      await replaceDealDebtServiceEntries(id, debtServiceEntries, client);
     }
 
     if (promoteTiers) {
@@ -3860,6 +4220,26 @@ async function buildDealArchivePayload(dealId, executor = pool) {
     [dealId],
     executor
   );
+  const expenseEntries = await queryAll(
+    `
+      SELECT *
+      FROM deal_expense_entries
+      WHERE deal_id = $1
+      ORDER BY sort_order, id
+    `,
+    [dealId],
+    executor
+  );
+  const debtServiceEntries = await queryAll(
+    `
+      SELECT *
+      FROM deal_debt_service_entries
+      WHERE deal_id = $1
+      ORDER BY interest_month, id
+    `,
+    [dealId],
+    executor
+  );
   const positions = await queryAll(
     `
       SELECT
@@ -3968,6 +4348,8 @@ async function buildDealArchivePayload(dealId, executor = pool) {
     deal,
     promoteTiers,
     timelineItems,
+    expenseEntries,
+    debtServiceEntries,
     positions,
     contractorParticipation,
     distributionElections,
@@ -3977,6 +4359,7 @@ async function buildDealArchivePayload(dealId, executor = pool) {
     counts: {
       promoteTiers: promoteTiers.length,
       timelineItems: timelineItems.length,
+      expenseEntries: expenseEntries.length,
       positions: positions.length,
       contractorParticipation: contractorParticipation.length,
       distributionElections: distributionElections.length,

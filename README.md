@@ -74,7 +74,7 @@ These accounts exist only after running `npm run seed`.
   - add deal allocations / Class C participation
   - create pooled capital groups, record member commitments, fund the weighted vote winner into one project-facing pooled position, and review pooled-member sold-project payout or reinvestment elections
   - increase an existing participant position before the project investment close date
-  - update project records and save changes to the database
+  - update project records with a budgeted cost target, staged expense ledger, and monthly loan-interest tracking
   - define an investment close date for each project so new allocations stop after the window closes
   - define an early withdrawal penalty rate for each project
   - send a new-project announcement email to active investor portal users when a project is created
@@ -91,7 +91,9 @@ These accounts exist only after running `npm run seed`.
 
 - `participants`: investors, contractors, sponsor entities
 - `users`: login credentials, email, first-login password reset state
-- `deals`: project-level financial and status fields
+- `deals`: project-level financial, budget, and status fields
+- `deal_expense_entries`: staged contractor or development payments that roll up into each deal's total project cost
+- `deal_debt_service_entries`: monthly draw-balance and interest-paid rows that roll up into each deal's financing cost
 - `investor_pools`: pooled-capital groups that collect smaller investor commitments and eventually map to one shared project-facing position
 - `investor_pool_commitments`: per-member pooled commitments that determine ownership weight, voting power, and payout splits
 - `investor_pool_votes`: weighted project-selection ballots cast by pooled members before the pooled vehicle is funded

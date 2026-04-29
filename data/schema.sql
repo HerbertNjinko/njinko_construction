@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS deals (
   debt_interest_rate REAL NOT NULL DEFAULT 0,
   total_interest_paid REAL NOT NULL DEFAULT 0,
   early_withdrawal_penalty_rate REAL NOT NULL DEFAULT 0.30,
-  total_project_cost REAL NOT NULL DEFAULT 0,
+  budgeted_project_cost REAL NOT NULL DEFAULT 0,
+  actual_project_cost REAL,
   sale_price REAL NOT NULL DEFAULT 0,
   hold_months INTEGER NOT NULL DEFAULT 0,
   pref_rate REAL NOT NULL DEFAULT 0,
@@ -97,6 +98,33 @@ CREATE TABLE IF NOT EXISTS deal_timeline_items (
   label TEXT NOT NULL,
   milestone_date TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('complete', 'in_progress', 'upcoming')),
+  sort_order INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (deal_id) REFERENCES deals(id) ON DELETE CASCADE,
+  UNIQUE (deal_id, sort_order)
+);
+
+CREATE TABLE IF NOT EXISTS deal_debt_service_entries (
+  id TEXT PRIMARY KEY,
+  deal_id TEXT NOT NULL,
+  interest_month TEXT NOT NULL CHECK (interest_month ~ '^\d{4}-\d{2}$'),
+  draw_balance REAL NOT NULL DEFAULT 0 CHECK (draw_balance >= 0),
+  interest_paid REAL NOT NULL DEFAULT 0 CHECK (interest_paid >= 0),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (deal_id) REFERENCES deals(id) ON DELETE CASCADE,
+  UNIQUE (deal_id, interest_month)
+);
+
+CREATE TABLE IF NOT EXISTS deal_expense_entries (
+  id TEXT PRIMARY KEY,
+  deal_id TEXT NOT NULL,
+  stage_label TEXT NOT NULL,
+  payee_name TEXT NOT NULL,
+  amount_paid REAL NOT NULL DEFAULT 0 CHECK (amount_paid >= 0),
+  paid_on TEXT,
+  notes TEXT,
   sort_order INTEGER NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -340,6 +368,12 @@ CREATE INDEX IF NOT EXISTS idx_distribution_elections_deal_id
   ON distribution_elections(deal_id, participant_id);
 CREATE INDEX IF NOT EXISTS idx_early_withdrawal_requests_deal_id
   ON early_withdrawal_requests(deal_id, participant_id, request_status);
+
+CREATE INDEX IF NOT EXISTS idx_deal_debt_service_entries_deal_id
+  ON deal_debt_service_entries(deal_id, interest_month);
+
+CREATE INDEX IF NOT EXISTS idx_deal_expense_entries_deal_id
+  ON deal_expense_entries(deal_id, sort_order);
 CREATE INDEX IF NOT EXISTS idx_contractor_deal_id ON contractor_participation(deal_id);
 CREATE INDEX IF NOT EXISTS idx_timeline_deal_id ON deal_timeline_items(deal_id);
 CREATE INDEX IF NOT EXISTS idx_promote_tiers_deal_id ON promote_tiers(deal_id);
