@@ -12,11 +12,11 @@ import {
   createInitialUserFilters,
   sessionRuntime,
   state
-} from "./state.js?v=20260429-frontend-4";
+} from "./state.js?v=20260430-frontend-10";
 import {
   clearAuthFeedback,
   clearMessages
-} from "./helpers.js?v=20260429-frontend-4";
+} from "./helpers.js?v=20260430-frontend-10";
 import {
   applyAllocationFilters,
   getAllocationFilterOptions,
@@ -26,8 +26,8 @@ import {
   getInvestorIssueFilterOptions,
   getInvestorProjectFilterOptions,
   getUserFilterOptions
-} from "./data.js?v=20260429-frontend-4";
-import { render } from "./renderers.js?v=20260430-frontend-9";
+} from "./data.js?v=20260430-frontend-10";
+import { render } from "./renderers.js?v=20260430-frontend-10";
 
 export async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -144,6 +144,14 @@ export function startSessionTimers() {
 
     void pingSession();
   }, SESSION_HEARTBEAT_INTERVAL_MS);
+}
+
+function canLoadDashboard(session) {
+  if (!session || session.mustChangePassword) {
+    return false;
+  }
+
+  return session.role === "manager" || (session.accountApprovalStatus ?? "approved") === "approved";
 }
 
 export function applyLoggedOutState(notice = "") {
@@ -367,7 +375,7 @@ export async function loadSession() {
     const session = await api("/api/session", { method: "GET" });
     state.session = session.user;
 
-    if (state.session && !state.session.mustChangePassword) {
+    if (canLoadDashboard(state.session)) {
       clearAuthFeedback();
       startSessionTimers();
       await refreshDashboard();

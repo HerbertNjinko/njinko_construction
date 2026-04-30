@@ -25,11 +25,14 @@ import {
   getCompanyResourceDownload,
   getUserByEmail,
   getUserById,
+  getUserIdentityDocumentDownload,
   markUserLogin,
   requestPasswordReset,
   reviewEarlyWithdrawalRequest,
+  reviewUserIdentity,
   resetPasswordWithToken,
   setUserAccountActive,
+  submitIdentityReview,
   updateUserCategory,
   upsertInvestorPoolCommitment,
   upsertEarlyWithdrawalRequest,
@@ -400,6 +403,15 @@ function buildAttachmentDisposition(fileName) {
   return `attachment; filename="${safeFileName}"`;
 }
 
+function buildInlineDisposition(fileName) {
+  const safeFileName = String(fileName ?? "document")
+    .replace(/[\\/\r\n"]/g, "")
+    .replace(/[^\x20-\x7E]/g, "_")
+    .trim() || "document";
+
+  return `inline; filename="${safeFileName}"`;
+}
+
 function sanitizeContentType(contentType) {
   const normalized = String(contentType ?? "").replace(/[\r\n]/g, "").trim();
 
@@ -581,6 +593,14 @@ async function requireUnlockedUser(request, response) {
     return null;
   }
 
+  if (user.role !== "manager" && user.accountApprovalStatus !== "approved") {
+    sendJson(response, 403, {
+      error: "Account approval is required before continuing.",
+      code: "ACCOUNT_APPROVAL_REQUIRED"
+    });
+    return null;
+  }
+
   return user;
 }
 
@@ -591,7 +611,10 @@ function stripUserSecrets(user) {
     email: user.email,
     role: user.role,
     category: user.category,
-    mustChangePassword: Boolean(user.mustChangePassword)
+    mustChangePassword: Boolean(user.mustChangePassword),
+    accountApprovalStatus: user.accountApprovalStatus ?? "approved",
+    accountRejectionComment: user.accountRejectionComment ?? "",
+    onboardingSubmittedAt: user.onboardingSubmittedAt ?? null
   };
 }
 
@@ -605,6 +628,12 @@ const server = createServer(async (request, response) => {
     const issueVoteMatch = url.pathname.match(/^\/api\/issues\/([^/]+)\/vote$/);
     const userStatusMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)\/status$/);
     const userCategoryMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)\/category$/);
+    const userIdentityReviewMatch = url.pathname.match(
+      /^\/api\/admin\/users\/([^/]+)\/identity-review$/
+    );
+    const userIdentityDocumentMatch = url.pathname.match(
+      /^\/api\/admin\/users\/([^/]+)\/id-card$/
+    );
     const userDeleteMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)$/);
     const resourceDeleteMatch = url.pathname.match(/^\/api\/admin\/resources\/([^/]+)$/);
     const resourceDownloadMatch = url.pathname.match(/^\/api\/resources\/([^/]+)\/download$/);
@@ -696,6 +725,15 @@ const server = createServer(async (request, response) => {
 
       if (!user || !verifyPassword(user, body.password)) {
         sendJson(response, 401, { error: "Invalid credentials." });
+        return;
+      }
+
+      if (user.role !== "manager" && user.accountApprovalStatus === "pending_review") {
+        sendJson(response, 403, {
+          error:
+            "Your account information is waiting for manager approval. You will receive an email after review.",
+          code: "ACCOUNT_PENDING_REVIEW"
+        });
         return;
       }
 
@@ -895,6 +933,30 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    if (method === "POST" && url.pathname === "/api/profile/identity-review") {
+      const user = await requireUser(request, response);
+
+      if (!user) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const updatedUser = await submitIdentityReview(user.id, body);
+        sendJson(response, 200, { user: stripUserSecrets(updatedUser) });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
     if (method === "PATCH" && url.pathname === "/api/profile") {
       const user = await requireUnlockedUser(request, response);
 
@@ -1008,6 +1070,68 @@ const server = createServer(async (request, response) => {
         sendJson(response, 201, {
           user: stripUserSecrets(createdUser.user),
           notification: createdUser.notification
+        });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "GET" && userIdentityDocumentMatch) {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      try {
+        const document = await getUserIdentityDocumentDownload(
+          decodeURIComponent(userIdentityDocumentMatch[1])
+        );
+        const decoded = decodeDataUrl(document.fileDataUrl);
+        const disposition =
+          url.searchParams.get("view") === "1"
+            ? buildInlineDisposition(document.fileName)
+            : buildAttachmentDisposition(document.fileName);
+
+        response.writeHead(200, {
+          "Content-Type": sanitizeContentType(document.fileMimeType || decoded.mimeType),
+          "Content-Disposition": disposition,
+          "Cache-Control": "private, max-age=0, must-revalidate",
+          ...getSecurityHeaders()
+        });
+        response.end(decoded.buffer);
+      } catch (error) {
+        sendJson(response, 404, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "POST" && userIdentityReviewMatch) {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const result = await reviewUserIdentity(
+          decodeURIComponent(userIdentityReviewMatch[1]),
+          body,
+          manager.id
+        );
+        sendJson(response, 200, {
+          user: stripUserSecrets(result.user),
+          notification: result.notification
         });
       } catch (error) {
         sendJson(response, 400, { error: error.message });

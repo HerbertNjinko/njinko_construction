@@ -5,7 +5,7 @@ import {
   LOGIN_PAGE_TITLE,
   app,
   state
-} from "./state.js?v=20260429-frontend-4";
+} from "./state.js?v=20260430-frontend-10";
 import {
   breakdownItem,
   escapeHtml,
@@ -21,7 +21,7 @@ import {
   renderSectionToggle,
   summaryItem,
   titleCase
-} from "./helpers.js?v=20260429-frontend-4";
+} from "./helpers.js?v=20260430-frontend-10";
 import {
   applyAllocationFilters,
   applyContractorFilters,
@@ -42,7 +42,7 @@ import {
   getInvestorProjectFilterOptions,
   getManagerEditableDeal,
   getUserFilterOptions
-} from "./data.js?v=20260429-frontend-4";
+} from "./data.js?v=20260430-frontend-10";
 
 function renderLogin() {
   const errorMarkup = state.loginError
@@ -180,6 +180,29 @@ function clampTimelineProgress(value) {
   return Number.isFinite(parsed) ? Math.max(0, Math.min(100, parsed)) : 0;
 }
 
+function getAccountApprovalStatus(sessionOrUser) {
+  return sessionOrUser?.accountApprovalStatus ?? "approved";
+}
+
+function requiresIdentityGate(session) {
+  return (
+    session &&
+    session.role !== "manager" &&
+    getAccountApprovalStatus(session) !== "approved"
+  );
+}
+
+function accountApprovalStatusLabel(status) {
+  const labels = {
+    profile_required: "Profile required",
+    pending_review: "Pending manager review",
+    approved: "Approved",
+    rejected: "Needs more information"
+  };
+
+  return labels[status] ?? titleCase(status || "approved");
+}
+
 function renderPasswordResetGate() {
   return `
     <div class="shell">
@@ -214,6 +237,98 @@ function renderPasswordResetGate() {
             </label>
           </div>
           <button class="button-primary" type="submit">Update password</button>
+        </form>
+      </section>
+    </div>
+  `;
+}
+
+function renderIdentityReviewGate() {
+  const status = getAccountApprovalStatus(state.session);
+
+  if (status === "pending_review") {
+    return `
+      <div class="shell">
+        <section class="panel password-gate">
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Manager Review Pending</p>
+              <h2>${escapeHtml(state.session.name)}</h2>
+              <p class="section-copy">
+                Your identity information has been submitted. You will receive an email after the manager reviews your account.
+              </p>
+            </div>
+            <div class="button-row">
+              <span class="read-only-tag">${escapeHtml(state.session.email)}</span>
+              <button class="button-secondary" id="logout-button" type="button">Log out</button>
+            </div>
+          </div>
+          ${renderMessage(state.messages.identity)}
+        </section>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="shell">
+      <section class="panel password-gate">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Identity Review Required</p>
+            <h2>${escapeHtml(state.session.name)}</h2>
+            <p class="section-copy">
+              Complete these details so the manager can review and approve your portal access.
+            </p>
+          </div>
+          <div class="button-row">
+            <span class="read-only-tag">${escapeHtml(state.session.email)}</span>
+            <button class="button-secondary" id="logout-button" type="button">Log out</button>
+          </div>
+        </div>
+        ${
+          status === "rejected" && state.session.accountRejectionComment
+            ? `<div class="status-message status-error">${escapeHtml(
+                state.session.accountRejectionComment
+              )}</div>`
+            : ""
+        }
+        ${renderMessage(state.messages.identity)}
+        <form id="identity-review-form">
+          <div class="form-grid-2">
+            <label>
+              Contact
+              <input type="text" name="contactPhone" placeholder="Phone or best contact number" required />
+            </label>
+            <label>
+              Driver's license number
+              <input type="text" name="driverLicenseNumber" required />
+            </label>
+          </div>
+          <div class="form-grid-2">
+            <label>
+              ID issue date
+              <input type="date" name="idDocumentIssueDate" required />
+            </label>
+            <label>
+              ID expiration date
+              <input type="date" name="idDocumentExpirationDate" required />
+            </label>
+          </div>
+          <div class="form-grid-2">
+            <label>
+              Current address
+              <textarea name="currentAddress" rows="3" required></textarea>
+            </label>
+            <label>
+              Mailing address
+              <textarea name="mailingAddress" rows="3" required></textarea>
+            </label>
+          </div>
+          <label>
+            Driver's license or ID card
+            <input type="file" name="idCard" accept="image/*,.pdf" required />
+          </label>
+          <button class="button-primary" type="submit">Submit for review</button>
         </form>
       </section>
     </div>
@@ -2829,21 +2944,12 @@ function renderCreateUserPanel() {
     sectionId: "admin-create-user",
     title: "Add Platform User",
     copy:
-      "Creates the user profile, login, first-login password reset requirement, and credential notification.",
+      "Creates the login with a temporary password. The user completes identity details after first login.",
     message: renderMessage(state.messages.user),
     panelClass: "admin-card",
     body: `
       <p class="eyebrow">Manager Control</p>
       <form id="user-form">
-        <label>
-          Category
-          <select name="category" required>
-            <option value="investor">Investor</option>
-            <option value="pool_member">Pooled member</option>
-            <option value="contractor">Contractor participant</option>
-            <option value="manager">Manager</option>
-          </select>
-        </label>
         <div class="form-grid-3">
           <label>
             First name
@@ -2864,34 +2970,10 @@ function renderCreateUserPanel() {
             <input type="email" name="email" placeholder="jane@example.com" required />
           </label>
           <label>
-            Contact
-            <input type="text" name="contactPhone" placeholder="Best phone number" />
-          </label>
-        </div>
-        <div class="form-grid-2">
-          <label>
-            Driver's license number
-            <input type="text" name="driverLicenseNumber" placeholder="D1234567" />
-          </label>
-          <label>
             Temporary password
             <input type="password" name="password" minlength="8" required />
           </label>
         </div>
-        <div class="form-grid-2">
-          <label>
-            Current address
-            <textarea name="currentAddress" rows="3" placeholder="Current address"></textarea>
-          </label>
-          <label>
-            Mailing address
-            <textarea name="mailingAddress" rows="3" placeholder="Mailing address"></textarea>
-          </label>
-        </div>
-        <label>
-          Attach ID card
-          <input type="file" name="idCard" accept="image/*,.pdf" />
-        </label>
         <button class="button-primary" type="submit">Create user</button>
       </form>
     `
@@ -4091,6 +4173,58 @@ function renderDealEditorPanel() {
   });
 }
 
+function renderIdentityReviewActions(row) {
+  const documentLinks = row.idCardFileName
+    ? `
+        <a
+          class="button-secondary button-inline"
+          href="/api/admin/users/${encodeURIComponent(row.id)}/id-card?view=1"
+          target="_blank"
+          rel="noopener"
+        >
+          View ID
+        </a>
+        <a
+          class="button-secondary button-inline"
+          href="/api/admin/users/${encodeURIComponent(row.id)}/id-card"
+          download="${escapeHtml(row.idCardFileName)}"
+        >
+          Download ID
+        </a>
+      `
+    : "";
+
+  if (row.accountApprovalStatus !== "pending_review") {
+    return documentLinks;
+  }
+
+  return `
+    ${documentLinks}
+    <textarea
+      name="identityReviewComment"
+      rows="2"
+      placeholder="Reason if rejecting"
+      aria-label="Identity rejection comment for ${escapeHtml(row.name)}"
+    ></textarea>
+    <button
+      class="button-primary button-inline"
+      type="button"
+      data-user-action="approve-identity"
+      data-user-id="${escapeHtml(row.id)}"
+    >
+      Approve
+    </button>
+    <button
+      class="button-danger button-inline"
+      type="button"
+      data-user-action="reject-identity"
+      data-user-id="${escapeHtml(row.id)}"
+    >
+      Reject
+    </button>
+  `;
+}
+
 function renderUserDirectory() {
   const rows = state.dashboard.admin.users;
   const filteredRows = applyUserFilters(rows);
@@ -4154,6 +4288,10 @@ function renderUserDirectory() {
               <option value="">All statuses</option>
               <option value="active" ${state.userFilters.status === "active" ? "selected" : ""}>Active</option>
               <option value="disabled" ${state.userFilters.status === "disabled" ? "selected" : ""}>Disabled</option>
+              <option value="profile_required" ${state.userFilters.status === "profile_required" ? "selected" : ""}>Profile required</option>
+              <option value="pending_review" ${state.userFilters.status === "pending_review" ? "selected" : ""}>Pending review</option>
+              <option value="rejected" ${state.userFilters.status === "rejected" ? "selected" : ""}>Needs more information</option>
+              <option value="approved" ${state.userFilters.status === "approved" ? "selected" : ""}>Approved</option>
             </select>
           </label>
         </div>
@@ -4177,10 +4315,12 @@ function renderUserDirectory() {
               <th>Contact</th>
               <th>Role</th>
               <th>Status</th>
+              <th>Approval</th>
               <th>Last login</th>
               <th>Password reset</th>
               <th>ID card</th>
-              <th>Credential notice</th>
+              <th>ID dates</th>
+              <th>Latest notice</th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -4220,16 +4360,30 @@ function renderUserDirectory() {
                     <td>${escapeHtml(row.contactPhone || "—")}</td>
                     <td>${escapeHtml(titleCase(row.role))}</td>
                     <td>${escapeHtml(row.isActive ? "Active" : "Disabled")}</td>
+                    <td>
+                      ${escapeHtml(accountApprovalStatusLabel(row.accountApprovalStatus))}
+                      ${
+                        row.accountRejectionComment
+                          ? `<p class="table-note">${escapeHtml(row.accountRejectionComment)}</p>`
+                          : ""
+                      }
+                    </td>
                     <td>${escapeHtml(formatDateTime(row.lastLoginAt))}</td>
                     <td>${escapeHtml(row.mustChangePassword ? "Required" : "Completed")}</td>
                     <td>${escapeHtml(row.idCardFileName || "—")}</td>
+                    <td>${escapeHtml(
+                      row.idDocumentIssueDate && row.idDocumentExpirationDate
+                        ? `${formatDate(row.idDocumentIssueDate)} to ${formatDate(row.idDocumentExpirationDate)}`
+                        : "—"
+                    )}</td>
                     <td>${escapeHtml(
                       row.notificationStatus
                         ? `${titleCase(row.notificationStatus)}${row.notificationProvider ? ` · ${titleCase(row.notificationProvider)}` : ""}`
                         : "—"
                     )}</td>
                     <td>
-                      <div class="table-actions">
+                      <div class="table-actions identity-review-actions">
+                        ${renderIdentityReviewActions(row)}
                         <button
                           class="button-secondary button-inline"
                           type="button"
@@ -4994,6 +5148,11 @@ export function render() {
 
   if (state.session.mustChangePassword) {
     app.innerHTML = renderPasswordResetGate();
+    return;
+  }
+
+  if (requiresIdentityGate(state.session)) {
+    app.innerHTML = renderIdentityReviewGate();
     return;
   }
 

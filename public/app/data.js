@@ -1,5 +1,5 @@
-import { state } from "./state.js?v=20260429-frontend-4";
-import { roundMoney } from "./helpers.js?v=20260429-frontend-4";
+import { state } from "./state.js?v=20260430-frontend-10";
+import { roundMoney } from "./helpers.js?v=20260430-frontend-10";
 
 export function getCreateDealDefaults() {
   const investmentCloseOn = new Date();
@@ -116,8 +116,9 @@ export function applyUserFilters(rows) {
 
     if (state.userFilters.status) {
       const rowStatus = row.isActive ? "active" : "disabled";
+      const approvalStatus = row.accountApprovalStatus ?? "approved";
 
-      if (rowStatus !== state.userFilters.status) {
+      if (rowStatus !== state.userFilters.status && approvalStatus !== state.userFilters.status) {
         return false;
       }
     }

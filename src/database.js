@@ -4,6 +4,8 @@ import { buildPoolDistributionContexts, calculateWaterfall } from "./calculation
 import { seedData } from "./data.js";
 import { assertDatabaseReady } from "./migrations.js";
 import {
+  sendAccountApprovedNotification,
+  sendAccountRejectedNotification,
   sendCredentialNotification,
   sendDistributionElectionApprovedNotification,
   sendDistributionElectionAlertNotification,
@@ -43,6 +45,12 @@ const ALLOWED_RESOURCE_MIME_TYPES = new Set([
   "image/webp",
   "text/csv",
   "text/plain"
+]);
+const ACCOUNT_APPROVAL_STATUSES = new Set([
+  "profile_required",
+  "pending_review",
+  "approved",
+  "rejected"
 ]);
 
 function readPositiveIntegerEnv(name, fallback) {
@@ -86,6 +94,54 @@ function normalizeOptionalDateInput(value, fieldLabel) {
   }
 
   return normalized;
+}
+
+function normalizeRequiredTextInput(value, fieldLabel, { minLength = 1 } = {}) {
+  const normalized = normalizeOptionalText(value);
+
+  if (!normalized || normalized.length < minLength) {
+    throw new Error(`${fieldLabel} is required.`);
+  }
+
+  return normalized;
+}
+
+function normalizeRequiredDateInput(value, fieldLabel) {
+  const normalized = normalizeOptionalDateInput(value, fieldLabel);
+
+  if (!normalized) {
+    throw new Error(`${fieldLabel} is required.`);
+  }
+
+  const [year, month, day] = normalized.split("-").map((item) => Number(item));
+  const parsedDate = new Date(Date.UTC(year, month - 1, day));
+
+  if (
+    Number.isNaN(parsedDate.getTime()) ||
+    parsedDate.getUTCFullYear() !== year ||
+    parsedDate.getUTCMonth() !== month - 1 ||
+    parsedDate.getUTCDate() !== day
+  ) {
+    throw new Error(`${fieldLabel} must be a valid calendar date.`);
+  }
+
+  return normalized;
+}
+
+function assertValidIdentityDocumentDates(issueDate, expirationDate) {
+  const today = todayStamp();
+
+  if (issueDate > today) {
+    throw new Error("ID issue date cannot be in the future.");
+  }
+
+  if (expirationDate <= issueDate) {
+    throw new Error("ID expiration date must be after the issue date.");
+  }
+
+  if (expirationDate < today) {
+    throw new Error("ID document is expired.");
+  }
 }
 
 function normalizeMonthInput(value, fieldLabel) {
@@ -601,6 +657,54 @@ function normalizePersonInput(input) {
   };
 }
 
+function normalizeAccountApprovalStatus(value, fallback = "approved") {
+  const normalized = String(value ?? "").trim();
+  return ACCOUNT_APPROVAL_STATUSES.has(normalized) ? normalized : fallback;
+}
+
+function getInitialAccountApprovalStatus(category, explicitStatus = null) {
+  if (explicitStatus) {
+    return normalizeAccountApprovalStatus(explicitStatus, "profile_required");
+  }
+
+  return category === "manager" ? "approved" : "profile_required";
+}
+
+function normalizeIdentityReviewInput(input, { hasExistingIdCard = false } = {}) {
+  const contactPhone = normalizeRequiredTextInput(input?.contactPhone ?? input?.contact, "Contact");
+  const driverLicenseNumber = normalizeRequiredTextInput(
+    input?.driverLicenseNumber,
+    "Driver's license number"
+  );
+  const currentAddress = normalizeRequiredTextInput(input?.currentAddress, "Current address");
+  const mailingAddress = normalizeRequiredTextInput(input?.mailingAddress, "Mailing address");
+  const idDocumentIssueDate = normalizeRequiredDateInput(
+    input?.idDocumentIssueDate,
+    "ID issue date"
+  );
+  const idDocumentExpirationDate = normalizeRequiredDateInput(
+    input?.idDocumentExpirationDate,
+    "ID expiration date"
+  );
+  const idCardFile = normalizeIdCardFile(input?.idCardFile);
+
+  assertValidIdentityDocumentDates(idDocumentIssueDate, idDocumentExpirationDate);
+
+  if (!idCardFile && !hasExistingIdCard) {
+    throw new Error("A copy of the driver's license or ID card is required.");
+  }
+
+  return {
+    contactPhone,
+    driverLicenseNumber,
+    currentAddress,
+    mailingAddress,
+    idDocumentIssueDate,
+    idDocumentExpirationDate,
+    idCardFile
+  };
+}
+
 function validateUserProfileForCreation(profile, category) {
   if (!["investor", "contractor", "manager", "pool_member"].includes(category)) {
     throw new Error("User category must be investor, contractor, manager, or pool member.");
@@ -636,6 +740,8 @@ function mapParticipantRow(row) {
     driverLicenseNumber: row.driverLicenseNumber ?? "",
     idCardFileName: row.idCardFileName ?? "",
     hasIdCard: Boolean(row.hasIdCard ?? row.idCardFileName),
+    idDocumentIssueDate: row.idDocumentIssueDate ?? "",
+    idDocumentExpirationDate: row.idDocumentExpirationDate ?? "",
     currentAddress: row.currentAddress ?? "",
     mailingAddress: row.mailingAddress ?? "",
     contactPhone: row.contactPhone ?? "",
@@ -672,10 +778,17 @@ function mapUserRow(row) {
     contactPhone: row.contactPhone ?? "",
     driverLicenseNumber: row.driverLicenseNumber ?? "",
     idCardFileName: row.idCardFileName ?? "",
+    idDocumentIssueDate: row.idDocumentIssueDate ?? "",
+    idDocumentExpirationDate: row.idDocumentExpirationDate ?? "",
     passwordSalt: row.passwordSalt,
     passwordHash: row.passwordHash,
     isActive: Boolean(row.isActive),
     mustChangePassword: Boolean(row.mustChangePassword),
+    accountApprovalStatus: normalizeAccountApprovalStatus(row.accountApprovalStatus, "approved"),
+    accountRejectionComment: row.accountRejectionComment ?? "",
+    accountReviewedByUserId: row.accountReviewedByUserId ?? null,
+    accountReviewedAt: row.accountReviewedAt ?? null,
+    onboardingSubmittedAt: row.onboardingSubmittedAt ?? null,
     lastLoginAt: row.lastLoginAt ?? null,
     notificationStatus: row.notificationStatus ?? null,
     notificationProvider: row.notificationProvider ?? null,
@@ -1228,6 +1341,8 @@ const USER_SELECT_FRAGMENT = `
     participants.last_name AS "lastName",
     participants.driver_license_number AS "driverLicenseNumber",
     participants.id_card_file_name AS "idCardFileName",
+    participants.id_document_issue_date AS "idDocumentIssueDate",
+    participants.id_document_expiration_date AS "idDocumentExpirationDate",
     participants.current_address AS "currentAddress",
     participants.mailing_address AS "mailingAddress",
     participants.contact_phone AS "contactPhone",
@@ -1236,6 +1351,11 @@ const USER_SELECT_FRAGMENT = `
     users.password_hash AS "passwordHash",
     users.is_active AS "isActive",
     users.must_change_password AS "mustChangePassword",
+    users.account_approval_status AS "accountApprovalStatus",
+    users.account_rejection_comment AS "accountRejectionComment",
+    users.account_reviewed_by_user_id AS "accountReviewedByUserId",
+    users.account_reviewed_at AS "accountReviewedAt",
+    users.onboarding_submitted_at AS "onboardingSubmittedAt",
     users.last_login_at AS "lastLoginAt",
     notification.status AS "notificationStatus",
     notification.provider AS "notificationProvider",
@@ -1329,6 +1449,8 @@ export async function getAppDataSnapshot() {
         last_name AS "lastName",
         driver_license_number AS "driverLicenseNumber",
         id_card_file_name AS "idCardFileName",
+        id_document_issue_date AS "idDocumentIssueDate",
+        id_document_expiration_date AS "idDocumentExpirationDate",
         current_address AS "currentAddress",
         mailing_address AS "mailingAddress",
         contact_phone AS "contactPhone",
@@ -1783,6 +1905,10 @@ async function createUserRecord(
   const participantId = createId("participant");
   const userId = createId("user");
   const role = normalizedCategory === "manager" ? "manager" : "investor";
+  const accountApprovalStatus = getInitialAccountApprovalStatus(
+    normalizedCategory,
+    input.accountApprovalStatus
+  );
 
   await withTransaction(async (client) => {
     await client.query(
@@ -1798,13 +1924,15 @@ async function createUserRecord(
           id_card_file_name,
           id_card_mime_type,
           id_card_data_url,
+          id_document_issue_date,
+          id_document_expiration_date,
           current_address,
           mailing_address,
           contact_phone,
           created_at,
           updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
       `,
       [
         participantId,
@@ -1817,6 +1945,8 @@ async function createUserRecord(
         profile.idCardFile?.fileName ?? null,
         profile.idCardFile?.mimeType ?? null,
         profile.idCardFile?.dataUrl ?? null,
+        input.idDocumentIssueDate ?? null,
+        input.idDocumentExpirationDate ?? null,
         profile.currentAddress,
         profile.mailingAddress,
         profile.contactPhone,
@@ -1836,10 +1966,11 @@ async function createUserRecord(
           password_hash,
           is_active,
           must_change_password,
+          account_approval_status,
           created_at,
           updated_at
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       `,
       [
         userId,
@@ -1850,6 +1981,7 @@ async function createUserRecord(
         passwordRecord.hash,
         1,
         mustChangePassword ? 1 : 0,
+        accountApprovalStatus,
         timestamp,
         timestamp
       ]
@@ -1888,10 +2020,17 @@ async function createUserRecord(
 }
 
 export async function createManagedUser(input) {
-  return createUserRecord(input, {
-    mustChangePassword: true,
-    sendNotification: true
-  });
+  return createUserRecord(
+    {
+      ...input,
+      category: "investor",
+      accountApprovalStatus: "profile_required"
+    },
+    {
+      mustChangePassword: true,
+      sendNotification: true
+    }
+  );
 }
 
 function normalizeInvestorPoolInput(input) {
@@ -2433,6 +2572,85 @@ export async function markUserLogin(userId) {
     `,
     [nowTimestamp(), userId]
   );
+}
+
+export async function submitIdentityReview(userId, input) {
+  const currentUser = await getUserById(userId);
+
+  if (!currentUser) {
+    throw new Error("User not found.");
+  }
+
+  if (currentUser.role === "manager") {
+    throw new Error("Manager accounts do not require identity review.");
+  }
+
+  if (currentUser.mustChangePassword) {
+    throw new Error("Change your temporary password before submitting identity information.");
+  }
+
+  if (currentUser.accountApprovalStatus === "pending_review") {
+    throw new Error("Your identity information is already waiting for manager review.");
+  }
+
+  if (currentUser.accountApprovalStatus === "approved") {
+    throw new Error("This account has already been approved.");
+  }
+
+  const identity = normalizeIdentityReviewInput(input, {
+    hasExistingIdCard: Boolean(currentUser.idCardFileName)
+  });
+  const timestamp = nowTimestamp();
+
+  await withTransaction(async (client) => {
+    await client.query(
+      `
+        UPDATE participants
+        SET
+          driver_license_number = $1,
+          id_card_file_name = COALESCE($2, id_card_file_name),
+          id_card_mime_type = COALESCE($3, id_card_mime_type),
+          id_card_data_url = COALESCE($4, id_card_data_url),
+          id_document_issue_date = $5,
+          id_document_expiration_date = $6,
+          current_address = $7,
+          mailing_address = $8,
+          contact_phone = $9,
+          updated_at = $10
+        WHERE id = $11
+      `,
+      [
+        identity.driverLicenseNumber,
+        identity.idCardFile?.fileName ?? null,
+        identity.idCardFile?.mimeType ?? null,
+        identity.idCardFile?.dataUrl ?? null,
+        identity.idDocumentIssueDate,
+        identity.idDocumentExpirationDate,
+        identity.currentAddress,
+        identity.mailingAddress,
+        identity.contactPhone,
+        timestamp,
+        currentUser.participantId
+      ]
+    );
+
+    await client.query(
+      `
+        UPDATE users
+        SET
+          account_approval_status = 'pending_review',
+          account_rejection_comment = NULL,
+          account_reviewed_by_user_id = NULL,
+          account_reviewed_at = NULL,
+          onboarding_submitted_at = $1,
+          updated_at = $1
+        WHERE id = $2
+      `,
+      [timestamp, userId]
+    );
+  });
+
+  return getUserById(userId);
 }
 
 export async function updateOwnProfile(userId, input) {
@@ -4198,6 +4416,39 @@ export async function getCompanyResourceDownload(resourceId) {
   return resource;
 }
 
+export async function getUserIdentityDocumentDownload(userId) {
+  const normalizedUserId = String(userId ?? "").trim();
+
+  if (!normalizedUserId) {
+    throw new Error("A valid user is required.");
+  }
+
+  const document = await queryOne(
+    `
+      SELECT
+        users.id AS "userId",
+        participants.name AS "fullName",
+        participants.id_card_file_name AS "fileName",
+        participants.id_card_mime_type AS "fileMimeType",
+        participants.id_card_data_url AS "fileDataUrl"
+      FROM users
+      JOIN participants ON participants.id = users.participant_id
+      WHERE users.id = $1
+    `,
+    [normalizedUserId]
+  );
+
+  if (!document) {
+    throw new Error("User not found.");
+  }
+
+  if (!document.fileName || !document.fileDataUrl) {
+    throw new Error("This user has not uploaded an identity document.");
+  }
+
+  return document;
+}
+
 async function insertArchivedRecord(client, archiveInput) {
   const entityType = String(archiveInput?.entityType ?? "").trim();
   const entityId = String(archiveInput?.entityId ?? "").trim();
@@ -4486,6 +4737,8 @@ async function buildUserArchivePayload(userId, executor = pool) {
         participants.id_card_file_name,
         participants.id_card_mime_type,
         participants.id_card_data_url,
+        participants.id_document_issue_date,
+        participants.id_document_expiration_date,
         participants.current_address,
         participants.mailing_address,
         participants.contact_phone,
@@ -6038,6 +6291,136 @@ function getSettledPoolMemberCommitmentIssues(snapshot, participantId) {
   }
 
   return issues;
+}
+
+function assertUserIdentityReadyForApproval(targetUser) {
+  const missing = [];
+
+  if (!targetUser.contactPhone) {
+    missing.push("contact");
+  }
+
+  if (!targetUser.driverLicenseNumber) {
+    missing.push("driver's license number");
+  }
+
+  if (!targetUser.currentAddress) {
+    missing.push("current address");
+  }
+
+  if (!targetUser.mailingAddress) {
+    missing.push("mailing address");
+  }
+
+  if (!targetUser.idCardFileName) {
+    missing.push("uploaded ID document");
+  }
+
+  if (!targetUser.idDocumentIssueDate) {
+    missing.push("ID issue date");
+  }
+
+  if (!targetUser.idDocumentExpirationDate) {
+    missing.push("ID expiration date");
+  }
+
+  if (missing.length) {
+    throw new Error(`This account is missing ${missing.join(", ")}.`);
+  }
+
+  assertValidIdentityDocumentDates(
+    targetUser.idDocumentIssueDate,
+    targetUser.idDocumentExpirationDate
+  );
+}
+
+export async function reviewUserIdentity(userId, input, actingUserId) {
+  const targetUser = await getUserAccountById(userId, { includeInactive: true });
+
+  if (!targetUser) {
+    throw new Error("User not found.");
+  }
+
+  if (targetUser.id === actingUserId) {
+    throw new Error("You cannot review your own account.");
+  }
+
+  if (targetUser.role === "manager") {
+    throw new Error("Manager accounts do not require identity review.");
+  }
+
+  if (targetUser.accountApprovalStatus !== "pending_review") {
+    throw new Error("Only accounts waiting for identity review can be approved or rejected.");
+  }
+
+  const decision = String(input?.decision ?? "").trim();
+  const isApproved = decision === "approved";
+  const isRejected = decision === "rejected";
+
+  if (!isApproved && !isRejected) {
+    throw new Error("Review decision must be approved or rejected.");
+  }
+
+  const rejectionComment = normalizeOptionalText(input?.comment ?? input?.rejectionComment);
+
+  if (isApproved) {
+    assertUserIdentityReadyForApproval(targetUser);
+  } else if (!rejectionComment || rejectionComment.length < 3) {
+    throw new Error("A rejection comment is required.");
+  }
+
+  const timestamp = nowTimestamp();
+  await pool.query(
+    `
+      UPDATE users
+      SET
+        account_approval_status = $1,
+        account_rejection_comment = $2,
+        account_reviewed_by_user_id = $3,
+        account_reviewed_at = $4,
+        updated_at = $4
+      WHERE id = $5
+    `,
+    [
+      isApproved ? "approved" : "rejected",
+      isApproved ? null : rejectionComment,
+      actingUserId,
+      timestamp,
+      userId
+    ]
+  );
+
+  const reviewedUser = await getUserAccountById(userId, { includeInactive: true });
+  let notification;
+
+  try {
+    notification = isApproved
+      ? await sendAccountApprovedNotification({
+          userId: reviewedUser.id,
+          participantId: reviewedUser.participantId,
+          fullName: reviewedUser.name,
+          email: reviewedUser.email
+        })
+      : await sendAccountRejectedNotification({
+          userId: reviewedUser.id,
+          participantId: reviewedUser.participantId,
+          fullName: reviewedUser.name,
+          email: reviewedUser.email,
+          managerComment: rejectionComment
+        });
+  } catch (error) {
+    notification = {
+      status: "failed",
+      provider: "notification_error",
+      localPath: null,
+      errorMessage: error.message
+    };
+  }
+
+  return {
+    user: reviewedUser,
+    notification
+  };
 }
 
 export async function updateUserCategory(userId, nextCategoryInput, actingUserId) {

@@ -1,4 +1,4 @@
-import { state } from "./state.js?v=20260429-frontend-4";
+import { state } from "./state.js?v=20260430-frontend-10";
 import {
   clearAuthFeedback,
   clearMessages,
@@ -10,7 +10,7 @@ import {
   setAuthMode,
   setMessage,
   toggleSectionCollapsed
-} from "./helpers.js?v=20260429-frontend-4";
+} from "./helpers.js?v=20260430-frontend-10";
 import {
   buildCreateDealDraft,
   createDebtServiceDraft,
@@ -24,7 +24,7 @@ import {
   syncDealEditorField,
   updateCreateDealDraft,
   updateDealEditorDraft
-} from "./data.js?v=20260429-frontend-4";
+} from "./data.js?v=20260430-frontend-10";
 import {
   api,
   applyLoggedOutState,
@@ -32,8 +32,8 @@ import {
   loadSession,
   recordSessionActivity,
   refreshDashboard
-} from "./session.js?v=20260430-frontend-8";
-import { render } from "./renderers.js?v=20260430-frontend-9";
+} from "./session.js?v=20260430-frontend-10";
+import { render } from "./renderers.js?v=20260430-frontend-10";
 
 let listenersBound = false;
 
@@ -173,6 +173,39 @@ export function setupEventListeners() {
       return;
     }
 
+    if (event.target.id === "identity-review-form") {
+      event.preventDefault();
+      const formData = new FormData(event.target);
+
+      try {
+        const idCardFile = await readFileAsPayload(event.target.elements.idCard.files[0]);
+        const result = await api("/api/profile/identity-review", {
+          method: "POST",
+          body: JSON.stringify({
+            contactPhone: formData.get("contactPhone"),
+            driverLicenseNumber: formData.get("driverLicenseNumber"),
+            idDocumentIssueDate: formData.get("idDocumentIssueDate"),
+            idDocumentExpirationDate: formData.get("idDocumentExpirationDate"),
+            currentAddress: formData.get("currentAddress"),
+            mailingAddress: formData.get("mailingAddress"),
+            idCardFile
+          })
+        });
+        state.session = result.user;
+        setMessage(
+          "identity",
+          "success",
+          "Identity information submitted. You will receive an email after manager review."
+        );
+        render();
+      } catch (error) {
+        setMessage("identity", "error", error.message);
+        render();
+      }
+
+      return;
+    }
+
     if (event.target.id === "calculator-form") {
       event.preventDefault();
       const formData = new FormData(event.target);
@@ -200,21 +233,14 @@ export function setupEventListeners() {
       const formData = new FormData(event.target);
 
       try {
-        const idCardFile = await readFileAsPayload(event.target.elements.idCard.files[0]);
         const result = await api("/api/admin/users", {
           method: "POST",
           body: JSON.stringify({
-            category: formData.get("category"),
             firstName: formData.get("firstName"),
             middleName: formData.get("middleName"),
             lastName: formData.get("lastName"),
             email: formData.get("email"),
-            contactPhone: formData.get("contactPhone"),
-            driverLicenseNumber: formData.get("driverLicenseNumber"),
-            currentAddress: formData.get("currentAddress"),
-            mailingAddress: formData.get("mailingAddress"),
-            password: formData.get("password"),
-            idCardFile
+            password: formData.get("password")
           })
         });
         await refreshDashboard();
@@ -1287,6 +1313,36 @@ export function setupEventListeners() {
           });
           await refreshDashboard();
           setMessage("directory", "success", "User account deleted.");
+        } else if (action === "approve-identity" || action === "reject-identity") {
+          const reviewCell = actionButton.closest("td");
+          const comment = String(
+            reviewCell?.querySelector("[name='identityReviewComment']")?.value ?? ""
+          ).trim();
+
+          if (action === "reject-identity" && comment.length < 3) {
+            setMessage("directory", "error", "A rejection comment is required.");
+            render();
+            return;
+          }
+
+          const result = await api(
+            `/api/admin/users/${encodeURIComponent(userId)}/identity-review`,
+            {
+              method: "POST",
+              body: JSON.stringify({
+                decision: action === "approve-identity" ? "approved" : "rejected",
+                comment
+              })
+            }
+          );
+          await refreshDashboard();
+          setMessage(
+            "directory",
+            "success",
+            action === "approve-identity"
+              ? `Account approved. ${formatNotificationStatus(result.notification)}`
+              : `More information requested. ${formatNotificationStatus(result.notification)}`
+          );
         } else {
           await api(`/api/admin/users/${encodeURIComponent(userId)}/status`, {
             method: "PATCH",

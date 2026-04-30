@@ -68,7 +68,8 @@ export function createInitialMessages() {
     resource: null,
     directory: null,
     profile: null,
-    password: null
+    password: null,
+    identity: null
   };
 }
 

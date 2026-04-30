@@ -46,8 +46,35 @@ function buildCredentialBody({ fullName, email, temporaryPassword, role }) {
     `Temporary password: ${temporaryPassword}`,
     "",
     "For security, you will be required to change your password the first time you log in.",
+    "After that, submit your contact details and ID document for manager approval.",
     "",
     `If you were not expecting this message, please contact ${COMPANY_NAME}.`
+  ].join("\n");
+}
+
+function buildAccountApprovedBody({ fullName }) {
+  return [
+    `Hello ${fullName},`,
+    "",
+    `Your ${COMPANY_NAME} portal account has been approved.`,
+    "",
+    `You can now log in here: ${resolveLoginUrl()}`,
+    "",
+    `If you have questions, contact ${COMPANY_NAME}.`
+  ].join("\n");
+}
+
+function buildAccountRejectedBody({ fullName, managerComment }) {
+  return [
+    `Hello ${fullName},`,
+    "",
+    `More information is needed before your ${COMPANY_NAME} portal account can be approved.`,
+    "",
+    `Manager comment: ${managerComment}`,
+    "",
+    `Log in here to update and resubmit your information: ${resolveLoginUrl()}`,
+    "",
+    `If you have questions, contact ${COMPANY_NAME}.`
   ].join("\n");
 }
 
@@ -549,6 +576,39 @@ export async function sendCredentialNotification({
     recipientEmail: payload.recipientEmail,
     subject: payload.subject,
     bodyText: payload.bodyText,
+    persist: true
+  });
+}
+
+export async function sendAccountApprovedNotification({
+  userId,
+  participantId,
+  fullName,
+  email
+}) {
+  return queueAndDeliverNotification({
+    userId,
+    participantId,
+    recipientEmail: email,
+    subject: `${COMPANY_NAME} account approved`,
+    bodyText: buildAccountApprovedBody({ fullName }),
+    persist: true
+  });
+}
+
+export async function sendAccountRejectedNotification({
+  userId,
+  participantId,
+  fullName,
+  email,
+  managerComment
+}) {
+  return queueAndDeliverNotification({
+    userId,
+    participantId,
+    recipientEmail: email,
+    subject: `${COMPANY_NAME} account needs more information`,
+    bodyText: buildAccountRejectedBody({ fullName, managerComment }),
     persist: true
   });
 }
