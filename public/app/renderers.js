@@ -5,7 +5,7 @@ import {
   LOGIN_PAGE_TITLE,
   app,
   state
-} from "./state.js?v=20260430-frontend-16";
+} from "./state.js?v=20260430-frontend-19";
 import {
   breakdownItem,
   escapeHtml,
@@ -21,7 +21,7 @@ import {
   renderSectionToggle,
   summaryItem,
   titleCase
-} from "./helpers.js?v=20260430-frontend-16";
+} from "./helpers.js?v=20260430-frontend-19";
 import {
   applyAllocationFilters,
   applyArchivedProjectFilters,
@@ -43,7 +43,7 @@ import {
   getInvestorProjectFilterOptions,
   getManagerEditableDeal,
   getUserFilterOptions
-} from "./data.js?v=20260430-frontend-16";
+} from "./data.js?v=20260430-frontend-19";
 
 function renderLogin() {
   const errorMarkup = state.loginError
@@ -244,6 +244,67 @@ function renderPasswordResetGate() {
   `;
 }
 
+function getRequiredLegalDocumentsForCurrentSession() {
+  return Array.isArray(state.session?.requiredLegalDocuments)
+    ? state.session.requiredLegalDocuments
+    : [];
+}
+
+function renderLegalAcknowledgementFields() {
+  const documents = getRequiredLegalDocumentsForCurrentSession();
+
+  if (!documents.length) {
+    return "";
+  }
+
+  return `
+    <div class="legal-document-stack">
+      <div>
+        <h3>Required legal documents</h3>
+        <p class="section-copy">
+          These acknowledgements are required before the manager can approve account access.
+        </p>
+      </div>
+      ${documents
+        .map(
+          (document) => `
+            <article class="legal-document-card">
+              <div class="section-head section-head-tight">
+                <div>
+                  <h4>${escapeHtml(document.title)}</h4>
+                  <p class="section-copy">${escapeHtml(`Version ${document.version}`)}</p>
+                </div>
+                <a
+                  class="button-secondary button-inline"
+                  href="/api/legal-documents/${encodeURIComponent(document.key)}"
+                  target="_blank"
+                  rel="noopener"
+                >
+                  Open PDF
+                </a>
+              </div>
+              <label class="checkbox-field">
+                I have read and agree to this document.
+                <input type="checkbox" name="legalAck:${escapeHtml(document.key)}" required />
+              </label>
+              <label>
+                Signature
+                <input
+                  type="text"
+                  name="legalSigner:${escapeHtml(document.key)}"
+                  value="${inputValue(state.session.name)}"
+                  minlength="2"
+                  required
+                />
+              </label>
+            </article>
+          `
+        )
+        .join("")}
+    </div>
+  `;
+}
+
 function renderIdentityReviewGate() {
   const status = getAccountApprovalStatus(state.session);
 
@@ -329,6 +390,7 @@ function renderIdentityReviewGate() {
             Driver's license or ID card
             <input type="file" name="idCard" accept="image/*,.pdf" required />
           </label>
+          ${renderLegalAcknowledgementFields()}
           <button class="button-primary" type="submit">Submit for review</button>
         </form>
       </section>
@@ -4286,8 +4348,18 @@ function renderIdentityReviewActions(row) {
     return documentLinks;
   }
 
+  const missingLegalDocuments = getMissingLegalDocumentsForUser(row);
+  const approvalDisabled = missingLegalDocuments.length ? "disabled" : "";
+
   return `
     ${documentLinks}
+    ${
+      missingLegalDocuments.length
+        ? `<p class="table-note">${escapeHtml(
+            "Approval is locked until required legal documents are signed."
+          )}</p>`
+        : ""
+    }
     <textarea
       name="identityReviewComment"
       rows="2"
@@ -4299,6 +4371,7 @@ function renderIdentityReviewActions(row) {
       type="button"
       data-user-action="approve-identity"
       data-user-id="${escapeHtml(row.id)}"
+      ${approvalDisabled}
     >
       Approve
     </button>
@@ -4310,6 +4383,83 @@ function renderIdentityReviewActions(row) {
     >
       Reject
     </button>
+  `;
+}
+
+function getRequiredLegalDocumentsForCategory(category) {
+  const legalDocuments = state.dashboard?.legalDocuments ?? [];
+
+  if (!category || category === "manager") {
+    return [];
+  }
+
+  return legalDocuments.filter((document) =>
+    (document.requiredCategories ?? []).includes(category)
+  );
+}
+
+function getMissingLegalDocumentsForUser(row) {
+  const acknowledgements = row.legalAcknowledgements ?? [];
+  const requiredDocuments = getRequiredLegalDocumentsForCategory(row.category);
+  const signedKeys = new Set(
+    acknowledgements.map(
+      (acknowledgement) =>
+        `${acknowledgement.documentKey}:${acknowledgement.documentVersion}`
+    )
+  );
+  const missingDocuments = requiredDocuments.filter(
+    (document) => !signedKeys.has(`${document.key}:${document.version}`)
+  );
+
+  return missingDocuments;
+}
+
+function renderLegalAcknowledgementStatus(row) {
+  const acknowledgements = row.legalAcknowledgements ?? [];
+  const requiredDocuments = getRequiredLegalDocumentsForCategory(row.category);
+  const missingDocuments = getMissingLegalDocumentsForUser(row);
+
+  if (!requiredDocuments.length) {
+    return "Not required";
+  }
+
+  return `
+    <div class="legal-ack-list">
+      <span class="read-only-tag">${escapeHtml(
+        `${requiredDocuments.length - missingDocuments.length}/${requiredDocuments.length} signed`
+      )}</span>
+      ${
+        acknowledgements.length
+          ? acknowledgements
+              .map(
+                (acknowledgement) => `
+                  <div class="legal-ack-item">
+                    <a
+                      href="/api/legal-documents/${encodeURIComponent(acknowledgement.documentKey)}"
+                      target="_blank"
+                      rel="noopener"
+                    >
+                      ${escapeHtml(acknowledgement.documentTitle)}
+                    </a>
+                    <p>${escapeHtml(
+                      `Signed by ${acknowledgement.signerName} on ${formatDateTime(
+                        acknowledgement.acknowledgedAt
+                      )}`
+                    )}</p>
+                  </div>
+                `
+              )
+              .join("")
+          : ""
+      }
+      ${
+        missingDocuments.length
+          ? `<p class="table-note">${escapeHtml(
+              `Missing: ${missingDocuments.map((document) => document.title).join(", ")}`
+            )}</p>`
+          : ""
+      }
+    </div>
   `;
 }
 
@@ -4500,6 +4650,7 @@ function renderPendingUserApprovalsPage() {
                     <th>Contact</th>
                     <th>ID card</th>
                     <th>ID dates</th>
+                    <th>Legal documents</th>
                     <th>Submitted</th>
                     <th>Review</th>
                   </tr>
@@ -4519,6 +4670,7 @@ function renderPendingUserApprovalsPage() {
                               ? `${formatDate(row.idDocumentIssueDate)} to ${formatDate(row.idDocumentExpirationDate)}`
                               : "—"
                           )}</td>
+                          <td>${renderLegalAcknowledgementStatus(row)}</td>
                           <td>${escapeHtml(formatDateTime(row.onboardingSubmittedAt))}</td>
                           <td>
                             <div class="table-actions identity-review-actions">
@@ -4634,6 +4786,7 @@ function renderUserDirectory() {
               <th>Password reset</th>
               <th>ID card</th>
               <th>ID dates</th>
+              <th>Legal documents</th>
               <th>Latest notice</th>
               <th>Actions</th>
             </tr>
@@ -4690,6 +4843,7 @@ function renderUserDirectory() {
                         ? `${formatDate(row.idDocumentIssueDate)} to ${formatDate(row.idDocumentExpirationDate)}`
                         : "—"
                     )}</td>
+                    <td>${renderLegalAcknowledgementStatus(row)}</td>
                     <td>${escapeHtml(
                       row.notificationStatus
                         ? `${titleCase(row.notificationStatus)}${row.notificationProvider ? ` · ${titleCase(row.notificationProvider)}` : ""}`
@@ -5243,13 +5397,32 @@ function renderCreatePoolPanel() {
   });
 }
 
-function renderManagerInvestorPoolCard(pool) {
+function renderPoolCardToggle(sectionId, collapsed) {
+  return `
+    <button
+      class="button-secondary button-inline section-toggle-button"
+      type="button"
+      data-section-toggle="${escapeHtml(sectionId)}"
+      aria-expanded="${collapsed ? "false" : "true"}"
+    >
+      ${collapsed ? "Maximize" : "Minimize"}
+    </button>
+  `;
+}
+
+function renderManagerInvestorPoolCard(pool, { defaultCollapsed = false } = {}) {
   const sectionId = `manager-pool-${pool.id}`;
-  const collapsed = Boolean(state.collapsedSections?.[sectionId]);
+  const hasCollapsePreference = Object.prototype.hasOwnProperty.call(
+    state.collapsedSections ?? {},
+    sectionId
+  );
+  const collapsed = hasCollapsePreference
+    ? Boolean(state.collapsedSections?.[sectionId])
+    : Boolean(defaultCollapsed);
   const availablePoolMembers = state.dashboard.admin.poolMembers ?? [];
 
   return `
-    <article class="deal-card">
+    <article class="deal-card pool-card">
       <div class="deal-head">
         <div>
           <p class="eyebrow">Pooled Capital Group</p>
@@ -5269,7 +5442,7 @@ function renderManagerInvestorPoolCard(pool) {
           <p class="metric-label">Committed capital</p>
           <p class="metric-value">${escapeHtml(formatCurrency(pool.totalCommitted))}</p>
           <div class="button-row deal-card-actions">
-            ${renderSectionToggle(sectionId)}
+            ${renderPoolCardToggle(sectionId, collapsed)}
           </div>
         </div>
       </div>
@@ -5469,6 +5642,25 @@ function renderManagerInvestorPoolCard(pool) {
 
 function renderManagerInvestorPoolsPage() {
   const pools = state.dashboard.admin.investorPools ?? [];
+  const defaultPoolCollapsed = pools.length > 1;
+  const missingCollapseDefaults = defaultPoolCollapsed
+    ? pools.filter(
+        (pool) =>
+          !Object.prototype.hasOwnProperty.call(
+            state.collapsedSections ?? {},
+            `manager-pool-${pool.id}`
+          )
+      )
+    : [];
+
+  if (missingCollapseDefaults.length) {
+    state.collapsedSections = {
+      ...state.collapsedSections,
+      ...Object.fromEntries(
+        missingCollapseDefaults.map((pool) => [`manager-pool-${pool.id}`, true])
+      )
+    };
+  }
 
   return `
     <div class="admin-grid">
@@ -5480,11 +5672,25 @@ function renderManagerInvestorPoolsPage() {
       copy:
         "Track sub-minimum investors, their weighted project votes, and the pooled positions that eventually land in the deal ledger as one investor.",
       message: renderMessage(state.messages.pool),
+      headerActions: pools.length
+        ? `
+            <button class="button-secondary button-inline" type="button" data-pool-collapse="all">
+              Minimize pools
+            </button>
+            <button class="button-secondary button-inline" type="button" data-pool-collapse="none">
+              Expand pools
+            </button>
+          `
+        : "",
       body: `
-        <div class="project-grid">
+        <div class="pool-card-grid">
           ${
             pools.length
-              ? pools.map((pool) => renderManagerInvestorPoolCard(pool)).join("")
+              ? pools
+                  .map((pool) =>
+                    renderManagerInvestorPoolCard(pool, { defaultCollapsed: defaultPoolCollapsed })
+                  )
+                  .join("")
               : '<div class="empty-state">No pooled capital groups have been created yet.</div>'
           }
         </div>

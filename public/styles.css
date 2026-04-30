@@ -504,6 +504,7 @@ button:disabled {
 .summary-grid,
 .timeline-grid,
 .project-grid,
+.pool-card-grid,
 .tier-grid,
 .breakdown-grid,
 .class-grid,
@@ -721,6 +722,10 @@ button:disabled {
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
 }
 
+.pool-card-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .issue-grid {
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
 }
@@ -733,6 +738,47 @@ button:disabled {
 .deal-card {
   overflow: hidden;
   display: grid;
+}
+
+.pool-card {
+  min-width: 0;
+}
+
+.pool-card .deal-head > div,
+.pool-card .deal-card-body,
+.pool-card .admin-card {
+  min-width: 0;
+}
+
+.pool-card .deal-card-body {
+  display: grid;
+  gap: 1rem;
+  padding: 1.4rem;
+}
+
+.pool-card .project-breakdown-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1rem;
+  min-width: 0;
+}
+
+.pool-card .admin-grid {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.pool-card .table-wrap {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.pool-card table {
+  min-width: 560px;
+}
+
+.pool-card th,
+.pool-card td {
+  overflow-wrap: anywhere;
 }
 
 .deal-head,
@@ -1138,6 +1184,42 @@ td {
   transition: transform 160ms ease, box-shadow 160ms ease, opacity 160ms ease;
 }
 
+.legal-document-stack {
+  display: grid;
+  gap: 0.85rem;
+  margin-top: 0.4rem;
+}
+
+.legal-document-card {
+  display: grid;
+  gap: 0.9rem;
+  padding: 1rem 1.1rem;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.62);
+  border: 1px solid rgba(31, 26, 23, 0.08);
+}
+
+.legal-document-card h4 {
+  font-size: 1.05rem;
+}
+
+.legal-ack-list {
+  display: grid;
+  gap: 0.55rem;
+  min-width: 14rem;
+}
+
+.legal-ack-item a {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.legal-ack-item p {
+  margin-top: 0.2rem;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
 .resource-download-link:hover {
   transform: translateY(-1px);
 }
@@ -1383,6 +1465,7 @@ td {
   .panel,
   .deal-head,
   .deal-body,
+  .pool-card .deal-card-body,
   .distribution-review-head,
   .distribution-review-body,
   .calculator-form,

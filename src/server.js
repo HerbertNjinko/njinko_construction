@@ -23,6 +23,8 @@ import {
   fundInvestorPool,
   getAppDataSnapshot,
   getCompanyResourceDownload,
+  getLegalDocumentDefinition,
+  getRequiredLegalDocumentsForCategory,
   getUserByEmail,
   getUserById,
   getUserIdentityDocumentDownload,
@@ -615,7 +617,8 @@ function stripUserSecrets(user) {
     mustChangePassword: Boolean(user.mustChangePassword),
     accountApprovalStatus: user.accountApprovalStatus ?? "approved",
     accountRejectionComment: user.accountRejectionComment ?? "",
-    onboardingSubmittedAt: user.onboardingSubmittedAt ?? null
+    onboardingSubmittedAt: user.onboardingSubmittedAt ?? null,
+    requiredLegalDocuments: getRequiredLegalDocumentsForCategory(user.category)
   };
 }
 
@@ -635,6 +638,7 @@ const server = createServer(async (request, response) => {
     const userIdentityDocumentMatch = url.pathname.match(
       /^\/api\/admin\/users\/([^/]+)\/id-card$/
     );
+    const legalDocumentMatch = url.pathname.match(/^\/api\/legal-documents\/([^/]+)$/);
     const userDeleteMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)$/);
     const resourceDeleteMatch = url.pathname.match(/^\/api\/admin\/resources\/([^/]+)$/);
     const resourceDownloadMatch = url.pathname.match(/^\/api\/resources\/([^/]+)\/download$/);
@@ -863,6 +867,49 @@ const server = createServer(async (request, response) => {
         response.end(decoded.buffer);
       } catch (error) {
         sendJson(response, 404, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "GET" && legalDocumentMatch) {
+      const user = await requireUser(request, response);
+
+      if (!user) {
+        return;
+      }
+
+      const document = getLegalDocumentDefinition(
+        decodeURIComponent(legalDocumentMatch[1])
+      );
+
+      if (!document) {
+        sendJson(response, 404, { error: "Legal document not found." });
+        return;
+      }
+
+      const requiredDocuments = getRequiredLegalDocumentsForCategory(user.category);
+      const canViewDocument =
+        user.role === "manager" ||
+        requiredDocuments.some((requiredDocument) => requiredDocument.key === document.key);
+
+      if (!canViewDocument) {
+        sendJson(response, 403, { error: "This document is not required for your account." });
+        return;
+      }
+
+      try {
+        const fileBuffer = await readFile(resolve(process.cwd(), document.fileName));
+
+        response.writeHead(200, {
+          "Content-Type": "application/pdf",
+          "Content-Disposition": buildInlineDisposition(document.fileName),
+          "Cache-Control": "private, max-age=0, must-revalidate",
+          ...getSecurityHeaders()
+        });
+        response.end(fileBuffer);
+      } catch {
+        sendJson(response, 404, { error: "Legal document file is missing." });
       }
 
       return;

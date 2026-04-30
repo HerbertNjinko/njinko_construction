@@ -58,6 +58,32 @@ const ACCOUNT_APPROVAL_STATUSES = new Set([
   "approved",
   "rejected"
 ]);
+export const LEGAL_DOCUMENT_DEFINITIONS = [
+  {
+    key: "contractor_equity_election_form",
+    title: "Contractor Equity Election Form",
+    version: "2026-04-30",
+    fileName: "Contractor Equity Election Form + Tracking System.pdf",
+    requiredCategories: ["contractor"]
+  },
+  {
+    key: "subscription_agreement_237_ville",
+    title: "Subscription Agreement and Deal Sheet",
+    version: "2026-04-30",
+    fileName: "237 Ville Investor Package (subscription Agreement + Deal Sheet).pdf",
+    requiredCategories: ["investor", "pool_member"]
+  },
+  {
+    key: "operating_agreement_237_ville",
+    title: "Operating Agreement of 237_Ville Development Group LLC",
+    version: "2026-04-30",
+    fileName: "Project Llc Operating Agreement (real Estate Deal).pdf",
+    requiredCategories: ["investor", "pool_member", "contractor"]
+  }
+];
+const LEGAL_DOCUMENT_BY_KEY = new Map(
+  LEGAL_DOCUMENT_DEFINITIONS.map((document) => [document.key, document])
+);
 
 function readPositiveIntegerEnv(name, fallback) {
   const parsed = Number(process.env[name]);
@@ -234,6 +260,35 @@ function assertUploadedFileData({ dataUrl, mimeType, maxBytes, allowedMimeTypes,
   if (parsed.byteLength <= 0 || parsed.byteLength > maxBytes) {
     throw new Error(`Uploads must be smaller than ${maxBytesLabel}.`);
   }
+}
+
+function mapLegalDocumentDefinition(document) {
+  return {
+    key: document.key,
+    title: document.title,
+    version: document.version,
+    fileName: document.fileName,
+    requiredCategories: [...document.requiredCategories]
+  };
+}
+
+export function getLegalDocumentDefinition(documentKey) {
+  const key = String(documentKey ?? "").trim();
+  const document = LEGAL_DOCUMENT_BY_KEY.get(key);
+
+  return document ? mapLegalDocumentDefinition(document) : null;
+}
+
+export function getRequiredLegalDocumentsForCategory(category) {
+  const normalizedCategory = normalizeCategory(category);
+
+  if (!normalizedCategory || normalizedCategory === "manager") {
+    return [];
+  }
+
+  return LEGAL_DOCUMENT_DEFINITIONS.filter((document) =>
+    document.requiredCategories.includes(normalizedCategory)
+  ).map((document) => mapLegalDocumentDefinition(document));
 }
 
 function roundNumber(value) {
@@ -726,6 +781,50 @@ function normalizeIdentityReviewInput(input, { hasExistingIdCard = false } = {})
   };
 }
 
+function normalizeLegalAcknowledgementInput(input, currentUser) {
+  const requiredDocuments = getRequiredLegalDocumentsForCategory(currentUser?.category);
+
+  if (!requiredDocuments.length) {
+    return [];
+  }
+
+  const submittedDocuments = Array.isArray(input?.legalAcknowledgements)
+    ? input.legalAcknowledgements
+    : [];
+  const submittedByKey = new Map(
+    submittedDocuments
+      .map((item) => [String(item?.documentKey ?? "").trim(), item])
+      .filter(([documentKey]) => Boolean(documentKey))
+  );
+
+  return requiredDocuments.map((document) => {
+    const acknowledgement = submittedByKey.get(document.key);
+    const accepted =
+      acknowledgement?.accepted === true ||
+      acknowledgement?.accepted === "true" ||
+      acknowledgement?.accepted === "on";
+
+    if (!accepted) {
+      throw new Error(`${document.title} must be acknowledged before account review.`);
+    }
+
+    const signerName = normalizeRequiredTextInput(
+      acknowledgement?.signerName,
+      `${document.title} signature`,
+      { minLength: 2 }
+    );
+
+    return {
+      documentKey: document.key,
+      documentTitle: document.title,
+      documentVersion: document.version,
+      documentFileName: document.fileName,
+      requiredForCategory: currentUser.category,
+      signerName
+    };
+  });
+}
+
 function validateUserProfileForCreation(profile, category) {
   if (!["investor", "contractor", "manager", "pool_member"].includes(category)) {
     throw new Error("User category must be investor, contractor, manager, or pool member.");
@@ -815,6 +914,54 @@ function mapUserRow(row) {
     notificationProvider: row.notificationProvider ?? null,
     notificationLocalPath: row.notificationLocalPath ?? null
   };
+}
+
+function mapLegalAcknowledgementRow(row) {
+  return {
+    id: row.id,
+    userId: row.userId,
+    participantId: row.participantId,
+    documentKey: row.documentKey,
+    documentTitle: row.documentTitle,
+    documentVersion: row.documentVersion,
+    documentFileName: row.documentFileName ?? "",
+    requiredForCategory: row.requiredForCategory,
+    signerName: row.signerName,
+    acknowledgedAt: row.acknowledgedAt,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  };
+}
+
+async function getLegalAcknowledgementsForUser(userId, executor = pool) {
+  const normalizedUserId = String(userId ?? "").trim();
+
+  if (!normalizedUserId) {
+    return [];
+  }
+
+  return (await queryAll(
+    `
+      SELECT
+        id,
+        user_id AS "userId",
+        participant_id AS "participantId",
+        document_key AS "documentKey",
+        document_title AS "documentTitle",
+        document_version AS "documentVersion",
+        document_file_name AS "documentFileName",
+        required_for_category AS "requiredForCategory",
+        signer_name AS "signerName",
+        acknowledged_at AS "acknowledgedAt",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM user_legal_acknowledgements
+      WHERE user_id = $1
+      ORDER BY acknowledged_at DESC, document_title
+    `,
+    [normalizedUserId],
+    executor
+  )).map((row) => mapLegalAcknowledgementRow(row));
 }
 
 async function syncDealEquity(dealId, executor = pool) {
@@ -1333,6 +1480,7 @@ export async function seedDatabase({ force = false } = {}) {
           deal_debt_service_entries,
           deal_timeline_items,
           promote_tiers,
+          user_legal_acknowledgements,
           users,
           deals,
           participants
@@ -1500,6 +1648,25 @@ export async function getAppDataSnapshot({ skipAutomation = false } = {}) {
       ORDER BY participants.name
     `
   )).map((row) => mapUserRow(row));
+  const userLegalAcknowledgements = (await queryAll(
+    `
+      SELECT
+        id,
+        user_id AS "userId",
+        participant_id AS "participantId",
+        document_key AS "documentKey",
+        document_title AS "documentTitle",
+        document_version AS "documentVersion",
+        document_file_name AS "documentFileName",
+        required_for_category AS "requiredForCategory",
+        signer_name AS "signerName",
+        acknowledged_at AS "acknowledgedAt",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM user_legal_acknowledgements
+      ORDER BY acknowledged_at DESC, document_title
+    `
+  )).map((row) => mapLegalAcknowledgementRow(row));
 
   const deals = (await queryAll(
     `
@@ -1933,8 +2100,12 @@ export async function getAppDataSnapshot({ skipAutomation = false } = {}) {
 
   return {
     asOfDate: todayStamp(),
+    legalDocuments: LEGAL_DOCUMENT_DEFINITIONS.map((document) =>
+      mapLegalDocumentDefinition(document)
+    ),
     participants,
     users,
+    userLegalAcknowledgements,
     deals,
     positions,
     investorPools,
@@ -2712,6 +2883,7 @@ export async function submitIdentityReview(userId, input) {
   const identity = normalizeIdentityReviewInput(input, {
     hasExistingIdCard: Boolean(currentUser.idCardFileName)
   });
+  const legalAcknowledgements = normalizeLegalAcknowledgementInput(input, currentUser);
   const timestamp = nowTimestamp();
 
   await withTransaction(async (client) => {
@@ -2745,6 +2917,48 @@ export async function submitIdentityReview(userId, input) {
         currentUser.participantId
       ]
     );
+
+    await client.query(
+      `
+        DELETE FROM user_legal_acknowledgements
+        WHERE user_id = $1
+      `,
+      [userId]
+    );
+
+    for (const acknowledgement of legalAcknowledgements) {
+      await client.query(
+        `
+          INSERT INTO user_legal_acknowledgements (
+            id,
+            user_id,
+            participant_id,
+            document_key,
+            document_title,
+            document_version,
+            document_file_name,
+            required_for_category,
+            signer_name,
+            acknowledged_at,
+            created_at,
+            updated_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, $10)
+        `,
+        [
+          createId("legal-ack"),
+          userId,
+          currentUser.participantId,
+          acknowledgement.documentKey,
+          acknowledgement.documentTitle,
+          acknowledgement.documentVersion,
+          acknowledgement.documentFileName,
+          acknowledgement.requiredForCategory,
+          acknowledgement.signerName,
+          timestamp
+        ]
+      );
+    }
 
     await client.query(
       `
@@ -4938,6 +5152,25 @@ async function buildDealArchivePayload(dealId, executor = pool) {
   };
 }
 
+function buildInvestorPoolArchivePayload(poolRow, dealArchivePayload) {
+  const poolId = poolRow?.id;
+
+  return {
+    investorPool: poolRow,
+    investorPoolCommitments: (dealArchivePayload?.investorPoolCommitments ?? []).filter(
+      (commitment) => commitment.pool_id === poolId
+    ),
+    investorPoolVotes: (dealArchivePayload?.investorPoolVotes ?? []).filter(
+      (vote) => vote.pool_id === poolId
+    ),
+    archivedWithDeal: {
+      id: dealArchivePayload?.deal?.id ?? null,
+      name: dealArchivePayload?.deal?.name ?? null,
+      status: dealArchivePayload?.deal?.status ?? null
+    }
+  };
+}
+
 async function buildUserArchivePayload(userId, executor = pool) {
   const user = await queryOne(
     `
@@ -6908,6 +7141,33 @@ export async function archiveDeal(dealId, actingUserId = null) {
       deletedByUserId: actingUserId,
       payload: existingDeal
     });
+    const investorPools = existingDeal.investorPools ?? [];
+    const poolArchiveRecords = [];
+
+    for (const investorPool of investorPools) {
+      const poolArchiveRecord = await insertArchivedRecord(client, {
+        entityType: "investor_pool",
+        entityId: investorPool.id,
+        sourceTable: "investor_pools",
+        displayName: investorPool.name ?? investorPool.pool_participant_name ?? investorPool.id,
+        relatedDealId: id,
+        relatedParticipantId: investorPool.pool_participant_id,
+        deletedByUserId: actingUserId,
+        payload: buildInvestorPoolArchivePayload(investorPool, existingDeal)
+      });
+
+      poolArchiveRecords.push(poolArchiveRecord);
+    }
+
+    if (investorPools.length) {
+      await client.query(
+        `
+          DELETE FROM investor_pools
+          WHERE id = ANY($1::text[])
+        `,
+        [investorPools.map((investorPool) => investorPool.id)]
+      );
+    }
 
     await client.query(
       `
@@ -6917,13 +7177,18 @@ export async function archiveDeal(dealId, actingUserId = null) {
       [id]
     );
 
-    return archiveRecord;
+    return {
+      archiveRecord,
+      poolArchiveRecords
+    };
   });
 
   return {
     ok: true,
     archivedDealId: id,
-    archivedRecordId: archive.id
+    archivedRecordId: archive.archiveRecord.id,
+    archivedPoolIds: archive.poolArchiveRecords.map((archiveRecord) => archiveRecord.entityId),
+    archivedPoolRecordIds: archive.poolArchiveRecords.map((archiveRecord) => archiveRecord.id)
   };
 }
 
@@ -6987,7 +7252,7 @@ function getSettledPoolMemberCommitmentIssues(snapshot, participantId) {
   return issues;
 }
 
-function assertUserIdentityReadyForApproval(targetUser) {
+async function assertUserIdentityReadyForApproval(targetUser) {
   const missing = [];
 
   if (!targetUser.contactPhone) {
@@ -7026,6 +7291,26 @@ function assertUserIdentityReadyForApproval(targetUser) {
     targetUser.idDocumentIssueDate,
     targetUser.idDocumentExpirationDate
   );
+
+  const requiredLegalDocuments = getRequiredLegalDocumentsForCategory(targetUser.category);
+  const legalAcknowledgements = await getLegalAcknowledgementsForUser(targetUser.id);
+  const signedDocuments = new Set(
+    legalAcknowledgements.map(
+      (acknowledgement) =>
+        `${acknowledgement.documentKey}:${acknowledgement.documentVersion}`
+    )
+  );
+  const missingLegalDocuments = requiredLegalDocuments.filter(
+    (document) => !signedDocuments.has(`${document.key}:${document.version}`)
+  );
+
+  if (missingLegalDocuments.length) {
+    throw new Error(
+      `This account is missing signed legal documents: ${missingLegalDocuments
+        .map((document) => document.title)
+        .join(", ")}.`
+    );
+  }
 }
 
 export async function reviewUserIdentity(userId, input, actingUserId) {
@@ -7058,7 +7343,7 @@ export async function reviewUserIdentity(userId, input, actingUserId) {
   const rejectionComment = normalizeOptionalText(input?.comment ?? input?.rejectionComment);
 
   if (isApproved) {
-    assertUserIdentityReadyForApproval(targetUser);
+    await assertUserIdentityReadyForApproval(targetUser);
   } else if (!rejectionComment || rejectionComment.length < 3) {
     throw new Error("A rejection comment is required.");
   }

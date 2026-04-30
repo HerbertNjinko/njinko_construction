@@ -12,11 +12,11 @@ import {
   createInitialUserFilters,
   sessionRuntime,
   state
-} from "./state.js?v=20260430-frontend-16";
+} from "./state.js?v=20260430-frontend-19";
 import {
   clearAuthFeedback,
   clearMessages
-} from "./helpers.js?v=20260430-frontend-16";
+} from "./helpers.js?v=20260430-frontend-19";
 import {
   applyAllocationFilters,
   getAllocationFilterOptions,
@@ -26,8 +26,8 @@ import {
   getInvestorIssueFilterOptions,
   getInvestorProjectFilterOptions,
   getUserFilterOptions
-} from "./data.js?v=20260430-frontend-16";
-import { render } from "./renderers.js?v=20260430-frontend-16";
+} from "./data.js?v=20260430-frontend-19";
+import { render } from "./renderers.js?v=20260430-frontend-19";
 
 export async function api(path, options = {}) {
   const response = await fetch(path, {

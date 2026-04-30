@@ -1,4 +1,4 @@
-import { state } from "./state.js?v=20260430-frontend-16";
+import { state } from "./state.js?v=20260430-frontend-19";
 import {
   clearAuthFeedback,
   clearMessages,
@@ -10,7 +10,7 @@ import {
   setAuthMode,
   setMessage,
   toggleSectionCollapsed
-} from "./helpers.js?v=20260430-frontend-16";
+} from "./helpers.js?v=20260430-frontend-19";
 import {
   applyArchivedProjectFilters,
   buildCreateDealDraft,
@@ -25,7 +25,7 @@ import {
   syncDealEditorField,
   updateCreateDealDraft,
   updateDealEditorDraft
-} from "./data.js?v=20260430-frontend-16";
+} from "./data.js?v=20260430-frontend-19";
 import {
   api,
   applyLoggedOutState,
@@ -33,8 +33,8 @@ import {
   loadSession,
   recordSessionActivity,
   refreshDashboard
-} from "./session.js?v=20260430-frontend-16";
-import { render } from "./renderers.js?v=20260430-frontend-16";
+} from "./session.js?v=20260430-frontend-19";
+import { render } from "./renderers.js?v=20260430-frontend-19";
 
 let listenersBound = false;
 
@@ -249,6 +249,9 @@ export function setupEventListeners() {
 
       try {
         const idCardFile = await readFileAsPayload(event.target.elements.idCard.files[0]);
+        const requiredLegalDocuments = Array.isArray(state.session?.requiredLegalDocuments)
+          ? state.session.requiredLegalDocuments
+          : [];
         const result = await api("/api/profile/identity-review", {
           method: "POST",
           body: JSON.stringify({
@@ -258,7 +261,13 @@ export function setupEventListeners() {
             idDocumentExpirationDate: formData.get("idDocumentExpirationDate"),
             currentAddress: formData.get("currentAddress"),
             mailingAddress: formData.get("mailingAddress"),
-            idCardFile
+            idCardFile,
+            legalAcknowledgements: requiredLegalDocuments.map((document) => ({
+              documentKey: document.key,
+              documentVersion: document.version,
+              accepted: formData.get(`legalAck:${document.key}`) === "on",
+              signerName: formData.get(`legalSigner:${document.key}`)
+            }))
           })
         });
         state.session = result.user;
@@ -1043,6 +1052,23 @@ export function setupEventListeners() {
         render();
       }
 
+      return;
+    }
+
+    const poolCollapseButton = event.target.closest("[data-pool-collapse]");
+
+    if (poolCollapseButton) {
+      const collapseMode = poolCollapseButton.dataset.poolCollapse;
+      const collapsePools = collapseMode === "all";
+      const pools = state.dashboard?.admin?.investorPools ?? [];
+
+      state.collapsedSections = {
+        ...state.collapsedSections,
+        ...Object.fromEntries(
+          pools.map((pool) => [`manager-pool-${pool.id}`, collapsePools])
+        )
+      };
+      render();
       return;
     }
 

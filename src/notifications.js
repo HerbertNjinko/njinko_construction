@@ -46,7 +46,7 @@ function buildCredentialBody({ fullName, email, temporaryPassword, role }) {
     `Temporary password: ${temporaryPassword}`,
     "",
     "For security, you will be required to change your password the first time you log in.",
-    "After that, submit your contact details and ID document for manager approval.",
+    "After that, submit your contact details, ID document, and required legal acknowledgements for manager approval.",
     "",
     `If you were not expecting this message, please contact ${COMPANY_NAME}.`
   ].join("\n");
@@ -186,7 +186,7 @@ function buildIdentityReviewAlertBody({ managerName, investorName, email, catego
   return [
     `Hello ${managerName},`,
     "",
-    `${investorName} submitted identity information for manager review.`,
+    `${investorName} submitted identity information and legal acknowledgements for manager review.`,
     "",
     `Portal category: ${category}`,
     `Login email: ${email}`,

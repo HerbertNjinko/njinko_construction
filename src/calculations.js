@@ -1910,6 +1910,15 @@ export function buildManagerDashboard(user, data = seedData) {
   const participantMap = getParticipantMap(data);
   const userMap = new Map(data.users.map((item) => [item.participantId, item]));
   const userMapById = getUserMapById(data);
+  const legalAcknowledgementsByUserId = new Map();
+
+  for (const acknowledgement of data.userLegalAcknowledgements ?? []) {
+    if (!legalAcknowledgementsByUserId.has(acknowledgement.userId)) {
+      legalAcknowledgementsByUserId.set(acknowledgement.userId, []);
+    }
+
+    legalAcknowledgementsByUserId.get(acknowledgement.userId).push(acknowledgement);
+  }
   const investorPools = buildInvestorPoolViews(data);
   const contractorMap = new Map(
     data.contractors.map((item) => [`${item.dealId}:${item.participantId}`, item])
@@ -2051,6 +2060,7 @@ export function buildManagerDashboard(user, data = seedData) {
       accountRejectionComment: account.accountRejectionComment ?? "",
       accountReviewedAt: account.accountReviewedAt ?? null,
       onboardingSubmittedAt: account.onboardingSubmittedAt ?? null,
+      legalAcknowledgements: legalAcknowledgementsByUserId.get(account.id) ?? [],
       lastLoginAt: account.lastLoginAt ?? null,
       notificationStatus: account.notificationStatus ?? null,
       notificationProvider: account.notificationProvider ?? null,
@@ -2390,6 +2400,7 @@ export function buildManagerDashboard(user, data = seedData) {
       issues: governanceIssues
     },
     companyResources: data.companyResources ?? [],
+    legalDocuments: data.legalDocuments ?? [],
     calculator: {
       deals: deals.map((deal) => ({
         id: deal.id,
