@@ -493,11 +493,406 @@ function buildDistributionPlan({ deal, position, participant, result, election, 
     managerOverride: Boolean(election?.managerOverride),
     overrideNotes: election?.overrideNotes ?? "",
     payoutExpectedOn: election?.payoutExpectedOn ?? null,
+    electionDueOn: deal.distributionElectionDueOn ?? null,
     createdAt: election?.createdAt ?? null,
     updatedAt: election?.updatedAt ?? null,
     payoutMethod: participant?.payoutMethod ?? "",
     totalPayout
   };
+}
+
+function archivedValue(source, camelKey, snakeKey = camelKey, fallback = null) {
+  if (!source || typeof source !== "object") {
+    return fallback;
+  }
+
+  return source[camelKey] ?? source[snakeKey] ?? fallback;
+}
+
+function archivedNumber(source, camelKey, snakeKey = camelKey, fallback = 0) {
+  return resolveNumber(archivedValue(source, camelKey, snakeKey, fallback), fallback);
+}
+
+function mapArchivedDeal(payload) {
+  const deal = payload?.deal ?? {};
+
+  return {
+    id: archivedValue(deal, "id"),
+    name: archivedValue(deal, "name", "name", "Archived project"),
+    location: archivedValue(deal, "location", "location", ""),
+    totalEquity: archivedNumber(deal, "totalEquity", "total_equity"),
+    debt: archivedNumber(deal, "debt"),
+    taxExpense: archivedNumber(deal, "taxExpense", "tax_expense"),
+    debtInterestRate: archivedNumber(deal, "debtInterestRate", "debt_interest_rate"),
+    totalInterestPaid: archivedNumber(deal, "totalInterestPaid", "total_interest_paid"),
+    budgetedProjectCost: archivedNumber(deal, "budgetedProjectCost", "budgeted_project_cost"),
+    actualProjectCost: archivedValue(deal, "actualProjectCost", "actual_project_cost", null),
+    totalProjectCost: archivedNumber(deal, "totalProjectCost", "total_project_cost"),
+    salePrice: archivedNumber(deal, "salePrice", "sale_price"),
+    holdMonths: archivedNumber(deal, "holdMonths", "hold_months"),
+    prefRate: archivedNumber(deal, "prefRate", "pref_rate"),
+    status: archivedValue(deal, "status", "status", "sold"),
+    currentPhase: archivedValue(deal, "currentPhase", "current_phase", "Archived"),
+    fundedOn: archivedValue(deal, "fundedOn", "funded_on", null),
+    projectedExitOn: archivedValue(deal, "projectedExitOn", "projected_exit_on", null),
+    actualExitOn: archivedValue(deal, "actualExitOn", "actual_exit_on", null),
+    timelineProgress: archivedNumber(deal, "timelineProgress", "timeline_progress", 100),
+    earlyWithdrawalPenaltyRate: archivedNumber(
+      deal,
+      "earlyWithdrawalPenaltyRate",
+      "early_withdrawal_penalty_rate",
+      0.3
+    ),
+    promoteTiers: (payload?.promoteTiers ?? []).map((tier) => ({
+      label: archivedValue(tier, "label", "label", ""),
+      hurdle: archivedNumber(tier, "hurdle"),
+      investorShare: archivedNumber(tier, "investorShare", "investor_share"),
+      sponsorShare: archivedNumber(tier, "sponsorShare", "sponsor_share"),
+      sortOrder: archivedNumber(tier, "sortOrder", "sort_order"),
+      isEnabled:
+        archivedValue(tier, "isEnabled", "is_enabled", true) !== false &&
+        archivedValue(tier, "isEnabled", "is_enabled", true) !== 0
+    })),
+    expenseEntries: (payload?.expenseEntries ?? []).map((entry) => ({
+      amountPaid: archivedNumber(entry, "amountPaid", "amount_paid"),
+      paidOn: archivedValue(entry, "paidOn", "paid_on", null),
+      sortOrder: archivedNumber(entry, "sortOrder", "sort_order")
+    })),
+    debtServiceEntries: (payload?.debtServiceEntries ?? []).map((entry) => ({
+      serviceMonth: archivedValue(entry, "serviceMonth", "interest_month", ""),
+      drawBalance: archivedNumber(entry, "drawBalance", "draw_balance"),
+      interestPaid: archivedNumber(entry, "interestPaid", "interest_paid")
+    }))
+  };
+}
+
+function mapArchivedPosition(position) {
+  return {
+    id: archivedValue(position, "id"),
+    dealId: archivedValue(position, "dealId", "deal_id"),
+    participantId: archivedValue(position, "participantId", "participant_id"),
+    participantName: archivedValue(position, "participantName", "participant_name", "Investor"),
+    participantCategory: archivedValue(position, "participantCategory", "participant_category", ""),
+    classType: archivedValue(position, "classType", "class_type", "Class A"),
+    contributionType: archivedValue(position, "contributionType", "contribution_type", ""),
+    contributionAmount: archivedNumber(position, "contributionAmount", "contribution_amount"),
+    distributionsToDate: archivedNumber(position, "distributionsToDate", "distributions_to_date")
+  };
+}
+
+function mapArchivedDistributionElection(election) {
+  return {
+    id: archivedValue(election, "id"),
+    dealId: archivedValue(election, "dealId", "deal_id"),
+    participantId: archivedValue(election, "participantId", "participant_id"),
+    participantName: archivedValue(election, "participantName", "participant_name", "Investor"),
+    electionMode: archivedValue(election, "electionMode", "election_mode", null),
+    reinvestPercent:
+      archivedValue(election, "reinvestPercent", "reinvest_percent", null) === null
+        ? null
+        : archivedNumber(election, "reinvestPercent", "reinvest_percent"),
+    reinvestAmount:
+      archivedValue(election, "reinvestAmount", "reinvest_amount", null) === null
+        ? null
+        : archivedNumber(election, "reinvestAmount", "reinvest_amount"),
+    rolloverTargetDealId: archivedValue(
+      election,
+      "rolloverTargetDealId",
+      "rollover_target_deal_id",
+      null
+    ),
+    rolloverTargetDealName: archivedValue(
+      election,
+      "rolloverTargetDealName",
+      "rollover_target_deal_name",
+      null
+    ),
+    notes: archivedValue(election, "notes", "notes", ""),
+    submittedByUserId: archivedValue(election, "submittedByUserId", "submitted_by_user_id", null),
+    submittedByRole: archivedValue(election, "submittedByRole", "submitted_by_role", null),
+    approvalStatus: archivedValue(election, "approvalStatus", "approval_status", null),
+    approvedReinvestAmount:
+      archivedValue(election, "approvedReinvestAmount", "approved_reinvest_amount", null) === null
+        ? null
+        : archivedNumber(election, "approvedReinvestAmount", "approved_reinvest_amount"),
+    approvedCashPayoutAmount:
+      archivedValue(election, "approvedCashPayoutAmount", "approved_cash_payout_amount", null) === null
+        ? null
+        : archivedNumber(election, "approvedCashPayoutAmount", "approved_cash_payout_amount"),
+    payoutExpectedOn: archivedValue(election, "payoutExpectedOn", "payout_expected_on", null),
+    reviewedAt: archivedValue(election, "reviewedAt", "reviewed_at", null),
+    managerOverride: Boolean(archivedValue(election, "managerOverride", "manager_override", false)),
+    overrideNotes: archivedValue(election, "overrideNotes", "override_notes", ""),
+    createdAt: archivedValue(election, "createdAt", "created_at", null),
+    updatedAt: archivedValue(election, "updatedAt", "updated_at", null)
+  };
+}
+
+function buildArchivedProjectSnapshots(data) {
+  const participantMap = getParticipantMap(data);
+  const currentDealMap = new Map((data.deals ?? []).map((deal) => [deal.id, deal]));
+  const currentPoolsByPoolParticipantId = new Map(
+    (data.investorPools ?? []).map((pool) => [pool.poolParticipantId, pool])
+  );
+  const currentPoolCommitmentsByPoolId = new Map();
+
+  for (const commitment of data.investorPoolCommitments ?? []) {
+    if (!currentPoolCommitmentsByPoolId.has(commitment.poolId)) {
+      currentPoolCommitmentsByPoolId.set(commitment.poolId, []);
+    }
+
+    currentPoolCommitmentsByPoolId.get(commitment.poolId).push(commitment);
+  }
+
+  return (data.archivedRecords ?? [])
+    .filter((record) => record.entityType === "deal" || record.sourceTable === "deals")
+    .map((record) => {
+      const payload = record.payloadJson ?? {};
+      const deal = mapArchivedDeal(payload);
+      const positions = (payload.positions ?? []).map((position) => mapArchivedPosition(position));
+      const elections = (payload.distributionElections ?? []).map((election) =>
+        mapArchivedDistributionElection(election)
+      );
+      const archivedPoolsByPoolParticipantId = new Map(
+        (payload.investorPools ?? []).map((pool) => [
+          archivedValue(pool, "poolParticipantId", "pool_participant_id"),
+          pool
+        ])
+      );
+      const archivedPoolCommitmentsByPoolId = new Map();
+
+      for (const commitment of payload.investorPoolCommitments ?? []) {
+        const poolId = archivedValue(commitment, "poolId", "pool_id");
+
+        if (!poolId) {
+          continue;
+        }
+
+        if (!archivedPoolCommitmentsByPoolId.has(poolId)) {
+          archivedPoolCommitmentsByPoolId.set(poolId, []);
+        }
+
+        archivedPoolCommitmentsByPoolId.get(poolId).push(commitment);
+      }
+
+      const electionMap = new Map(
+        elections.map((election) => [`${election.dealId}:${election.participantId}`, election])
+      );
+      const waterfall = calculateWaterfall({ deal, positions });
+      const archivedDealMap = new Map(currentDealMap);
+      archivedDealMap.set(deal.id, deal);
+
+      const investorRows = positions.map((position) => {
+        const result =
+          waterfall.participantResults.find((row) => row.positionId === position.id) ?? {};
+        const participant = participantMap.get(position.participantId) ?? {
+          id: position.participantId,
+          name: position.participantName
+        };
+        const election = electionMap.get(`${deal.id}:${position.participantId}`) ?? null;
+        const distributionPlan = buildDistributionPlan({
+          deal,
+          position,
+          participant,
+          result,
+          election,
+          dealMap: archivedDealMap
+        });
+        const reinvestedAmount = distributionPlan.approvedReinvestedAmount;
+        const totalAmountPayout =
+          distributionPlan.approvalStatus === "approved"
+            ? distributionPlan.approvedCashPayoutAmount
+            : position.distributionsToDate;
+
+        return {
+          participantId: position.participantId,
+          participantName: participant?.name ?? position.participantName,
+          classType: position.classType,
+          totalInvested: roundCurrency(position.contributionAmount),
+          totalReturned: roundCurrency((result.prefEarned ?? 0) + (result.profitShare ?? 0)),
+          totalPayout: roundCurrency(result.totalPayout ?? 0),
+          totalAmountPayout: roundCurrency(totalAmountPayout),
+          electionMode: distributionPlan.electionMode,
+          electionStatus: distributionPlan.approvalStatus,
+          reinvestedAmount,
+          cashPayoutAmount: distributionPlan.approvedCashPayoutAmount,
+          rolloverTargetDealName:
+            election?.rolloverTargetDealName ?? distributionPlan.rolloverTargetDealName ?? null,
+          notes: distributionPlan.notes,
+          reviewedAt: distributionPlan.reviewedAt,
+          payoutExpectedOn: distributionPlan.payoutExpectedOn
+        };
+      });
+      const pooledMemberRows = positions
+        .filter((position) => {
+          const participantCategory =
+            participantMap.get(position.participantId)?.category ?? position.participantCategory;
+          return participantCategory === "pool";
+        })
+        .flatMap((position) => {
+          const archivedPool = archivedPoolsByPoolParticipantId.get(position.participantId);
+          const currentPool = currentPoolsByPoolParticipantId.get(position.participantId);
+          const pool = archivedPool ?? currentPool;
+          const poolId = archivedValue(pool, "id");
+
+          if (!poolId) {
+            return [];
+          }
+
+          const commitments =
+            archivedPoolCommitmentsByPoolId.get(poolId) ??
+            currentPoolCommitmentsByPoolId.get(poolId) ??
+            [];
+          const normalizedCommitments = commitments
+            .map((commitment) => ({
+              participantId: archivedValue(commitment, "participantId", "participant_id"),
+              participantName: archivedValue(
+                commitment,
+                "participantName",
+                "participant_name",
+                "Pooled member"
+              ),
+              commitmentAmount: archivedNumber(
+                commitment,
+                "commitmentAmount",
+                "commitment_amount"
+              )
+            }))
+            .filter((commitment) => commitment.participantId && commitment.commitmentAmount > 0);
+          const totalCommitted = roundCurrency(
+            normalizedCommitments.reduce(
+              (sum, commitment) => sum + commitment.commitmentAmount,
+              0
+            )
+          );
+
+          if (totalCommitted <= 0) {
+            return [];
+          }
+
+          const poolResult =
+            waterfall.participantResults.find((row) => row.positionId === position.id) ?? {};
+          const poolName =
+            archivedValue(pool, "name", "name", null) ??
+            position.participantName ??
+            "Pooled capital group";
+
+          return normalizedCommitments.map((commitment) => {
+            const sharePct = commitment.commitmentAmount / totalCommitted;
+            const participant = participantMap.get(commitment.participantId) ?? {
+              id: commitment.participantId,
+              name: commitment.participantName
+            };
+            const election = electionMap.get(`${deal.id}:${commitment.participantId}`) ?? null;
+            const result = {
+              positionId: `${position.id}:${commitment.participantId}`,
+              participantId: commitment.participantId,
+              classType: position.classType,
+              contributionAmount: commitment.commitmentAmount,
+              ownershipPct: (poolResult.ownershipPct ?? 0) * sharePct,
+              capitalReturned: roundCurrency((poolResult.capitalReturned ?? 0) * sharePct),
+              prefEarned: roundCurrency((poolResult.prefEarned ?? 0) * sharePct),
+              profitShare: roundCurrency((poolResult.profitShare ?? 0) * sharePct),
+              totalPayout: roundCurrency((poolResult.totalPayout ?? 0) * sharePct)
+            };
+            const distributionPlan = buildDistributionPlan({
+              deal,
+              position: {
+                id: result.positionId,
+                dealId: deal.id,
+                participantId: commitment.participantId,
+                classType: position.classType,
+                contributionType: "Pooled commitment",
+                contributionAmount: commitment.commitmentAmount,
+                distributionsToDate: roundCurrency(position.distributionsToDate * sharePct)
+              },
+              participant,
+              result,
+              election,
+              dealMap: archivedDealMap
+            });
+            const totalAmountPayout =
+              distributionPlan.approvalStatus === "approved"
+                ? distributionPlan.approvedCashPayoutAmount
+                : roundCurrency(position.distributionsToDate * sharePct);
+
+            return {
+              participantId: commitment.participantId,
+              participantName: `${participant?.name ?? commitment.participantName} (via ${poolName})`,
+              classType: `${position.classType} pooled`,
+              totalInvested: roundCurrency(commitment.commitmentAmount),
+              totalReturned: roundCurrency(result.prefEarned + result.profitShare),
+              totalPayout: result.totalPayout,
+              totalAmountPayout: roundCurrency(totalAmountPayout),
+              electionMode: distributionPlan.electionMode,
+              electionStatus: distributionPlan.approvalStatus,
+              reinvestedAmount: distributionPlan.approvedReinvestedAmount,
+              cashPayoutAmount: distributionPlan.approvedCashPayoutAmount,
+              rolloverTargetDealName:
+                election?.rolloverTargetDealName ?? distributionPlan.rolloverTargetDealName ?? null,
+              notes: distributionPlan.notes,
+              reviewedAt: distributionPlan.reviewedAt,
+              payoutExpectedOn: distributionPlan.payoutExpectedOn,
+              isPooledMember: true,
+              sourcePoolName: poolName
+            };
+          });
+        });
+      investorRows.push(...pooledMemberRows);
+
+      return {
+        id: record.id,
+        archivedRecordId: record.id,
+        dealId: deal.id ?? record.entityId,
+        name: deal.name ?? record.displayName ?? "Archived project",
+        location: deal.location ?? "",
+        status: deal.status,
+        statusLabel: statusLabel(deal.status),
+        archivedAt: record.deletedAt ?? record.createdAt,
+        archivedByName: record.deletedByName ?? "",
+        archivedByEmail: record.deletedByEmail ?? "",
+        salePrice: waterfall.salePrice,
+        totalProjectCost: waterfall.totalProjectCost,
+        totalEquity: waterfall.totalEquity,
+        totalDebt: waterfall.totalDebt,
+        netProjectProfit: waterfall.netProjectProfit,
+        sponsorPromote: waterfall.sponsorPromote,
+        investorProfitPool: waterfall.investorProfitPool,
+        positionCount: positions.length,
+        distributionElectionCount: elections.length,
+        resourceCount: (payload.companyResources ?? []).length,
+        issueCount: (payload.issues ?? []).length,
+        investorRows
+      };
+    });
+}
+
+function buildArchivedProjectHistoryForParticipant(data, participantId) {
+  return buildArchivedProjectSnapshots(data)
+    .flatMap((archivedProject) =>
+      archivedProject.investorRows
+        .filter((row) => row.participantId === participantId)
+        .map((row) => ({
+          id: `${archivedProject.archivedRecordId}:${row.participantId}:${row.sourcePoolName ?? "direct"}`,
+          archivedRecordId: archivedProject.archivedRecordId,
+          dealId: archivedProject.dealId,
+          projectName: archivedProject.name,
+          archivedAt: archivedProject.archivedAt,
+          totalInvested: row.totalInvested,
+          totalReturned: row.totalReturned,
+          totalAmountPayout: row.totalAmountPayout,
+          totalPayout: row.totalPayout,
+          electionMode: row.electionMode,
+          electionStatus: row.electionStatus,
+          reinvestedAmount: row.reinvestedAmount,
+          cashPayoutAmount: row.cashPayoutAmount,
+          rolloverTargetDealName: row.rolloverTargetDealName,
+          reviewedAt: row.reviewedAt,
+          payoutExpectedOn: row.payoutExpectedOn,
+          sourcePoolName: row.sourcePoolName ?? null
+        }))
+    )
+    .sort((left, right) => String(right.archivedAt ?? "").localeCompare(String(left.archivedAt ?? "")));
 }
 
 function buildEarlyWithdrawalPlan({ deal, position, participant, request }) {
@@ -993,6 +1388,7 @@ export function buildPoolMemberDashboard(user, data = seedData) {
         ? `Pooled through ${context.sourcePoolNames[0]}`
         : `Pooled through ${context.sourcePoolNames.length} capital groups`,
     status: "sold",
+    distributionElectionDueOn: context.distributionElectionDueOn ?? null,
     personalPosition: {
       totalPayout: context.totalPayout,
       profitEarned: context.profitReturned,
@@ -1000,6 +1396,7 @@ export function buildPoolMemberDashboard(user, data = seedData) {
     },
     reinvestmentTargets: context.reinvestmentTargets
   }));
+  const archivedProjects = buildArchivedProjectHistoryForParticipant(data, user.participantId);
   const totalCommitted = roundCurrency(
     pools.reduce((sum, investmentPool) => sum + investmentPool.myCommitmentAmount, 0)
   );
@@ -1052,9 +1449,11 @@ export function buildPoolMemberDashboard(user, data = seedData) {
       projectedPrefEarned,
       activePools,
       pendingPools,
-      jointCapitalDeployed
+      jointCapitalDeployed,
+      archivedProjectCount: archivedProjects.length
     },
     pooledDistributionProjects: distributionProjects,
+    archivedProjects,
     pools
   };
 }
@@ -1204,6 +1603,7 @@ export function buildPoolDistributionContexts(
         totalPayout,
         capitalReturned,
         profitReturned,
+        distributionElectionDueOn: deal.distributionElectionDueOn ?? null,
         distributionPlan,
         reinvestmentTargets: data.deals
           .filter((item) => item.status !== "sold" && item.id !== context.dealId)
@@ -1273,6 +1673,7 @@ export function buildInvestorDashboard(user, data = seedData) {
       statusLabel: statusLabel(deal.status),
       currentPhase: deal.currentPhase,
       investmentCloseOn: deal.investmentCloseOn ?? null,
+      distributionElectionDueOn: deal.distributionElectionDueOn ?? null,
       earlyWithdrawalPenaltyRate: deal.earlyWithdrawalPenaltyRate ?? 0.3,
       timelineProgress: resolveTimelineProgress(deal.status, deal.timelineProgress),
       timeline: deal.timeline,
@@ -1329,6 +1730,7 @@ export function buildInvestorDashboard(user, data = seedData) {
         "Other investor contributions, bank balances, and the detailed monthly financing ledger remain hidden."
     };
   });
+  const archivedProjects = buildArchivedProjectHistoryForParticipant(data, user.participantId);
 
   const withdrawalProjects =
     ["investor", "contractor"].includes(participant?.category ?? "")
@@ -1445,13 +1847,15 @@ export function buildInvestorDashboard(user, data = seedData) {
       totalAmountPayout,
       activeInvestments,
       currentPrefEarned,
-      projectedPrefEarned
+      projectedPrefEarned,
+      archivedProjectCount: archivedProjects.length
     },
     governance: {
       issues: governanceIssues
     },
     companyResources: data.companyResources ?? [],
     pooledDistributionProjects,
+    archivedProjects,
     projects,
     withdrawalRequests: withdrawalProjects
   };
@@ -1733,6 +2137,7 @@ export function buildManagerDashboard(user, data = seedData) {
         rolloverTargetDealId: distribution.rolloverTargetDealId,
         rolloverTargetDealName: distribution.rolloverTargetDealName,
         payoutExpectedOn: distribution.payoutExpectedOn,
+        distributionElectionDueOn: distribution.electionDueOn,
         notes: distribution.notes,
         submittedByRole: distribution.submittedByRole,
         submittedByName: submittedBy?.name ?? null,
@@ -1807,6 +2212,7 @@ export function buildManagerDashboard(user, data = seedData) {
       rolloverTargetDealId: distribution.rolloverTargetDealId,
       rolloverTargetDealName: distribution.rolloverTargetDealName,
       payoutExpectedOn: distribution.payoutExpectedOn,
+      distributionElectionDueOn: distribution.electionDueOn,
       notes: distribution.notes,
       submittedByRole: distribution.submittedByRole,
       submittedByName: submittedBy?.name ?? null,
@@ -1899,6 +2305,7 @@ export function buildManagerDashboard(user, data = seedData) {
 
       return String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? ""));
     });
+  const archivedProjects = buildArchivedProjectSnapshots(data);
 
   return {
     role: user.role,
@@ -1914,6 +2321,7 @@ export function buildManagerDashboard(user, data = seedData) {
       activeDeals: deals.filter((deal) => deal.status !== "sold").length,
       totalTrackedEquity,
       projectedSponsorPromote,
+      archivedDeals: archivedProjects.length,
       totalInvestorPools: investorPools.length,
       totalPooledCapital: roundCurrency(
         investorPools.reduce((sum, investmentPool) => sum + investmentPool.totalCommitted, 0)
@@ -1928,6 +2336,7 @@ export function buildManagerDashboard(user, data = seedData) {
       poolMembers,
       investorPools,
       allocations: adminAllocations,
+      archivedProjects,
       distributionReviews: combinedDistributionReviews,
       earlyWithdrawalReviews
     },

@@ -9,6 +9,7 @@ import {
   sendCredentialNotification,
   sendDistributionElectionApprovedNotification,
   sendDistributionElectionAlertNotification,
+  sendDistributionElectionRequestNotification,
   sendEarlyWithdrawalApprovedNotification,
   sendEarlyWithdrawalRejectedNotification,
   sendEarlyWithdrawalRequestAlertNotification,
@@ -28,6 +29,10 @@ const RESOURCE_UPLOAD_MAX_BYTES = readPositiveIntegerEnv(
   10 * 1024 * 1024
 );
 const DEFAULT_EARLY_WITHDRAWAL_PENALTY_RATE = 0.3;
+const DISTRIBUTION_ELECTION_DEADLINE_DAYS = readPositiveIntegerEnv(
+  "DISTRIBUTION_ELECTION_DEADLINE_DAYS",
+  14
+);
 const ALLOWED_ID_CARD_MIME_TYPES = new Set([
   "application/pdf",
   "image/jpeg",
@@ -71,6 +76,21 @@ function nowTimestamp() {
 
 function todayStamp() {
   return new Date().toISOString().slice(0, 10);
+}
+
+function addDaysToDateStamp(dateStamp, days) {
+  const [year, month, day] = String(dateStamp ?? todayStamp())
+    .split("-")
+    .map((item) => Number(item));
+  const baseDate = new Date(Date.UTC(year, month - 1, day));
+
+  if (Number.isNaN(baseDate.getTime())) {
+    throw new Error("Date must use the YYYY-MM-DD format.");
+  }
+
+  baseDate.setUTCDate(baseDate.getUTCDate() + days);
+
+  return baseDate.toISOString().slice(0, 10);
 }
 
 function normalizeEmail(email) {
@@ -1435,8 +1455,13 @@ export async function getUserById(userId) {
   return getUserAccountById(userId, { includeInactive: false });
 }
 
-export async function getAppDataSnapshot() {
+export async function getAppDataSnapshot({ skipAutomation = false } = {}) {
   await applyClosedPenaltyRateIssueResolutions();
+
+  if (!skipAutomation) {
+    await ensureDistributionElectionRequestsForSoldDeals();
+    await applyOverdueDistributionElectionDefaults();
+  }
 
   const participants = (await queryAll(
     `
@@ -1498,7 +1523,9 @@ export async function getAppDataSnapshot() {
         investment_close_on AS "investmentCloseOn",
         projected_exit_on AS "projectedExitOn",
         actual_exit_on AS "actualExitOn",
-        timeline_progress AS "timelineProgress"
+        timeline_progress AS "timelineProgress",
+        distribution_election_due_on AS "distributionElectionDueOn",
+        distribution_election_notice_sent_at AS "distributionElectionNoticeSentAt"
       FROM deals
       ORDER BY name
     `
@@ -1860,6 +1887,27 @@ export async function getAppDataSnapshot() {
       ORDER BY updated_at DESC, id
     `
   );
+  const archivedRecords = await queryAll(
+    `
+      SELECT
+        id,
+        entity_type AS "entityType",
+        entity_id AS "entityId",
+        source_table AS "sourceTable",
+        display_name AS "displayName",
+        related_deal_id AS "relatedDealId",
+        related_participant_id AS "relatedParticipantId",
+        deleted_by_user_id AS "deletedByUserId",
+        deleted_by_role AS "deletedByRole",
+        deleted_by_email AS "deletedByEmail",
+        deleted_by_name AS "deletedByName",
+        deleted_at AS "deletedAt",
+        payload_json AS "payloadJson",
+        created_at AS "createdAt"
+      FROM archived_records
+      ORDER BY deleted_at DESC, id
+    `
+  );
 
   return {
     asOfDate: todayStamp(),
@@ -1875,7 +1923,8 @@ export async function getAppDataSnapshot() {
     earlyWithdrawalRequests,
     companyResources,
     dealIssues,
-    issueVotes
+    issueVotes,
+    archivedRecords
   };
 }
 
@@ -4214,7 +4263,10 @@ export async function updateDeal(dealId, input) {
 
   const existingDeal = await queryOne(
     `
-      SELECT id, status
+      SELECT
+        id,
+        status,
+        distribution_election_due_on AS "distributionElectionDueOn"
       FROM deals
       WHERE id = $1
     `,
@@ -4232,6 +4284,10 @@ export async function updateDeal(dealId, input) {
   }
 
   const deal = normalizeDealInput(input);
+  const isClosingDeal = existingDeal.status !== "sold" && deal.status === "sold";
+  const closingElectionDueOn =
+    existingDeal.distributionElectionDueOn ||
+    addDaysToDateStamp(todayStamp(), DISTRIBUTION_ELECTION_DEADLINE_DAYS);
   const expenseEntries = deal.expenseEntries;
   const debtServiceEntries = deal.debtServiceEntries;
   const timelineItems = normalizeTimelineItems(input.timeline);
@@ -4317,7 +4373,29 @@ export async function updateDeal(dealId, input) {
     if (promoteTiers) {
       await replacePromoteTiers(id, promoteTiers, client);
     }
+
+    if (isClosingDeal) {
+      await client.query(
+        `
+          UPDATE deals
+          SET
+            distribution_election_due_on = COALESCE(distribution_election_due_on, $1),
+            distribution_election_notice_sent_at = NULL,
+            updated_at = $2
+          WHERE id = $3
+        `,
+        [closingElectionDueOn, nowTimestamp(), id]
+      );
+    }
   });
+
+  if (isClosingDeal) {
+    return {
+      dealId: id,
+      distributionElectionDueOn: closingElectionDueOn,
+      notifications: await sendDistributionElectionRequestNotificationsForDeal(id)
+    };
+  }
 }
 
 export async function createCompanyResource(input, createdByUserId) {
@@ -4649,6 +4727,52 @@ async function buildDealArchivePayload(dealId, executor = pool) {
     [dealId],
     executor
   );
+  const investorPools = await queryAll(
+    `
+      SELECT
+        investor_pools.*,
+        pool_participant.name AS pool_participant_name
+      FROM investor_pools
+      LEFT JOIN participants AS pool_participant
+        ON pool_participant.id = investor_pools.pool_participant_id
+      WHERE investor_pools.selected_deal_id = $1
+      ORDER BY investor_pools.created_at, investor_pools.id
+    `,
+    [dealId],
+    executor
+  );
+  const investorPoolCommitments = investorPools.length
+    ? await queryAll(
+        `
+          SELECT
+            investor_pool_commitments.*,
+            participants.name AS participant_name
+          FROM investor_pool_commitments
+          LEFT JOIN participants ON participants.id = investor_pool_commitments.participant_id
+          WHERE investor_pool_commitments.pool_id = ANY($1::text[])
+          ORDER BY investor_pool_commitments.created_at, investor_pool_commitments.id
+        `,
+        [investorPools.map((poolRow) => poolRow.id)],
+        executor
+      )
+    : [];
+  const investorPoolVotes = investorPools.length
+    ? await queryAll(
+        `
+          SELECT
+            investor_pool_votes.*,
+            participants.name AS participant_name,
+            deals.name AS deal_name
+          FROM investor_pool_votes
+          LEFT JOIN participants ON participants.id = investor_pool_votes.participant_id
+          LEFT JOIN deals ON deals.id = investor_pool_votes.deal_id
+          WHERE investor_pool_votes.pool_id = ANY($1::text[])
+          ORDER BY investor_pool_votes.created_at, investor_pool_votes.id
+        `,
+        [investorPools.map((poolRow) => poolRow.id)],
+        executor
+      )
+    : [];
   const companyResources = await queryAll(
     `
       SELECT
@@ -4706,6 +4830,9 @@ async function buildDealArchivePayload(dealId, executor = pool) {
     positions,
     contractorParticipation,
     distributionElections,
+    investorPools,
+    investorPoolCommitments,
+    investorPoolVotes,
     companyResources,
     issues,
     issueVotes,
@@ -4716,6 +4843,9 @@ async function buildDealArchivePayload(dealId, executor = pool) {
       positions: positions.length,
       contractorParticipation: contractorParticipation.length,
       distributionElections: distributionElections.length,
+      investorPools: investorPools.length,
+      investorPoolCommitments: investorPoolCommitments.length,
+      investorPoolVotes: investorPoolVotes.length,
       companyResources: companyResources.length,
       issues: issues.length,
       issueVotes: issueVotes.length
@@ -5001,6 +5131,462 @@ function resolveDistributionElectionContext(snapshot, dealId, participantId) {
   }
 
   throw new Error("You do not have an eligible distribution balance in this deal.");
+}
+
+function resolveDistributionElectionStatus(election) {
+  if (!election) {
+    return "missing";
+  }
+
+  const approvalStatus = election.approvalStatus ?? (election.reviewedAt ? "approved" : "pending");
+
+  return approvalStatus === "approved" ? "approved" : "pending";
+}
+
+function findDefaultReinvestmentTargetDeal(snapshot, sourceDealId) {
+  return (
+    [...(snapshot.deals ?? [])]
+      .filter((deal) => deal.id !== sourceDealId && deal.status !== "sold")
+      .sort((left, right) => {
+        const leftDate = left.investmentCloseOn || left.projectedExitOn || left.fundedOn || "9999-12-31";
+        const rightDate =
+          right.investmentCloseOn || right.projectedExitOn || right.fundedOn || "9999-12-31";
+        const dateCompare = String(leftDate).localeCompare(String(rightDate));
+
+        return dateCompare !== 0 ? dateCompare : left.name.localeCompare(right.name);
+      })[0] ?? null
+  );
+}
+
+function buildDistributionElectionRequirementContexts(snapshot, dealId) {
+  const deal = (snapshot.deals ?? []).find((item) => item.id === dealId);
+
+  if (!deal || deal.status !== "sold") {
+    return [];
+  }
+
+  const participantMap = new Map((snapshot.participants ?? []).map((item) => [item.id, item]));
+  const userMap = new Map((snapshot.users ?? []).map((item) => [item.participantId, item]));
+  const electionMap = new Map(
+    (snapshot.distributionElections ?? []).map((item) => [
+      `${item.dealId}:${item.participantId}`,
+      item
+    ])
+  );
+  const dealPositions = (snapshot.positions ?? []).filter((position) => position.dealId === dealId);
+  const waterfall = calculateWaterfall({ deal, positions: dealPositions });
+  const resultMap = new Map(
+    (waterfall.participantResults ?? []).map((result) => [result.positionId, result])
+  );
+  const requirements = [];
+  const seenKeys = new Set();
+
+  for (const position of dealPositions) {
+    const participant = participantMap.get(position.participantId);
+
+    if (participant?.category !== "investor") {
+      continue;
+    }
+
+    const result = resultMap.get(position.id);
+
+    if (!result || result.totalPayout <= 0) {
+      continue;
+    }
+
+    const key = `${dealId}:${position.participantId}`;
+    const election = electionMap.get(key) ?? null;
+
+    requirements.push({
+      key,
+      kind: "direct",
+      dealId,
+      dealName: deal.name,
+      participantId: position.participantId,
+      participantName: participant.name,
+      participantEmail: userMap.get(position.participantId)?.email ?? "",
+      user: userMap.get(position.participantId) ?? null,
+      sourcePoolNames: [],
+      totalPayout: roundNumber(result.totalPayout),
+      capitalReturned: roundNumber(result.capitalReturned),
+      profitReturned: roundNumber(result.prefEarned + result.profitShare),
+      status: resolveDistributionElectionStatus(election),
+      election
+    });
+    seenKeys.add(key);
+  }
+
+  for (const context of buildPoolDistributionContexts(snapshot, { dealId })) {
+    const key = `${dealId}:${context.participantId}`;
+
+    if (seenKeys.has(key)) {
+      continue;
+    }
+
+    requirements.push({
+      key,
+      kind: "pooled",
+      dealId,
+      dealName: context.dealName,
+      participantId: context.participantId,
+      participantName: context.participantName,
+      participantEmail: context.participantEmail,
+      user: userMap.get(context.participantId) ?? null,
+      sourcePoolNames: context.sourcePoolNames,
+      totalPayout: roundNumber(context.totalPayout),
+      capitalReturned: roundNumber(context.capitalReturned),
+      profitReturned: roundNumber(context.profitReturned),
+      status: resolveDistributionElectionStatus(context.distributionPlan?.hasElection
+        ? context.distributionPlan
+        : electionMap.get(key) ?? null),
+      election: electionMap.get(key) ?? null
+    });
+    seenKeys.add(key);
+  }
+
+  return requirements.filter((requirement) => requirement.totalPayout > 0);
+}
+
+function getUnresolvedDistributionElectionRequirements(snapshot, dealId) {
+  return buildDistributionElectionRequirementContexts(snapshot, dealId).filter(
+    (requirement) => requirement.status !== "approved"
+  );
+}
+
+async function getAutomationManagerUser() {
+  const row = await queryOne(
+    `
+      ${USER_SELECT_FRAGMENT}
+      WHERE users.role = 'manager'
+        AND users.is_active = 1
+      ORDER BY users.created_at, users.id
+      LIMIT 1
+    `
+  );
+
+  return mapUserRow(row);
+}
+
+async function sendDistributionElectionRequestNotificationsForDeal(dealId) {
+  const timestamp = nowTimestamp();
+  const claimedDeal = await queryOne(
+    `
+      UPDATE deals
+      SET distribution_election_notice_sent_at = $1
+      WHERE id = $2
+        AND status = 'sold'
+        AND distribution_election_notice_sent_at IS NULL
+      RETURNING
+        id,
+        name,
+        distribution_election_due_on AS "distributionElectionDueOn"
+    `,
+    [timestamp, dealId]
+  );
+
+  if (!claimedDeal) {
+    return [];
+  }
+
+  const snapshot = await getAppDataSnapshot({ skipAutomation: true });
+  const defaultTargetDeal = findDefaultReinvestmentTargetDeal(snapshot, dealId);
+  const requirements = buildDistributionElectionRequirementContexts(snapshot, dealId).filter(
+    (requirement) => requirement.status !== "approved"
+  );
+
+  return Promise.all(
+    requirements
+      .filter(
+        (requirement) =>
+          requirement.user?.role === "investor" &&
+          requirement.user?.isActive &&
+          requirement.user?.accountApprovalStatus === "approved" &&
+          requirement.user?.email
+      )
+      .map(async (requirement) => {
+        try {
+          return await sendDistributionElectionRequestNotification({
+            userId: requirement.user.id,
+            participantId: requirement.participantId,
+            fullName: requirement.participantName,
+            email: requirement.user.email,
+            dealName: claimedDeal.name,
+            dueOn: claimedDeal.distributionElectionDueOn,
+            totalPayout: requirement.totalPayout,
+            defaultTargetDealName: defaultTargetDeal?.name ?? null
+          });
+        } catch (error) {
+          return {
+            status: "failed",
+            provider: "notification_error",
+            localPath: null,
+            errorMessage: error.message,
+            recipientEmail: requirement.user.email
+          };
+        }
+      })
+  );
+}
+
+async function ensureDistributionElectionRequestsForSoldDeals() {
+  const soldDealsNeedingElectionSetup = await queryAll(
+    `
+      SELECT
+        id,
+        distribution_election_due_on AS "distributionElectionDueOn",
+        distribution_election_notice_sent_at AS "distributionElectionNoticeSentAt"
+      FROM deals
+      WHERE status = 'sold'
+        AND (
+          distribution_election_due_on IS NULL
+          OR distribution_election_notice_sent_at IS NULL
+        )
+      ORDER BY actual_exit_on NULLS LAST, updated_at, id
+    `
+  );
+
+  for (const deal of soldDealsNeedingElectionSetup) {
+    if (!deal.distributionElectionDueOn) {
+      await pool.query(
+        `
+          UPDATE deals
+          SET
+            distribution_election_due_on = $1,
+            updated_at = $2
+          WHERE id = $3
+            AND distribution_election_due_on IS NULL
+        `,
+        [
+          addDaysToDateStamp(todayStamp(), DISTRIBUTION_ELECTION_DEADLINE_DAYS),
+          nowTimestamp(),
+          deal.id
+        ]
+      );
+    }
+
+    if (!deal.distributionElectionNoticeSentAt) {
+      await sendDistributionElectionRequestNotificationsForDeal(deal.id);
+    }
+  }
+}
+
+async function approveDefaultDistributionElection({
+  snapshot,
+  dealId,
+  participantId,
+  targetDeal,
+  managerUser
+}) {
+  const distributionContext = resolveDistributionElectionContext(snapshot, dealId, participantId);
+  const participant = distributionContext.participant;
+  const deal = distributionContext.deal;
+  const timestamp = nowTimestamp();
+  const notes =
+    "Auto-submitted to reinvest all exit proceeds because no election was submitted by the deadline.";
+  const overrideNotes = `Auto-submitted after the election deadline for ${deal.name}.`;
+  const approvedTargetPositionId = await withTransaction(async (client) => {
+    const existingElection = await queryOne(
+      `
+        SELECT id, approval_status AS "approvalStatus"
+        FROM distribution_elections
+        WHERE deal_id = $1
+          AND participant_id = $2
+        FOR UPDATE
+      `,
+      [dealId, participantId],
+      client
+    );
+
+    if (existingElection) {
+      return null;
+    }
+
+    if (
+      distributionContext.kind === "pooled" &&
+      distributionContext.totalPayout > 0 &&
+      participant?.category !== "investor"
+    ) {
+      const reinvestmentConflicts = getPoolMemberReinvestmentConflictIssues(
+        snapshot,
+        participantId,
+        dealId
+      );
+
+      if (reinvestmentConflicts.length) {
+        throw new Error(
+          `This pooled member cannot roll proceeds into a direct investor position yet. ${reinvestmentConflicts.join(
+            " "
+          )}`
+        );
+      }
+
+      await client.query(
+        `
+          UPDATE participants
+          SET category = 'investor', updated_at = $1
+          WHERE id = $2
+        `,
+        [timestamp, participantId]
+      );
+    }
+
+    await client.query(
+      `
+        INSERT INTO distribution_elections (
+          id,
+          deal_id,
+          participant_id,
+          election_mode,
+          reinvest_percent,
+          reinvest_amount,
+          rollover_target_deal_id,
+          notes,
+          submitted_by_user_id,
+          submitted_by_role,
+          approval_status,
+          approved_reinvest_amount,
+          approved_cash_payout_amount,
+          payout_expected_on,
+          reviewed_by_user_id,
+          reviewed_at,
+          manager_override,
+          override_notes,
+          created_at,
+          updated_at
+        )
+        VALUES (
+          $1, $2, $3, 'reinvest_all', NULL, NULL, $4, $5, $6, 'manager',
+          'approved', $7, 0, NULL, $8, $9, 0, $10, $11, $12
+        )
+      `,
+      [
+        createId("distribution"),
+        dealId,
+        participantId,
+        targetDeal.id,
+        notes,
+        managerUser?.id ?? null,
+        roundNumber(distributionContext.totalPayout),
+        managerUser?.id ?? null,
+        timestamp,
+        overrideNotes,
+        timestamp,
+        timestamp
+      ]
+    );
+
+    return applyApprovedReinvestmentAllocation({
+      client,
+      targetDealId: targetDeal.id,
+      participantId,
+      classType: distributionContext.classType,
+      amount: distributionContext.totalPayout
+    });
+  });
+
+  const linkedInvestorUser = (snapshot.users ?? []).find(
+    (account) =>
+      account.participantId === participantId &&
+      account.role === "investor" &&
+      account.isActive &&
+      account.accountApprovalStatus === "approved"
+  );
+  let notifications = [];
+
+  if (approvedTargetPositionId && linkedInvestorUser?.email) {
+    try {
+      notifications = [
+        await sendDistributionElectionApprovedNotification({
+          userId: linkedInvestorUser.id,
+          participantId: linkedInvestorUser.participantId,
+          fullName: linkedInvestorUser.name,
+          email: linkedInvestorUser.email,
+          dealName: deal.name,
+          electionMode: "reinvest_all",
+          approvedAt: timestamp,
+          payoutExpectedOn: null,
+          payoutMethod: participant?.payoutMethod ?? "",
+          cashPayoutAmount: 0,
+          reinvestAmount: distributionContext.totalPayout,
+          rolloverTargetDealName: targetDeal.name,
+          managerOverride: false,
+          overrideNotes,
+          notes
+        })
+      ];
+    } catch (error) {
+      notifications = [
+        {
+          status: "failed",
+          provider: "notification_error",
+          localPath: null,
+          errorMessage: error.message,
+          recipientEmail: linkedInvestorUser.email
+        }
+      ];
+    }
+  }
+
+  return {
+    dealId,
+    participantId,
+    targetDealId: targetDeal.id,
+    reinvestAmount: distributionContext.totalPayout,
+    approvedTargetPositionId,
+    notifications
+  };
+}
+
+async function applyOverdueDistributionElectionDefaults() {
+  const snapshot = await getAppDataSnapshot({ skipAutomation: true });
+  const overdueDeals = (snapshot.deals ?? []).filter(
+    (deal) =>
+      deal.status === "sold" &&
+      deal.distributionElectionDueOn &&
+      deal.distributionElectionDueOn < todayStamp()
+  );
+
+  if (!overdueDeals.length) {
+    return [];
+  }
+
+  const managerUser = await getAutomationManagerUser();
+  const results = [];
+
+  for (const deal of overdueDeals) {
+    const defaultTargetDeal = findDefaultReinvestmentTargetDeal(snapshot, deal.id);
+
+    if (!defaultTargetDeal) {
+      continue;
+    }
+
+    const missingRequirements = buildDistributionElectionRequirementContexts(
+      snapshot,
+      deal.id
+    ).filter((requirement) => requirement.status === "missing");
+
+    for (const requirement of missingRequirements) {
+      try {
+        results.push(
+          await approveDefaultDistributionElection({
+            snapshot,
+            dealId: deal.id,
+            participantId: requirement.participantId,
+            targetDeal: defaultTargetDeal,
+            managerUser
+          })
+        );
+      } catch (error) {
+        results.push({
+          dealId: deal.id,
+          participantId: requirement.participantId,
+          errorMessage: error.message
+        });
+      }
+    }
+  }
+
+  return results;
 }
 
 function getPoolMemberReinvestmentConflictIssues(snapshot, participantId, sourceDealId) {
@@ -6190,6 +6776,29 @@ export async function archiveDeal(dealId, actingUserId = null) {
 
   if (!id) {
     throw new Error("Deal id is required.");
+  }
+
+  await ensureDistributionElectionRequestsForSoldDeals();
+  await applyOverdueDistributionElectionDefaults();
+
+  const snapshot = await getAppDataSnapshot({ skipAutomation: true });
+  const unresolvedElections = getUnresolvedDistributionElectionRequirements(snapshot, id);
+
+  if (unresolvedElections.length) {
+    const outstandingSummary = unresolvedElections
+      .slice(0, 6)
+      .map(
+        (requirement) =>
+          `${requirement.participantName} (${
+            requirement.kind === "pooled" ? "pooled member" : "direct investor"
+          }, ${requirement.status === "missing" ? "no election" : "pending approval"})`
+      )
+      .join(", ");
+    const overflow = unresolvedElections.length > 6 ? ` and ${unresolvedElections.length - 6} more` : "";
+
+    throw new Error(
+      `This sold project cannot be archived until all direct and pooled investor distribution elections are submitted and approved. Outstanding: ${outstandingSummary}${overflow}.`
+    );
   }
 
   const archive = await withTransaction(async (client) => {

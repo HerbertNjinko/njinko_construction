@@ -84,6 +84,7 @@ export const state = {
   dealEditorDrafts: {},
   rollupDealFilter: "",
   contractorDealFilter: "",
+  archivedProjectFilter: "",
   collapsedSections: {},
   allocationPage: 1,
   allocationFilters: createInitialAllocationFilters(),

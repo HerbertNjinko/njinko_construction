@@ -5,7 +5,7 @@ import {
   LOGIN_PAGE_TITLE,
   app,
   state
-} from "./state.js?v=20260430-frontend-10";
+} from "./state.js?v=20260430-frontend-13";
 import {
   breakdownItem,
   escapeHtml,
@@ -21,9 +21,10 @@ import {
   renderSectionToggle,
   summaryItem,
   titleCase
-} from "./helpers.js?v=20260430-frontend-10";
+} from "./helpers.js?v=20260430-frontend-13";
 import {
   applyAllocationFilters,
+  applyArchivedProjectFilters,
   applyContractorFilters,
   applyDistributionReviewFilters,
   applyInvestorIssueFilters,
@@ -42,7 +43,7 @@ import {
   getInvestorProjectFilterOptions,
   getManagerEditableDeal,
   getUserFilterOptions
-} from "./data.js?v=20260430-frontend-10";
+} from "./data.js?v=20260430-frontend-13";
 
 function renderLogin() {
   const errorMarkup = state.loginError
@@ -1103,6 +1104,10 @@ function renderInvestorDistributionElectionCard(project) {
                 )}
                 ${summaryItem("Actual payout received", formatCurrency(distribution.actualPayoutAmount))}
                 ${summaryItem(
+                  "Election deadline",
+                  distribution.electionDueOn ? formatDate(distribution.electionDueOn) : "Not set"
+                )}
+                ${summaryItem(
                   "Expected payout date",
                   distribution.payoutExpectedOn ? formatDate(distribution.payoutExpectedOn) : "Not scheduled"
                 )}
@@ -1386,6 +1391,12 @@ function renderManagerDistributionReviewCard(review) {
                   formatCurrency(review.approvedReinvestedAmount)
                 )}
                 ${summaryItem("Actual payout recorded", formatCurrency(review.actualPayoutAmount))}
+                ${summaryItem(
+                  "Election deadline",
+                  review.distributionElectionDueOn
+                    ? formatDate(review.distributionElectionDueOn)
+                    : "Not set"
+                )}
                 ${summaryItem(
                   "Rollover target",
                   review.rolloverTargetDealName || "No target selected"
@@ -1942,11 +1953,69 @@ function renderInvestorProject(project) {
   `;
 }
 
+function renderInvestorArchivedProjectHistory(archivedProjects = []) {
+  if (!archivedProjects.length) {
+    return "";
+  }
+
+  return `
+    <div class="section-head compact-top-gap">
+      <div>
+        <h4>Archived Project History</h4>
+        <p class="section-copy">
+          Archived projects remain available here for record keeping after they leave active project screens.
+        </p>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Project</th>
+            <th>Total invested</th>
+            <th>Total returned</th>
+            <th>Total amount payout</th>
+            <th>Reinvestment</th>
+            <th>Archived</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${archivedProjects
+            .map(
+              (project) => `
+                <tr>
+                  <td>${escapeHtml(project.projectName)}</td>
+                  <td>${escapeHtml(formatCurrency(project.totalInvested))}</td>
+                  <td>${escapeHtml(formatCurrency(project.totalReturned))}</td>
+                  <td>${escapeHtml(formatCurrency(project.totalAmountPayout))}</td>
+                  <td>${escapeHtml(
+                    project.reinvestedAmount > 0
+                      ? `${formatCurrency(project.reinvestedAmount)}${
+                          project.rolloverTargetDealName
+                            ? ` into ${project.rolloverTargetDealName}`
+                            : ""
+                        }`
+                      : project.electionMode
+                        ? "No reinvestment"
+                        : "No election recorded"
+                  )}</td>
+                  <td>${escapeHtml(project.archivedAt ? formatDate(project.archivedAt) : "Archived")}</td>
+                </tr>
+              `
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
 function renderInvestorDashboard() {
   const {
     viewer,
     portfolio,
     projects,
+    archivedProjects = [],
     pooledDistributionProjects = [],
     withdrawalRequests = []
   } = state.dashboard;
@@ -1992,6 +2061,7 @@ function renderInvestorDashboard() {
             ${metricCard("Accrued pref to date", formatCurrency(portfolio.currentPrefEarned))}
             ${metricCard("Projected pref at exit", formatCurrency(portfolio.projectedPrefEarned))}
           </div>
+          ${renderInvestorArchivedProjectHistory(archivedProjects)}
         `
       })}
 
@@ -2360,7 +2430,13 @@ function renderPoolMemberProjectCard(pool) {
 }
 
 function renderPoolMemberDashboard() {
-  const { viewer, poolPortfolio, pools, pooledDistributionProjects = [] } = state.dashboard;
+  const {
+    viewer,
+    poolPortfolio,
+    pools,
+    pooledDistributionProjects = [],
+    archivedProjects = []
+  } = state.dashboard;
   const votingPools = pools.filter((pool) => !pool.selectedDealId);
 
   return `
@@ -2408,6 +2484,7 @@ function renderPoolMemberDashboard() {
             ${metricCard("Accrued pref to date", formatCurrency(poolPortfolio.currentPrefEarned))}
             ${metricCard("Projected pref at exit", formatCurrency(poolPortfolio.projectedPrefEarned))}
           </div>
+          ${renderInvestorArchivedProjectHistory(archivedProjects)}
         `
       })}
 
@@ -4225,6 +4302,165 @@ function renderIdentityReviewActions(row) {
   `;
 }
 
+function renderManagerArchivedProjectCard(project) {
+  return `
+    <article class="deal-card">
+      <div class="deal-head">
+        <div>
+          <p class="eyebrow">Archived Project</p>
+          <h3 class="deal-name">${escapeHtml(project.name)}</h3>
+          <p class="deal-location">${escapeHtml(project.location || "No location recorded")}</p>
+          <div class="mini-head">
+            <span class="status-pill status-sold">${escapeHtml(project.statusLabel || "Sold")}</span>
+            <span class="read-only-tag">${escapeHtml(
+              project.archivedAt ? `Archived ${formatDate(project.archivedAt)}` : "Archived"
+            )}</span>
+            <span class="read-only-tag">${escapeHtml(
+              `${project.positionCount} investor position${project.positionCount === 1 ? "" : "s"}`
+            )}</span>
+          </div>
+        </div>
+        <div>
+          <p class="metric-label">Net project profit</p>
+          <p class="metric-value">${escapeHtml(formatCurrency(project.netProjectProfit))}</p>
+        </div>
+      </div>
+      <div class="deal-card-body">
+        <div class="summary-grid">
+          ${summaryItem("Sale price", formatCurrency(project.salePrice))}
+          ${summaryItem("Total project cost", formatCurrency(project.totalProjectCost))}
+          ${summaryItem("Tracked equity", formatCurrency(project.totalEquity))}
+          ${summaryItem("Total debt", formatCurrency(project.totalDebt))}
+          ${summaryItem("Sponsor promote", formatCurrency(project.sponsorPromote))}
+          ${summaryItem("Investor profit pool", formatCurrency(project.investorProfitPool))}
+          ${summaryItem(
+            "Archived by",
+            project.archivedByName || project.archivedByEmail || "Not recorded"
+          )}
+          ${summaryItem("Distribution elections", String(project.distributionElectionCount))}
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Investor</th>
+                <th>Class</th>
+                <th>Invested</th>
+                <th>Returned</th>
+                <th>Cash payout</th>
+                <th>Reinvested</th>
+                <th>Election</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${
+                project.investorRows.length
+                  ? project.investorRows
+                      .map(
+                        (row) => `
+                          <tr>
+                            <td>${escapeHtml(row.participantName)}</td>
+                            <td>${escapeHtml(row.classType)}</td>
+                            <td>${escapeHtml(formatCurrency(row.totalInvested))}</td>
+                            <td>${escapeHtml(formatCurrency(row.totalReturned))}</td>
+                            <td>${escapeHtml(formatCurrency(row.totalAmountPayout))}</td>
+                            <td>${escapeHtml(formatCurrency(row.reinvestedAmount))}</td>
+                            <td>${escapeHtml(
+                              row.electionMode
+                                ? `${distributionModeLabel(row.electionMode)}${
+                                    row.rolloverTargetDealName
+                                      ? ` into ${row.rolloverTargetDealName}`
+                                      : ""
+                                  }`
+                                : "No election recorded"
+                            )}</td>
+                          </tr>
+                        `
+                      )
+                      .join("")
+                  : '<tr><td colspan="7">No archived investor rows are attached to this project.</td></tr>'
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function renderManagerArchivedProjectsPage() {
+  const archivedProjects = state.dashboard.admin.archivedProjects ?? [];
+  const filteredArchivedProjects = applyArchivedProjectFilters(archivedProjects);
+  const archivedEquity = filteredArchivedProjects.reduce(
+    (sum, project) => sum + Number(project.totalEquity ?? 0),
+    0
+  );
+  const archivedProfit = filteredArchivedProjects.reduce(
+    (sum, project) => sum + Number(project.netProjectProfit ?? 0),
+    0
+  );
+
+  return renderCollapsibleSection({
+    sectionId: "manager-archived-projects",
+    title: "Archived Projects",
+    copy:
+      "Review sold projects that were archived out of active workflows and export the audit record.",
+    message: renderMessage(state.messages.deal),
+    body: `
+      <div class="metrics-grid">
+        ${metricCard("Matching archived projects", String(filteredArchivedProjects.length))}
+        ${metricCard("Matching tracked equity", formatCurrency(archivedEquity))}
+        ${metricCard("Matching net profit", formatCurrency(archivedProfit))}
+      </div>
+      <div class="table-toolbar">
+        <div class="filter-grid filter-grid-2">
+          <label>
+            Project name
+            <input
+              type="search"
+              id="archived-project-filter-search"
+              value="${inputValue(state.archivedProjectFilter)}"
+              placeholder="Search archived projects"
+            />
+          </label>
+        </div>
+        <span class="read-only-tag">Showing ${escapeHtml(
+          String(filteredArchivedProjects.length)
+        )} of ${escapeHtml(String(archivedProjects.length))}</span>
+      </div>
+      <div class="button-row">
+        <button
+          class="button-secondary"
+          type="button"
+          data-archive-export="csv"
+          ${filteredArchivedProjects.length ? "" : "disabled"}
+        >
+          Export CSV
+        </button>
+        <button
+          class="button-secondary"
+          type="button"
+          data-archive-export="json"
+          ${filteredArchivedProjects.length ? "" : "disabled"}
+        >
+          Export JSON
+        </button>
+      </div>
+      <div class="distribution-review-list">
+        ${
+          filteredArchivedProjects.length
+            ? filteredArchivedProjects
+                .map((project) => renderManagerArchivedProjectCard(project))
+                .join("")
+            : archivedProjects.length
+              ? '<div class="empty-state">No archived projects match the current project name filter.</div>'
+              : '<div class="empty-state">No projects have been archived yet.</div>'
+        }
+      </div>
+    `
+  });
+}
+
 function renderUserDirectory() {
   const rows = state.dashboard.admin.users;
   const filteredRows = applyUserFilters(rows);
@@ -4590,6 +4826,11 @@ const MANAGER_PAGE_ITEMS = [
     copy: "Create deals and update project assumptions, milestones, tiers, and votes."
   },
   {
+    id: "archived-projects",
+    label: "Archived Projects",
+    copy: "View and export archived sold projects for audit records."
+  },
+  {
     id: "distribution-reviews",
     label: "Distribution Reviews",
     copy: "Review sold-project elections and active-project withdrawal requests."
@@ -4694,6 +4935,7 @@ function renderManagerOverviewPage(overview) {
         <div class="metrics-grid">
           ${metricCard("Tracked deals", String(overview.totalDeals))}
           ${metricCard("Active deals", String(overview.activeDeals))}
+          ${metricCard("Archived deals", String(overview.archivedDeals ?? 0))}
           ${metricCard("Tracked equity", formatCurrency(overview.totalTrackedEquity))}
           ${metricCard("Pooled groups", String(overview.totalInvestorPools || 0))}
           ${metricCard("Pooled capital", formatCurrency(overview.totalPooledCapital || 0))}
@@ -5074,6 +5316,8 @@ function renderManagerPageContent(page, { overview, deals }) {
       return renderManagerOverviewPage(overview);
     case "project-admin":
       return renderManagerProjectAdminPage();
+    case "archived-projects":
+      return renderManagerArchivedProjectsPage();
     case "distribution-reviews":
       return renderDistributionReviewSection();
     case "company-library":

@@ -1,4 +1,4 @@
-import { state } from "./state.js?v=20260430-frontend-10";
+import { state } from "./state.js?v=20260430-frontend-13";
 import {
   clearAuthFeedback,
   clearMessages,
@@ -10,8 +10,9 @@ import {
   setAuthMode,
   setMessage,
   toggleSectionCollapsed
-} from "./helpers.js?v=20260430-frontend-10";
+} from "./helpers.js?v=20260430-frontend-13";
 import {
+  applyArchivedProjectFilters,
   buildCreateDealDraft,
   createDebtServiceDraft,
   createExpenseDraft,
@@ -24,7 +25,7 @@ import {
   syncDealEditorField,
   updateCreateDealDraft,
   updateDealEditorDraft
-} from "./data.js?v=20260430-frontend-10";
+} from "./data.js?v=20260430-frontend-13";
 import {
   api,
   applyLoggedOutState,
@@ -32,8 +33,8 @@ import {
   loadSession,
   recordSessionActivity,
   refreshDashboard
-} from "./session.js?v=20260430-frontend-10";
-import { render } from "./renderers.js?v=20260430-frontend-10";
+} from "./session.js?v=20260430-frontend-13";
+import { render } from "./renderers.js?v=20260430-frontend-13";
 
 let listenersBound = false;
 
@@ -44,6 +45,75 @@ function handleSessionActivity(event) {
 
   const force = !["mousemove", "scroll"].includes(event.type);
   recordSessionActivity(force);
+}
+
+function csvCell(value) {
+  const text = String(value ?? "");
+  return /[",\n\r]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+}
+
+function buildArchivedProjectsCsv(archivedProjects = []) {
+  const rows = [
+    [
+      "Project",
+      "Archived at",
+      "Archived by",
+      "Sale price",
+      "Total project cost",
+      "Tracked equity",
+      "Total debt",
+      "Net project profit",
+      "Sponsor promote",
+      "Investor",
+      "Class",
+      "Total invested",
+      "Total returned",
+      "Cash payout",
+      "Reinvested amount",
+      "Rollover target",
+      "Election status"
+    ]
+  ];
+
+  for (const project of archivedProjects) {
+    const investorRows = project.investorRows?.length ? project.investorRows : [{}];
+
+    for (const investor of investorRows) {
+      rows.push([
+        project.name,
+        project.archivedAt,
+        project.archivedByName || project.archivedByEmail,
+        project.salePrice,
+        project.totalProjectCost,
+        project.totalEquity,
+        project.totalDebt,
+        project.netProjectProfit,
+        project.sponsorPromote,
+        investor.participantName,
+        investor.classType,
+        investor.totalInvested,
+        investor.totalReturned,
+        investor.totalAmountPayout,
+        investor.reinvestedAmount,
+        investor.rolloverTargetDealName,
+        investor.electionStatus
+      ]);
+    }
+  }
+
+  return rows.map((row) => row.map((cell) => csvCell(cell)).join(",")).join("\n");
+}
+
+function downloadTextFile(fileName, content, mimeType) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
 }
 
 export function setupEventListeners() {
@@ -898,6 +968,12 @@ export function setupEventListeners() {
       return;
     }
 
+    if (event.target.id === "archived-project-filter-search") {
+      state.archivedProjectFilter = event.target.value;
+      render();
+      return;
+    }
+
     if (syncCreateDealField(event.target)) {
       return;
     }
@@ -1283,6 +1359,38 @@ export function setupEventListeners() {
         }
 
         render();
+      }
+
+      return;
+    }
+
+    const archiveExportButton = event.target.closest("[data-archive-export]");
+
+    if (archiveExportButton) {
+      const format = archiveExportButton.dataset.archiveExport;
+      const archivedProjects = applyArchivedProjectFilters(
+        state.dashboard?.admin?.archivedProjects ?? []
+      );
+      const dateStamp = new Date().toISOString().slice(0, 10);
+
+      if (!archivedProjects.length) {
+        setMessage("deal", "error", "No archived projects match the current filter.");
+        render();
+        return;
+      }
+
+      if (format === "json") {
+        downloadTextFile(
+          `archived-projects-${dateStamp}.json`,
+          JSON.stringify(archivedProjects, null, 2),
+          "application/json"
+        );
+      } else {
+        downloadTextFile(
+          `archived-projects-${dateStamp}.csv`,
+          buildArchivedProjectsCsv(archivedProjects),
+          "text/csv"
+        );
       }
 
       return;
