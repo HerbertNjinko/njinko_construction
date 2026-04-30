@@ -1,18 +1,22 @@
-import { state } from "./state.js?v=20260430-frontend-19";
+import { state } from "./state.js?v=20260430-frontend-24";
 import {
   clearAuthFeedback,
   clearMessages,
   clearPasswordResetTokenFromLocation,
+  escapeHtml,
+  formatDateTime,
   formatNotificationBatchSummary,
   formatNotificationStatus,
   readFileAsPayload,
   setAuthMessage,
   setAuthMode,
   setMessage,
+  titleCase,
   toggleSectionCollapsed
-} from "./helpers.js?v=20260430-frontend-19";
+} from "./helpers.js?v=20260430-frontend-24";
 import {
   applyArchivedProjectFilters,
+  applyQuestionnaireFilters,
   buildCreateDealDraft,
   createDebtServiceDraft,
   createExpenseDraft,
@@ -25,7 +29,7 @@ import {
   syncDealEditorField,
   updateCreateDealDraft,
   updateDealEditorDraft
-} from "./data.js?v=20260430-frontend-19";
+} from "./data.js?v=20260430-frontend-24";
 import {
   api,
   applyLoggedOutState,
@@ -33,8 +37,8 @@ import {
   loadSession,
   recordSessionActivity,
   refreshDashboard
-} from "./session.js?v=20260430-frontend-19";
-import { render } from "./renderers.js?v=20260430-frontend-19";
+} from "./session.js?v=20260430-frontend-24";
+import { render } from "./renderers.js?v=20260430-frontend-24";
 
 let listenersBound = false;
 
@@ -50,6 +54,25 @@ function handleSessionActivity(event) {
 function csvCell(value) {
   const text = String(value ?? "");
   return /[",\n\r]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+}
+
+function syncEnrollmentAmountSelection(selectElement, amountFieldName) {
+  const form = selectElement.form;
+  const selectedOption = selectElement.selectedOptions?.[0];
+  const hint = form?.querySelector("[data-enrollment-amount-hint='true']");
+  const amountInput = form?.elements?.[amountFieldName];
+  const suggestedAmount = Number(selectedOption?.dataset?.suggestedAmount ?? 0);
+  const enrollmentLabel = String(selectedOption?.dataset?.enrollmentLabel ?? "").trim();
+
+  if (hint) {
+    hint.textContent = enrollmentLabel || "No enrollment amount recorded";
+  }
+
+  if (!amountInput) {
+    return;
+  }
+
+  amountInput.value = suggestedAmount > 0 ? String(suggestedAmount) : "";
 }
 
 function buildArchivedProjectsCsv(archivedProjects = []) {
@@ -102,6 +125,155 @@ function buildArchivedProjectsCsv(archivedProjects = []) {
   }
 
   return rows.map((row) => row.map((cell) => csvCell(cell)).join(",")).join("\n");
+}
+
+function questionnaireCheckLabel(value) {
+  return value ? "Checked" : "Not checked";
+}
+
+function buildInvestorQuestionnairesText(questionnaires = []) {
+  return questionnaires
+    .map(
+      (questionnaire, index) => `PART II - INVESTOR QUESTIONNAIRE ${index + 1}
+
+User: ${questionnaire.userName ?? ""}
+Category: ${titleCase(questionnaire.category ?? "")}
+Submitted: ${formatDateTime(questionnaire.submittedAt)}
+
+PERSONAL / ENTITY INFORMATION
+Name / Entity: ${questionnaire.nameEntity ?? ""}
+Address: ${questionnaire.address ?? ""}
+Email: ${questionnaire.email ?? ""}
+Phone: ${questionnaire.phone ?? ""}
+
+ACCREDITATION CHECK
+Income over $200,000 ($300,000 with spouse): ${questionnaireCheckLabel(questionnaire.incomeOver200k)}
+Net worth over $100,000: ${questionnaireCheckLabel(questionnaire.netWorthOver100k)}
+Entity with over $5,000,000 in assets: ${questionnaireCheckLabel(questionnaire.entityOver5mAssets)}
+
+INVESTMENT EXPERIENCE
+${questionnaire.investmentExperience ?? ""}
+`
+    )
+    .join("\n----------------------------------------\n\n");
+}
+
+function buildInvestorQuestionnairesPrintHtml(questionnaires = []) {
+  const generatedAt = formatDateTime(new Date().toISOString());
+
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Investor Questionnaires</title>
+    <style>
+      body {
+        color: #1f1a17;
+        font-family: Arial, sans-serif;
+        line-height: 1.45;
+        margin: 32px;
+      }
+
+      h1,
+      h2,
+      h3 {
+        margin: 0 0 10px;
+      }
+
+      .meta {
+        color: #5f554d;
+        margin: 0 0 24px;
+      }
+
+      .questionnaire {
+        border-top: 1px solid #d8d0c7;
+        break-inside: avoid;
+        margin-top: 24px;
+        padding-top: 20px;
+      }
+
+      dl {
+        display: grid;
+        gap: 8px 16px;
+        grid-template-columns: 180px 1fr;
+      }
+
+      dt {
+        font-weight: 700;
+      }
+
+      dd {
+        margin: 0;
+        white-space: pre-wrap;
+      }
+
+      @media print {
+        body {
+          margin: 0.6in;
+        }
+
+        button {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <button type="button" onclick="window.print()">Print / Save PDF</button>
+    <h1>Investor Questionnaires</h1>
+    <p class="meta">Generated ${escapeHtml(generatedAt)} · ${escapeHtml(
+      String(questionnaires.length)
+    )} submission${questionnaires.length === 1 ? "" : "s"}</p>
+    ${questionnaires
+      .map(
+        (questionnaire) => `
+          <section class="questionnaire">
+            <h2>${escapeHtml(questionnaire.userName ?? questionnaire.nameEntity ?? "")}</h2>
+            <p class="meta">${escapeHtml(titleCase(questionnaire.category ?? ""))} · ${escapeHtml(
+              questionnaire.userEmail ?? questionnaire.email ?? ""
+            )} · Submitted ${escapeHtml(formatDateTime(questionnaire.submittedAt))}</p>
+            <h3>Personal / Entity Information</h3>
+            <dl>
+              <dt>Name / Entity</dt>
+              <dd>${escapeHtml(questionnaire.nameEntity ?? "")}</dd>
+              <dt>Address</dt>
+              <dd>${escapeHtml(questionnaire.address ?? "")}</dd>
+              <dt>Email</dt>
+              <dd>${escapeHtml(questionnaire.email ?? "")}</dd>
+              <dt>Phone</dt>
+              <dd>${escapeHtml(questionnaire.phone ?? "")}</dd>
+            </dl>
+            <h3>Accreditation Check</h3>
+            <dl>
+              <dt>Income threshold</dt>
+              <dd>${escapeHtml(questionnaireCheckLabel(questionnaire.incomeOver200k))}</dd>
+              <dt>Net worth threshold</dt>
+              <dd>${escapeHtml(questionnaireCheckLabel(questionnaire.netWorthOver100k))}</dd>
+              <dt>Entity assets threshold</dt>
+              <dd>${escapeHtml(questionnaireCheckLabel(questionnaire.entityOver5mAssets))}</dd>
+            </dl>
+            <h3>Investment Experience</h3>
+            <p>${escapeHtml(questionnaire.investmentExperience ?? "")}</p>
+          </section>
+        `
+      )
+      .join("")}
+  </body>
+</html>`;
+}
+
+function openInvestorQuestionnairesPdfExport(questionnaires = []) {
+  const reportWindow = window.open("", "_blank");
+
+  if (!reportWindow) {
+    throw new Error("Allow popups to export the PDF report.");
+  }
+
+  reportWindow.document.open();
+  reportWindow.document.write(buildInvestorQuestionnairesPrintHtml(questionnaires));
+  reportWindow.document.close();
+  reportWindow.focus();
+  reportWindow.print();
 }
 
 function downloadTextFile(fileName, content, mimeType) {
@@ -252,6 +424,22 @@ export function setupEventListeners() {
         const requiredLegalDocuments = Array.isArray(state.session?.requiredLegalDocuments)
           ? state.session.requiredLegalDocuments
           : [];
+        const legalAcknowledgements = await Promise.all(
+          requiredLegalDocuments.map(async (document) => {
+            const proofInput = event.target.elements[`legalPaymentProof:${document.key}`];
+            const proofOfPaymentFile = await readFileAsPayload(proofInput?.files?.[0]);
+
+            return {
+              documentKey: document.key,
+              documentVersion: document.version,
+              accepted: formData.get(`legalAck:${document.key}`) === "on",
+              signerName: formData.get(`legalSigner:${document.key}`),
+              investmentAmount: formData.get(`legalInvestmentAmount:${document.key}`),
+              deferredAmount: formData.get(`legalDeferredAmount:${document.key}`),
+              proofOfPaymentFile
+            };
+          })
+        );
         const result = await api("/api/profile/identity-review", {
           method: "POST",
           body: JSON.stringify({
@@ -262,12 +450,19 @@ export function setupEventListeners() {
             currentAddress: formData.get("currentAddress"),
             mailingAddress: formData.get("mailingAddress"),
             idCardFile,
-            legalAcknowledgements: requiredLegalDocuments.map((document) => ({
-              documentKey: document.key,
-              documentVersion: document.version,
-              accepted: formData.get(`legalAck:${document.key}`) === "on",
-              signerName: formData.get(`legalSigner:${document.key}`)
-            }))
+            investorQuestionnaire: state.session?.requiresInvestorQuestionnaire
+              ? {
+                  nameEntity: formData.get("questionnaireNameEntity"),
+                  address: formData.get("questionnaireAddress"),
+                  email: formData.get("questionnaireEmail"),
+                  phone: formData.get("questionnairePhone"),
+                  incomeOver200k: formData.get("questionnaireIncomeOver200k") === "on",
+                  netWorthOver100k: formData.get("questionnaireNetWorthOver100k") === "on",
+                  entityOver5mAssets: formData.get("questionnaireEntityOver5mAssets") === "on",
+                  investmentExperience: formData.get("questionnaireInvestmentExperience")
+                }
+              : null,
+            legalAcknowledgements
           })
         });
         state.session = result.user;
@@ -279,6 +474,36 @@ export function setupEventListeners() {
         render();
       } catch (error) {
         setMessage("identity", "error", error.message);
+        render();
+      }
+
+      return;
+    }
+
+    if (event.target.id === "legal-acknowledgement-form") {
+      event.preventDefault();
+      const formData = new FormData(event.target);
+      const pendingLegalDocuments = Array.isArray(state.session?.pendingLegalDocuments)
+        ? state.session.pendingLegalDocuments
+        : [];
+
+      try {
+        const result = await api("/api/profile/legal-acknowledgements", {
+          method: "POST",
+          body: JSON.stringify({
+            legalAcknowledgements: pendingLegalDocuments.map((document) => ({
+              documentKey: document.key,
+              documentVersion: document.version,
+              accepted: formData.get(`legalAck:${document.key}`) === "on",
+              signerName: formData.get(`legalSigner:${document.key}`)
+            }))
+          })
+        });
+        state.session = result.user;
+        setMessage("legal", "success", "Legal document acknowledgements submitted.");
+        await loadSession();
+      } catch (error) {
+        setMessage("legal", "error", error.message);
         render();
       }
 
@@ -374,7 +599,7 @@ export function setupEventListeners() {
       }
 
       try {
-        await api(`/api/admin/pools/${encodeURIComponent(poolId)}/commitments`, {
+        const result = await api(`/api/admin/pools/${encodeURIComponent(poolId)}/commitments`, {
           method: "POST",
           body: JSON.stringify({
             participantId: formData.get("participantId"),
@@ -382,7 +607,11 @@ export function setupEventListeners() {
           })
         });
         await refreshDashboard();
-        setMessage("pool", "success", "Pool commitment saved.");
+        setMessage(
+          "pool",
+          "success",
+          `Pool commitment saved. ${formatNotificationStatus(result.notification)}`
+        );
         event.target.reset();
       } catch (error) {
         setMessage("pool", "error", error.message);
@@ -474,14 +703,20 @@ export function setupEventListeners() {
       }
 
       try {
-        await api(`/api/pools/${encodeURIComponent(poolId)}/vote`, {
+        const result = await api(`/api/pools/${encodeURIComponent(poolId)}/vote`, {
           method: "PUT",
           body: JSON.stringify({
             dealId: formData.get("dealId")
           })
         });
         await refreshDashboard();
-        setMessage("pool", "success", "Weighted project vote saved.");
+        setMessage(
+          "pool",
+          "success",
+          `Weighted project vote saved. ${formatNotificationBatchSummary(
+            result.vote?.notifications ?? []
+          )}`
+        );
       } catch (error) {
         setMessage("pool", "error", error.message);
       }
@@ -748,9 +983,11 @@ export function setupEventListeners() {
         setMessage(
           "allocation",
           "success",
-          result.action === "increased"
-            ? "Existing position increased successfully."
-            : "Deal allocation saved to the database."
+          `${
+            result.action === "increased"
+              ? "Existing position increased successfully."
+              : "Deal allocation saved to the database."
+          } ${formatNotificationStatus(result.notification)}`
         );
         event.target.reset();
       } catch (error) {
@@ -859,6 +1096,16 @@ export function setupEventListeners() {
     }
 
     if (syncDealEditorField(event.target)) {
+      return;
+    }
+
+    if (event.target.matches("#allocation-form select[name='participantId']")) {
+      syncEnrollmentAmountSelection(event.target, "contributionAmount");
+      return;
+    }
+
+    if (event.target.matches("[data-pool-commitment-form='true'] select[name='participantId']")) {
+      syncEnrollmentAmountSelection(event.target, "commitmentAmount");
       return;
     }
 
@@ -980,6 +1227,12 @@ export function setupEventListeners() {
 
     if (event.target.id === "archived-project-filter-search") {
       state.archivedProjectFilter = event.target.value;
+      render();
+      return;
+    }
+
+    if (event.target.id === "questionnaire-filter-search") {
+      state.questionnaireFilters.search = event.target.value;
       render();
       return;
     }
@@ -1447,6 +1700,40 @@ export function setupEventListeners() {
         );
       }
 
+      return;
+    }
+
+    const questionnaireExportButton = event.target.closest("[data-questionnaire-export]");
+
+    if (questionnaireExportButton) {
+      const format = questionnaireExportButton.dataset.questionnaireExport;
+      const questionnaires = applyQuestionnaireFilters(
+        state.dashboard?.admin?.investorQuestionnaires ?? []
+      );
+      const dateStamp = new Date().toISOString().slice(0, 10);
+
+      if (!questionnaires.length) {
+        setMessage("questionnaire", "error", "No investor questionnaires match the current filter.");
+        render();
+        return;
+      }
+
+      try {
+        if (format === "pdf") {
+          openInvestorQuestionnairesPdfExport(questionnaires);
+        } else {
+          downloadTextFile(
+            `investor-questionnaires-${dateStamp}.txt`,
+            buildInvestorQuestionnairesText(questionnaires),
+            "text/plain"
+          );
+        }
+        setMessage("questionnaire", "success", "Investor questionnaire export prepared.");
+      } catch (error) {
+        setMessage("questionnaire", "error", error.message);
+      }
+
+      render();
       return;
     }
 

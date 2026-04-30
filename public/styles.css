@@ -366,6 +366,7 @@ button:disabled {
 .notification-bell-shell {
   position: relative;
   display: inline-flex;
+  z-index: 80;
 }
 
 .notification-bell-button {
@@ -398,8 +399,10 @@ button:disabled {
   position: absolute;
   right: 0;
   top: calc(100% + 0.7rem);
-  z-index: 30;
+  z-index: 90;
   width: min(25rem, calc(100vw - 2rem));
+  max-height: min(34rem, calc(100vh - 7rem));
+  overflow: auto;
   display: grid;
   gap: 0.85rem;
   padding: 1rem;
@@ -428,7 +431,7 @@ button:disabled {
 }
 
 .notification-summary-grid {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .notification-summary-item {
@@ -591,6 +594,8 @@ button:disabled {
 }
 
 .app-header {
+  position: relative;
+  z-index: 70;
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
@@ -1203,6 +1208,43 @@ td {
   font-size: 1.05rem;
 }
 
+.legal-document-extra-grid {
+  align-items: end;
+}
+
+.questionnaire-card,
+.questionnaire-report-card {
+  display: grid;
+  gap: 0.95rem;
+  padding: 1rem 1.1rem;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.62);
+  border: 1px solid rgba(31, 26, 23, 0.08);
+}
+
+.questionnaire-report-grid {
+  display: grid;
+  gap: 1rem;
+}
+
+.questionnaire-checklist,
+.questionnaire-response-block {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.questionnaire-checklist h4,
+.questionnaire-response-block h5 {
+  font-size: 0.95rem;
+}
+
+.questionnaire-response-list {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0;
+  padding-left: 1.1rem;
+}
+
 .legal-ack-list {
   display: grid;
   gap: 0.55rem;
@@ -1218,6 +1260,13 @@ td {
   margin-top: 0.2rem;
   color: var(--muted);
   font-size: 0.86rem;
+}
+
+.legal-proof-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.45rem;
 }
 
 .resource-download-link:hover {

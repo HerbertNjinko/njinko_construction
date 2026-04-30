@@ -54,6 +54,12 @@ export function createInitialInvestorIssueFilters() {
   };
 }
 
+export function createInitialQuestionnaireFilters() {
+  return {
+    search: ""
+  };
+}
+
 export function createInitialMessages() {
   return {
     user: null,
@@ -67,6 +73,8 @@ export function createInitialMessages() {
     withdrawal: null,
     resource: null,
     directory: null,
+    questionnaire: null,
+    legal: null,
     profile: null,
     password: null,
     identity: null
@@ -85,6 +93,7 @@ export const state = {
   rollupDealFilter: "",
   contractorDealFilter: "",
   archivedProjectFilter: "",
+  questionnaireFilters: createInitialQuestionnaireFilters(),
   notificationPanelOpen: false,
   collapsedSections: {},
   allocationPage: 1,

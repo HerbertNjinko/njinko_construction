@@ -1,4 +1,6 @@
 import { createHash, randomBytes, randomUUID, scryptSync } from "node:crypto";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { basename, extname, join } from "node:path";
 
 import { buildPoolDistributionContexts, calculateWaterfall } from "./calculations.js";
 import { seedData } from "./data.js";
@@ -16,7 +18,10 @@ import {
   sendIdentityReviewAlertNotification,
   sendIssueCreatedNotification,
   sendNewDealAnnouncementNotification,
-  sendPasswordResetNotification
+  sendPasswordResetNotification,
+  sendPoolCommitmentNotification,
+  sendPoolVoteAlertNotification,
+  sendProjectAllocationNotification
 } from "./notifications.js";
 import { pool, queryAll, queryOne, withTransaction } from "./postgres.js";
 
@@ -29,12 +34,22 @@ const RESOURCE_UPLOAD_MAX_BYTES = readPositiveIntegerEnv(
   "RESOURCE_UPLOAD_MAX_BYTES",
   10 * 1024 * 1024
 );
+const PAYMENT_PROOF_UPLOAD_MAX_BYTES = readPositiveIntegerEnv(
+  "PAYMENT_PROOF_UPLOAD_MAX_BYTES",
+  10 * 1024 * 1024
+);
 const DEFAULT_EARLY_WITHDRAWAL_PENALTY_RATE = 0.3;
 const DISTRIBUTION_ELECTION_DEADLINE_DAYS = readPositiveIntegerEnv(
   "DISTRIBUTION_ELECTION_DEADLINE_DAYS",
   14
 );
 const ALLOWED_ID_CARD_MIME_TYPES = new Set([
+  "application/pdf",
+  "image/jpeg",
+  "image/png",
+  "image/webp"
+]);
+const ALLOWED_PAYMENT_PROOF_MIME_TYPES = new Set([
   "application/pdf",
   "image/jpeg",
   "image/png",
@@ -63,15 +78,19 @@ export const LEGAL_DOCUMENT_DEFINITIONS = [
     key: "contractor_equity_election_form",
     title: "Contractor Equity Election Form",
     version: "2026-04-30",
-    fileName: "Contractor Equity Election Form + Tracking System.pdf",
-    requiredCategories: ["contractor"]
+    fileName: "documents/contractors/new_user/Contractor Equity Election Form + Tracking System.pdf",
+    requiredCategories: ["contractor"],
+    requiresDeferredAmount: true,
+    onboardingOnly: true
   },
   {
     key: "subscription_agreement_237_ville",
     title: "Subscription Agreement and Deal Sheet",
     version: "2026-04-30",
-    fileName: "237 Ville Investor Package (subscription Agreement + Deal Sheet).pdf",
-    requiredCategories: ["investor", "pool_member"]
+    fileName: "documents/all/237 Ville Investor Package (subscription Agreement + Deal Sheet).pdf",
+    requiredCategories: ["investor", "pool_member"],
+    requiresInvestmentAmount: true,
+    requiresPaymentProof: true
   },
   {
     key: "operating_agreement_237_ville",
@@ -81,9 +100,179 @@ export const LEGAL_DOCUMENT_DEFINITIONS = [
     requiredCategories: ["investor", "pool_member", "contractor"]
   }
 ];
-const LEGAL_DOCUMENT_BY_KEY = new Map(
-  LEGAL_DOCUMENT_DEFINITIONS.map((document) => [document.key, document])
+const DOCUMENT_APPLIES_TO_ALL_CATEGORIES = ["investor", "pool_member", "contractor"];
+const INVESTOR_DOCUMENT_CATEGORIES = ["investor", "pool_member"];
+const CONTRACTOR_DOCUMENT_CATEGORIES = ["contractor"];
+const LEGAL_DOCUMENT_ROOTS = ["documents", "document"];
+const LEGAL_DOCUMENT_DIRECTORY_SCOPES = [
+  {
+    relativeDir: "all",
+    requiredCategories: DOCUMENT_APPLIES_TO_ALL_CATEGORIES,
+    onboardingOnly: false
+  },
+  {
+    relativeDir: "contractors",
+    requiredCategories: CONTRACTOR_DOCUMENT_CATEGORIES,
+    onboardingOnly: false
+  },
+  {
+    relativeDir: "contractors/new_user",
+    requiredCategories: CONTRACTOR_DOCUMENT_CATEGORIES,
+    onboardingOnly: true
+  },
+  {
+    relativeDir: "contractors/new_users",
+    requiredCategories: CONTRACTOR_DOCUMENT_CATEGORIES,
+    onboardingOnly: true
+  },
+  {
+    relativeDir: "investors",
+    requiredCategories: INVESTOR_DOCUMENT_CATEGORIES,
+    onboardingOnly: false
+  },
+  {
+    relativeDir: "investors/new_user",
+    requiredCategories: INVESTOR_DOCUMENT_CATEGORIES,
+    onboardingOnly: true
+  },
+  {
+    relativeDir: "investors/new_users",
+    requiredCategories: INVESTOR_DOCUMENT_CATEGORIES,
+    onboardingOnly: true
+  },
+  {
+    relativeDir: "investores/new_use",
+    requiredCategories: INVESTOR_DOCUMENT_CATEGORIES,
+    onboardingOnly: true
+  },
+  {
+    relativeDir: "investores/new_uses",
+    requiredCategories: INVESTOR_DOCUMENT_CATEGORIES,
+    onboardingOnly: true
+  }
+];
+const STATIC_LEGAL_DOCUMENTS_BY_FILE = new Map(
+  LEGAL_DOCUMENT_DEFINITIONS.map((document) => [normalizeDocumentPath(document.fileName), document])
 );
+
+function normalizeDocumentPath(filePath) {
+  return String(filePath ?? "").replaceAll("\\", "/").replace(/^\.\/+/, "");
+}
+
+function formatLegalDocumentTitle(fileName) {
+  return basename(fileName, extname(fileName))
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function createDynamicLegalDocumentKey(filePath) {
+  return `document_${createHash("sha256")
+    .update(normalizeDocumentPath(filePath))
+    .digest("hex")
+    .slice(0, 20)}`;
+}
+
+function createDynamicLegalDocumentVersion(filePath) {
+  const fileBuffer = readFileSync(filePath);
+
+  return `sha256-${createHash("sha256").update(fileBuffer).digest("hex").slice(0, 16)}`;
+}
+
+function inferDynamicLegalDocumentRequirements(title, requiredCategories) {
+  const normalizedTitle = title.toLowerCase();
+  const investorFacing = requiredCategories.some((category) =>
+    INVESTOR_DOCUMENT_CATEGORIES.includes(category)
+  );
+  const contractorFacing = requiredCategories.includes("contractor");
+  const isSubscriptionLike =
+    investorFacing &&
+    normalizedTitle.includes("subscription") &&
+    normalizedTitle.includes("agreement");
+  const isContractorEquityLike =
+    contractorFacing &&
+    normalizedTitle.includes("contractor") &&
+    (normalizedTitle.includes("equity") || normalizedTitle.includes("election"));
+
+  return {
+    requiresInvestmentAmount: isSubscriptionLike,
+    requiresPaymentProof: isSubscriptionLike,
+    requiresDeferredAmount: isContractorEquityLike
+  };
+}
+
+function readLegalDocumentsFromDirectory(root, scope) {
+  const directoryPath = join(root, scope.relativeDir);
+
+  if (!existsSync(directoryPath)) {
+    return [];
+  }
+
+  return readdirSync(directoryPath, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && extname(entry.name).toLowerCase() === ".pdf")
+    .map((entry) => {
+      const fileName = normalizeDocumentPath(join(directoryPath, entry.name));
+      const staticDocument = STATIC_LEGAL_DOCUMENTS_BY_FILE.get(fileName);
+
+      if (staticDocument) {
+        return {
+          ...mapLegalDocumentDefinition(staticDocument),
+          fileName,
+          onboardingOnly: Boolean(staticDocument.onboardingOnly)
+        };
+      }
+
+      const title = formatLegalDocumentTitle(entry.name);
+      const supplementRequirements = inferDynamicLegalDocumentRequirements(
+        title,
+        scope.requiredCategories
+      );
+
+      return {
+        key: createDynamicLegalDocumentKey(fileName),
+        title,
+        version: createDynamicLegalDocumentVersion(fileName),
+        fileName,
+        requiredCategories: [...scope.requiredCategories],
+        ...supplementRequirements,
+        onboardingOnly: Boolean(scope.onboardingOnly)
+      };
+    });
+}
+
+export function getLegalDocumentDefinitions({ includeNewUserDocuments = true } = {}) {
+  const documentsByKey = new Map(
+    LEGAL_DOCUMENT_DEFINITIONS.map((document) => [
+      document.key,
+      {
+        ...mapLegalDocumentDefinition(document),
+        onboardingOnly: Boolean(document.onboardingOnly)
+      }
+    ])
+  );
+
+  for (const root of LEGAL_DOCUMENT_ROOTS) {
+    if (!existsSync(root)) {
+      continue;
+    }
+
+    for (const scope of LEGAL_DOCUMENT_DIRECTORY_SCOPES) {
+      for (const document of readLegalDocumentsFromDirectory(root, scope)) {
+        documentsByKey.set(document.key, document);
+      }
+    }
+  }
+
+  return Array.from(documentsByKey.values())
+    .filter((document) => includeNewUserDocuments || !document.onboardingOnly)
+    .sort((left, right) => {
+      const categoryCompare = left.requiredCategories.join(",").localeCompare(
+        right.requiredCategories.join(",")
+      );
+
+      return categoryCompare !== 0 ? categoryCompare : left.title.localeCompare(right.title);
+    });
+}
 
 function readPositiveIntegerEnv(name, fallback) {
   const parsed = Number(process.env[name]);
@@ -151,6 +340,10 @@ function normalizeRequiredTextInput(value, fieldLabel, { minLength = 1 } = {}) {
   }
 
   return normalized;
+}
+
+function normalizeBooleanInput(value) {
+  return value === true || value === "true" || value === "on" || value === "1" || value === 1;
 }
 
 function normalizeRequiredDateInput(value, fieldLabel) {
@@ -268,27 +461,38 @@ function mapLegalDocumentDefinition(document) {
     title: document.title,
     version: document.version,
     fileName: document.fileName,
-    requiredCategories: [...document.requiredCategories]
+    requiredCategories: [...document.requiredCategories],
+    requiresInvestmentAmount: Boolean(document.requiresInvestmentAmount),
+    requiresPaymentProof: Boolean(document.requiresPaymentProof),
+    requiresDeferredAmount: Boolean(document.requiresDeferredAmount),
+    onboardingOnly: Boolean(document.onboardingOnly)
   };
 }
 
 export function getLegalDocumentDefinition(documentKey) {
   const key = String(documentKey ?? "").trim();
-  const document = LEGAL_DOCUMENT_BY_KEY.get(key);
+  const document = getLegalDocumentDefinitions().find((item) => item.key === key);
 
   return document ? mapLegalDocumentDefinition(document) : null;
 }
 
-export function getRequiredLegalDocumentsForCategory(category) {
+export function getRequiredLegalDocumentsForCategory(
+  category,
+  { includeNewUserDocuments = true } = {}
+) {
   const normalizedCategory = normalizeCategory(category);
 
   if (!normalizedCategory || normalizedCategory === "manager") {
     return [];
   }
 
-  return LEGAL_DOCUMENT_DEFINITIONS.filter((document) =>
+  return getLegalDocumentDefinitions({ includeNewUserDocuments }).filter((document) =>
     document.requiredCategories.includes(normalizedCategory)
-  ).map((document) => mapLegalDocumentDefinition(document));
+  );
+}
+
+export function isInvestorQuestionnaireRequired(category) {
+  return ["investor", "pool_member"].includes(normalizeCategory(category));
 }
 
 function roundNumber(value) {
@@ -686,6 +890,41 @@ function normalizeResourceFile(file) {
   };
 }
 
+function normalizePaymentProofFile(file) {
+  if (!file || typeof file !== "object") {
+    return null;
+  }
+
+  const fileName = normalizeOptionalText(file.name);
+  const mimeType = normalizeOptionalText(file.type);
+  const dataUrl = normalizeOptionalText(file.dataUrl);
+  const size = Number(file.size ?? 0);
+
+  if (!fileName || !mimeType || !dataUrl) {
+    throw new Error("Proof of payment uploads must include a file name, mime type, and file data.");
+  }
+
+  if (!Number.isFinite(size) || size <= 0 || size > PAYMENT_PROOF_UPLOAD_MAX_BYTES) {
+    throw new Error(
+      `Proof of payment uploads must be smaller than ${formatByteLimit(PAYMENT_PROOF_UPLOAD_MAX_BYTES)}.`
+    );
+  }
+
+  assertUploadedFileData({
+    dataUrl,
+    mimeType,
+    maxBytes: PAYMENT_PROOF_UPLOAD_MAX_BYTES,
+    maxBytesLabel: formatByteLimit(PAYMENT_PROOF_UPLOAD_MAX_BYTES),
+    allowedMimeTypes: ALLOWED_PAYMENT_PROOF_MIME_TYPES
+  });
+
+  return {
+    fileName,
+    mimeType,
+    dataUrl
+  };
+}
+
 function normalizeCategory(category) {
   return String(category ?? "").trim();
 }
@@ -813,6 +1052,70 @@ function normalizeLegalAcknowledgementInput(input, currentUser) {
       `${document.title} signature`,
       { minLength: 2 }
     );
+    const investmentAmount = document.requiresInvestmentAmount
+      ? normalizePositiveCurrencyAmount(
+          acknowledgement?.investmentAmount,
+          `${document.title} investment amount`
+        )
+      : null;
+    const deferredAmount = document.requiresDeferredAmount
+      ? normalizePositiveCurrencyAmount(
+          acknowledgement?.deferredAmount,
+          `${document.title} deferred amount`
+        )
+      : null;
+    const proofOfPaymentFile = document.requiresPaymentProof
+      ? normalizePaymentProofFile(acknowledgement?.proofOfPaymentFile)
+      : null;
+
+    if (document.requiresPaymentProof && !proofOfPaymentFile) {
+      throw new Error(`${document.title} requires proof of payment upload.`);
+    }
+
+    return {
+      documentKey: document.key,
+      documentTitle: document.title,
+      documentVersion: document.version,
+      documentFileName: document.fileName,
+      requiredForCategory: currentUser.category,
+      signerName,
+      investmentAmount,
+      deferredAmount,
+      proofOfPaymentFile
+    };
+  });
+}
+
+function normalizeRequiredLegalAcknowledgementInput(input, currentUser, pendingDocuments) {
+  if (!pendingDocuments.length) {
+    return [];
+  }
+
+  const submittedDocuments = Array.isArray(input?.legalAcknowledgements)
+    ? input.legalAcknowledgements
+    : [];
+  const submittedByKey = new Map(
+    submittedDocuments
+      .map((item) => [String(item?.documentKey ?? "").trim(), item])
+      .filter(([documentKey]) => Boolean(documentKey))
+  );
+
+  return pendingDocuments.map((document) => {
+    const acknowledgement = submittedByKey.get(document.key);
+    const accepted =
+      acknowledgement?.accepted === true ||
+      acknowledgement?.accepted === "true" ||
+      acknowledgement?.accepted === "on";
+
+    if (!accepted) {
+      throw new Error(`${document.title} must be acknowledged before continuing.`);
+    }
+
+    const signerName = normalizeRequiredTextInput(
+      acknowledgement?.signerName,
+      `${document.title} signature`,
+      { minLength: 2 }
+    );
 
     return {
       documentKey: document.key,
@@ -823,6 +1126,50 @@ function normalizeLegalAcknowledgementInput(input, currentUser) {
       signerName
     };
   });
+}
+
+function normalizeInvestorQuestionnaireInput(input, currentUser, identity) {
+  if (!isInvestorQuestionnaireRequired(currentUser?.category)) {
+    return null;
+  }
+
+  const questionnaire = input?.investorQuestionnaire ?? {};
+  const nameEntity = normalizeRequiredTextInput(
+    questionnaire.nameEntity ?? currentUser?.name,
+    "Investor questionnaire name/entity",
+    { minLength: 2 }
+  );
+  const address = normalizeRequiredTextInput(
+    questionnaire.address ?? identity?.currentAddress,
+    "Investor questionnaire address",
+    { minLength: 3 }
+  );
+  const email = normalizeEmail(questionnaire.email ?? currentUser?.email ?? "");
+  const phone = normalizeRequiredTextInput(
+    questionnaire.phone ?? identity?.contactPhone,
+    "Investor questionnaire phone",
+    { minLength: 3 }
+  );
+  const investmentExperience = normalizeRequiredTextInput(
+    questionnaire.investmentExperience,
+    "Investment experience",
+    { minLength: 3 }
+  );
+
+  if (!email.includes("@")) {
+    throw new Error("Investor questionnaire email must be valid.");
+  }
+
+  return {
+    nameEntity,
+    address,
+    email,
+    phone,
+    incomeOver200k: normalizeBooleanInput(questionnaire.incomeOver200k),
+    netWorthOver100k: normalizeBooleanInput(questionnaire.netWorthOver100k),
+    entityOver5mAssets: normalizeBooleanInput(questionnaire.entityOver5mAssets),
+    investmentExperience
+  };
 }
 
 function validateUserProfileForCreation(profile, category) {
@@ -927,7 +1274,39 @@ function mapLegalAcknowledgementRow(row) {
     documentFileName: row.documentFileName ?? "",
     requiredForCategory: row.requiredForCategory,
     signerName: row.signerName,
+    investmentAmount:
+      row.investmentAmount === null || row.investmentAmount === undefined
+        ? null
+        : Number(row.investmentAmount),
+    deferredAmount:
+      row.deferredAmount === null || row.deferredAmount === undefined
+        ? null
+        : Number(row.deferredAmount),
+    proofOfPaymentFileName: row.proofOfPaymentFileName ?? "",
     acknowledgedAt: row.acknowledgedAt,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  };
+}
+
+function mapInvestorQuestionnaireRow(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    userId: row.userId,
+    participantId: row.participantId,
+    nameEntity: row.nameEntity,
+    address: row.address,
+    email: row.email,
+    phone: row.phone,
+    incomeOver200k: Boolean(row.incomeOver200k),
+    netWorthOver100k: Boolean(row.netWorthOver100k),
+    entityOver5mAssets: Boolean(row.entityOver5mAssets),
+    investmentExperience: row.investmentExperience,
+    submittedAt: row.submittedAt,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt
   };
@@ -952,6 +1331,9 @@ async function getLegalAcknowledgementsForUser(userId, executor = pool) {
         document_file_name AS "documentFileName",
         required_for_category AS "requiredForCategory",
         signer_name AS "signerName",
+        investment_amount AS "investmentAmount",
+        deferred_amount AS "deferredAmount",
+        proof_of_payment_file_name AS "proofOfPaymentFileName",
         acknowledged_at AS "acknowledgedAt",
         created_at AS "createdAt",
         updated_at AS "updatedAt"
@@ -961,7 +1343,63 @@ async function getLegalAcknowledgementsForUser(userId, executor = pool) {
     `,
     [normalizedUserId],
     executor
-  )).map((row) => mapLegalAcknowledgementRow(row));
+	  )).map((row) => mapLegalAcknowledgementRow(row));
+}
+
+export async function getPendingLegalAcknowledgementDocuments(userId, category, executor = pool) {
+  const requiredDocuments = getRequiredLegalDocumentsForCategory(category, {
+    includeNewUserDocuments: false
+  });
+
+  if (!requiredDocuments.length) {
+    return [];
+  }
+
+  const acknowledgements = await getLegalAcknowledgementsForUser(userId, executor);
+  const signedDocuments = new Set(
+    acknowledgements.map(
+      (acknowledgement) =>
+        `${acknowledgement.documentKey}:${acknowledgement.documentVersion}`
+    )
+  );
+
+  return requiredDocuments.filter(
+    (document) => !signedDocuments.has(`${document.key}:${document.version}`)
+  );
+}
+
+async function getInvestorQuestionnaireForUser(userId, executor = pool) {
+  const normalizedUserId = String(userId ?? "").trim();
+
+  if (!normalizedUserId) {
+    return null;
+  }
+
+  const row = await queryOne(
+    `
+      SELECT
+        id,
+        user_id AS "userId",
+        participant_id AS "participantId",
+        name_entity AS "nameEntity",
+        address,
+        email,
+        phone,
+        income_over_200k AS "incomeOver200k",
+        net_worth_over_100k AS "netWorthOver100k",
+        entity_over_5m_assets AS "entityOver5mAssets",
+        investment_experience AS "investmentExperience",
+        submitted_at AS "submittedAt",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM investor_questionnaires
+      WHERE user_id = $1
+    `,
+    [normalizedUserId],
+    executor
+  );
+
+  return mapInvestorQuestionnaireRow(row);
 }
 
 async function syncDealEquity(dealId, executor = pool) {
@@ -1587,6 +2025,33 @@ async function getActiveManagerRecipients({ excludeUserId = null } = {}) {
   );
 }
 
+async function getActiveUserRecipientForParticipant(participantId, executor = pool) {
+  const normalizedParticipantId = String(participantId ?? "").trim();
+
+  if (!normalizedParticipantId) {
+    return null;
+  }
+
+  return queryOne(
+    `
+      SELECT
+        users.id AS "userId",
+        users.participant_id AS "participantId",
+        users.email AS email,
+        participants.name AS "fullName",
+        participants.category AS category
+      FROM users
+      JOIN participants ON participants.id = users.participant_id
+      WHERE users.participant_id = $1
+        AND users.is_active = 1
+      ORDER BY users.created_at
+      LIMIT 1
+    `,
+    [normalizedParticipantId],
+    executor
+  );
+}
+
 export async function getUserByEmail(email) {
   const row = await queryOne(
     `
@@ -1660,6 +2125,9 @@ export async function getAppDataSnapshot({ skipAutomation = false } = {}) {
         document_file_name AS "documentFileName",
         required_for_category AS "requiredForCategory",
         signer_name AS "signerName",
+        investment_amount AS "investmentAmount",
+        deferred_amount AS "deferredAmount",
+        proof_of_payment_file_name AS "proofOfPaymentFileName",
         acknowledged_at AS "acknowledgedAt",
         created_at AS "createdAt",
         updated_at AS "updatedAt"
@@ -1667,6 +2135,27 @@ export async function getAppDataSnapshot({ skipAutomation = false } = {}) {
       ORDER BY acknowledged_at DESC, document_title
     `
   )).map((row) => mapLegalAcknowledgementRow(row));
+  const investorQuestionnaires = (await queryAll(
+    `
+      SELECT
+        id,
+        user_id AS "userId",
+        participant_id AS "participantId",
+        name_entity AS "nameEntity",
+        address,
+        email,
+        phone,
+        income_over_200k AS "incomeOver200k",
+        net_worth_over_100k AS "netWorthOver100k",
+        entity_over_5m_assets AS "entityOver5mAssets",
+        investment_experience AS "investmentExperience",
+        submitted_at AS "submittedAt",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM investor_questionnaires
+      ORDER BY submitted_at DESC, name_entity
+    `
+  )).map((row) => mapInvestorQuestionnaireRow(row));
 
   const deals = (await queryAll(
     `
@@ -2100,12 +2589,11 @@ export async function getAppDataSnapshot({ skipAutomation = false } = {}) {
 
   return {
     asOfDate: todayStamp(),
-    legalDocuments: LEGAL_DOCUMENT_DEFINITIONS.map((document) =>
-      mapLegalDocumentDefinition(document)
-    ),
+    legalDocuments: getLegalDocumentDefinitions(),
     participants,
     users,
     userLegalAcknowledgements,
+    investorQuestionnaires,
     deals,
     positions,
     investorPools,
@@ -2510,6 +2998,31 @@ export async function upsertInvestorPoolCommitment(poolId, input) {
   const totalCommitted = roundNumber(
     updatedCommitments.reduce((sum, commitment) => sum + commitment.commitmentAmount, 0)
   );
+  let notification = null;
+  const recipient = await getActiveUserRecipientForParticipant(participantId);
+
+  if (recipient?.email) {
+    try {
+      notification = await sendPoolCommitmentNotification({
+        userId: recipient.userId,
+        participantId: recipient.participantId,
+        fullName: recipient.fullName,
+        email: recipient.email,
+        poolName: updatedPool?.name ?? investmentPool.name,
+        commitmentAmount,
+        totalCommitted,
+        poolStatus: updatedPool?.status ?? "open",
+        action
+      });
+    } catch (error) {
+      notification = {
+        status: "failed",
+        provider: "notification_error",
+        localPath: null,
+        errorMessage: error.message
+      };
+    }
+  }
 
   return {
     action,
@@ -2518,7 +3031,8 @@ export async function upsertInvestorPoolCommitment(poolId, input) {
     participantName: member.name,
     commitmentAmount,
     totalCommitted,
-    poolStatus: updatedPool?.status ?? "open"
+    poolStatus: updatedPool?.status ?? "open",
+    notification
   };
 }
 
@@ -2569,9 +3083,10 @@ export async function castInvestorPoolVote(poolId, userId, dealId) {
     throw new Error("You must be an assigned member of this pooled capital group before voting.");
   }
 
-  await getEligiblePoolTargetDeal(normalizedDealId);
+  const targetDeal = await getEligiblePoolTargetDeal(normalizedDealId);
 
   const timestamp = nowTimestamp();
+  let action = "created";
 
   await withTransaction(async (client) => {
     const existingVote = await queryOne(
@@ -2586,6 +3101,7 @@ export async function castInvestorPoolVote(poolId, userId, dealId) {
     );
 
     if (existingVote) {
+      action = "updated";
       await client.query(
         `
           UPDATE investor_pool_votes
@@ -2612,11 +3128,61 @@ export async function castInvestorPoolVote(poolId, userId, dealId) {
     }
   });
 
+  const commitments = await getInvestorPoolCommitments(normalizedPoolId);
+  const voteCountRow = await queryOne(
+    `
+      SELECT COUNT(*)::int AS count
+      FROM investor_pool_votes
+      WHERE pool_id = $1
+    `,
+    [normalizedPoolId]
+  );
+  const voteCount = Number(voteCountRow?.count ?? 0);
+  const totalCommitted = roundNumber(
+    commitments.reduce((sum, commitment) => sum + commitment.commitmentAmount, 0)
+  );
+  const readyToFund =
+    investmentPool.status === "voting" &&
+    totalCommitted >= Number(investmentPool.minimumCapitalAmount ?? 0) &&
+    (isPoolVotingClosed(investmentPool.voteClosesOn) || voteCount >= commitments.length);
+  const managerRecipients = await getActiveManagerRecipients();
+  const notifications = await Promise.all(
+    managerRecipients.map(async (managerRecipient) => {
+      try {
+        return await sendPoolVoteAlertNotification({
+          userId: managerRecipient.userId,
+          participantId: managerRecipient.participantId,
+          managerName: managerRecipient.fullName,
+          email: managerRecipient.email,
+          voterName: user.name,
+          voterEmail: user.email,
+          poolName: investmentPool.name,
+          dealName: targetDeal.name,
+          voteCount,
+          memberCount: commitments.length,
+          totalCommitted,
+          readyToFund,
+          submittedAt: timestamp
+        });
+      } catch (error) {
+        return {
+          status: "failed",
+          provider: "notification_error",
+          localPath: null,
+          errorMessage: error.message
+        };
+      }
+    })
+  );
+
   return {
     vote: {
       poolId: normalizedPoolId,
       participantId: user.participantId,
-      dealId: normalizedDealId
+      dealId: normalizedDealId,
+      action,
+      readyToFund,
+      notifications
     }
   };
 }
@@ -2884,6 +3450,7 @@ export async function submitIdentityReview(userId, input) {
     hasExistingIdCard: Boolean(currentUser.idCardFileName)
   });
   const legalAcknowledgements = normalizeLegalAcknowledgementInput(input, currentUser);
+  const investorQuestionnaire = normalizeInvestorQuestionnaireInput(input, currentUser, identity);
   const timestamp = nowTimestamp();
 
   await withTransaction(async (client) => {
@@ -2939,11 +3506,16 @@ export async function submitIdentityReview(userId, input) {
             document_file_name,
             required_for_category,
             signer_name,
+            investment_amount,
+            deferred_amount,
+            proof_of_payment_file_name,
+            proof_of_payment_mime_type,
+            proof_of_payment_data_url,
             acknowledged_at,
             created_at,
             updated_at
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, $10)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $15, $15)
         `,
         [
           createId("legal-ack"),
@@ -2955,6 +3527,62 @@ export async function submitIdentityReview(userId, input) {
           acknowledgement.documentFileName,
           acknowledgement.requiredForCategory,
           acknowledgement.signerName,
+          acknowledgement.investmentAmount,
+          acknowledgement.deferredAmount,
+          acknowledgement.proofOfPaymentFile?.fileName ?? null,
+          acknowledgement.proofOfPaymentFile?.mimeType ?? null,
+          acknowledgement.proofOfPaymentFile?.dataUrl ?? null,
+          timestamp
+        ]
+      );
+    }
+
+    if (investorQuestionnaire) {
+      await client.query(
+        `
+          INSERT INTO investor_questionnaires (
+            id,
+            user_id,
+            participant_id,
+            name_entity,
+            address,
+            email,
+            phone,
+            income_over_200k,
+            net_worth_over_100k,
+            entity_over_5m_assets,
+            investment_experience,
+            submitted_at,
+            created_at,
+            updated_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $12, $12)
+          ON CONFLICT (user_id)
+          DO UPDATE SET
+            participant_id = EXCLUDED.participant_id,
+            name_entity = EXCLUDED.name_entity,
+            address = EXCLUDED.address,
+            email = EXCLUDED.email,
+            phone = EXCLUDED.phone,
+            income_over_200k = EXCLUDED.income_over_200k,
+            net_worth_over_100k = EXCLUDED.net_worth_over_100k,
+            entity_over_5m_assets = EXCLUDED.entity_over_5m_assets,
+            investment_experience = EXCLUDED.investment_experience,
+            submitted_at = EXCLUDED.submitted_at,
+            updated_at = EXCLUDED.updated_at
+        `,
+        [
+          createId("questionnaire"),
+          userId,
+          currentUser.participantId,
+          investorQuestionnaire.nameEntity,
+          investorQuestionnaire.address,
+          investorQuestionnaire.email,
+          investorQuestionnaire.phone,
+          investorQuestionnaire.incomeOver200k ? 1 : 0,
+          investorQuestionnaire.netWorthOver100k ? 1 : 0,
+          investorQuestionnaire.entityOver5mAssets ? 1 : 0,
+          investorQuestionnaire.investmentExperience,
           timestamp
         ]
       );
@@ -2999,6 +3627,93 @@ export async function submitIdentityReview(userId, input) {
   );
 
   return updatedUser;
+}
+
+export async function submitRequiredLegalAcknowledgements(userId, input) {
+  const currentUser = await getUserById(userId);
+
+  if (!currentUser) {
+    throw new Error("User not found.");
+  }
+
+  if (currentUser.role === "manager") {
+    throw new Error("Manager accounts do not require legal document acknowledgements.");
+  }
+
+  if (currentUser.mustChangePassword) {
+    throw new Error("Change your temporary password before signing legal documents.");
+  }
+
+  if (currentUser.accountApprovalStatus !== "approved") {
+    throw new Error("Account approval is required before signing amended legal documents.");
+  }
+
+  const pendingDocuments = await getPendingLegalAcknowledgementDocuments(
+    currentUser.id,
+    currentUser.category
+  );
+  const legalAcknowledgements = normalizeRequiredLegalAcknowledgementInput(
+    input,
+    currentUser,
+    pendingDocuments
+  );
+
+  if (!legalAcknowledgements.length) {
+    return currentUser;
+  }
+
+  const timestamp = nowTimestamp();
+
+  await withTransaction(async (client) => {
+    for (const acknowledgement of legalAcknowledgements) {
+      await client.query(
+        `
+          INSERT INTO user_legal_acknowledgements (
+            id,
+            user_id,
+            participant_id,
+            document_key,
+            document_title,
+            document_version,
+            document_file_name,
+            required_for_category,
+            signer_name,
+            investment_amount,
+            deferred_amount,
+            proof_of_payment_file_name,
+            proof_of_payment_mime_type,
+            proof_of_payment_data_url,
+            acknowledged_at,
+            created_at,
+            updated_at
+          )
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, NULL, NULL, NULL, NULL, $10, $10, $10)
+          ON CONFLICT (user_id, document_key, document_version)
+          DO UPDATE SET
+            document_title = EXCLUDED.document_title,
+            document_file_name = EXCLUDED.document_file_name,
+            required_for_category = EXCLUDED.required_for_category,
+            signer_name = EXCLUDED.signer_name,
+            acknowledged_at = EXCLUDED.acknowledged_at,
+            updated_at = EXCLUDED.updated_at
+        `,
+        [
+          createId("legal-ack"),
+          currentUser.id,
+          currentUser.participantId,
+          acknowledgement.documentKey,
+          acknowledgement.documentTitle,
+          acknowledgement.documentVersion,
+          acknowledgement.documentFileName,
+          acknowledgement.requiredForCategory,
+          acknowledgement.signerName,
+          timestamp
+        ]
+      );
+    }
+  });
+
+  return getUserById(userId);
 }
 
 export async function updateOwnProfile(userId, input) {
@@ -3520,13 +4235,41 @@ export async function createDealAllocation(input) {
     await syncDealEquity(dealId, client);
   });
 
+  let notification = null;
+  const allocationAction = existingPosition ? "increased" : "created";
+  const recipient = await getActiveUserRecipientForParticipant(participantId);
+
+  if (recipient?.email) {
+    try {
+      notification = await sendProjectAllocationNotification({
+        userId: recipient.userId,
+        participantId: recipient.participantId,
+        fullName: recipient.fullName,
+        email: recipient.email,
+        dealName: deal.name,
+        participantCategory: participant.category,
+        classType,
+        contributionAmount,
+        action: allocationAction
+      });
+    } catch (error) {
+      notification = {
+        status: "failed",
+        provider: "notification_error",
+        localPath: null,
+        errorMessage: error.message
+      };
+    }
+  }
+
   return {
-    action: existingPosition ? "increased" : "created",
+    action: allocationAction,
     dealId,
     dealName: deal.name,
     participantId,
     participantName: participant.name,
-    positionId: existingPosition?.id ?? positionId
+    positionId: existingPosition?.id ?? positionId,
+    notification
   };
 }
 
@@ -4821,6 +5564,40 @@ export async function getUserIdentityDocumentDownload(userId) {
 
   if (!document.fileName || !document.fileDataUrl) {
     throw new Error("This user has not uploaded an identity document.");
+  }
+
+  return document;
+}
+
+export async function getLegalAcknowledgementPaymentProofDownload(acknowledgementId) {
+  const normalizedAcknowledgementId = String(acknowledgementId ?? "").trim();
+
+  if (!normalizedAcknowledgementId) {
+    throw new Error("A valid legal acknowledgement is required.");
+  }
+
+  const document = await queryOne(
+    `
+      SELECT
+        user_legal_acknowledgements.id,
+        user_legal_acknowledgements.document_title AS "documentTitle",
+        user_legal_acknowledgements.proof_of_payment_file_name AS "fileName",
+        user_legal_acknowledgements.proof_of_payment_mime_type AS "fileMimeType",
+        user_legal_acknowledgements.proof_of_payment_data_url AS "fileDataUrl",
+        participants.name AS "participantName"
+      FROM user_legal_acknowledgements
+      JOIN participants ON participants.id = user_legal_acknowledgements.participant_id
+      WHERE user_legal_acknowledgements.id = $1
+    `,
+    [normalizedAcknowledgementId]
+  );
+
+  if (!document) {
+    throw new Error("Legal acknowledgement not found.");
+  }
+
+  if (!document.fileName || !document.fileDataUrl) {
+    throw new Error("This legal acknowledgement does not have proof of payment.");
   }
 
   return document;
@@ -7310,6 +8087,43 @@ async function assertUserIdentityReadyForApproval(targetUser) {
         .map((document) => document.title)
         .join(", ")}.`
     );
+  }
+
+  const legalAcknowledgementByDocumentKey = new Map(
+    legalAcknowledgements.map((acknowledgement) => [acknowledgement.documentKey, acknowledgement])
+  );
+  const missingLegalDetails = [];
+
+  for (const document of requiredLegalDocuments) {
+    const acknowledgement = legalAcknowledgementByDocumentKey.get(document.key);
+
+    if (!acknowledgement) {
+      continue;
+    }
+
+    if (document.requiresInvestmentAmount && !(Number(acknowledgement.investmentAmount) > 0)) {
+      missingLegalDetails.push(`${document.title} investment amount`);
+    }
+
+    if (document.requiresPaymentProof && !acknowledgement.proofOfPaymentFileName) {
+      missingLegalDetails.push(`${document.title} proof of payment`);
+    }
+
+    if (document.requiresDeferredAmount && !(Number(acknowledgement.deferredAmount) > 0)) {
+      missingLegalDetails.push(`${document.title} deferred amount`);
+    }
+  }
+
+  if (missingLegalDetails.length) {
+    throw new Error(`This account is missing ${missingLegalDetails.join(", ")}.`);
+  }
+
+  if (isInvestorQuestionnaireRequired(targetUser.category)) {
+    const questionnaire = await getInvestorQuestionnaireForUser(targetUser.id);
+
+    if (!questionnaire) {
+      throw new Error("This account is missing the investor questionnaire.");
+    }
   }
 }
 

@@ -5,7 +5,7 @@ import {
   LOGIN_PAGE_TITLE,
   app,
   state
-} from "./state.js?v=20260430-frontend-19";
+} from "./state.js?v=20260430-frontend-24";
 import {
   breakdownItem,
   escapeHtml,
@@ -21,7 +21,7 @@ import {
   renderSectionToggle,
   summaryItem,
   titleCase
-} from "./helpers.js?v=20260430-frontend-19";
+} from "./helpers.js?v=20260430-frontend-24";
 import {
   applyAllocationFilters,
   applyArchivedProjectFilters,
@@ -29,6 +29,7 @@ import {
   applyDistributionReviewFilters,
   applyInvestorIssueFilters,
   applyInvestorProjectFilters,
+  applyQuestionnaireFilters,
   applyUserFilters,
   buildContractorProjectRollups,
   getAllocationFilterOptions,
@@ -43,7 +44,7 @@ import {
   getInvestorProjectFilterOptions,
   getManagerEditableDeal,
   getUserFilterOptions
-} from "./data.js?v=20260430-frontend-19";
+} from "./data.js?v=20260430-frontend-24";
 
 function renderLogin() {
   const errorMarkup = state.loginError
@@ -193,6 +194,16 @@ function requiresIdentityGate(session) {
   );
 }
 
+function requiresLegalAcknowledgementGate(session) {
+  return (
+    session &&
+    !session.mustChangePassword &&
+    session.role !== "manager" &&
+    getAccountApprovalStatus(session) === "approved" &&
+    Boolean(session.hasPendingLegalAcknowledgements)
+  );
+}
+
 function accountApprovalStatusLabel(status) {
   const labels = {
     profile_required: "Profile required",
@@ -250,8 +261,70 @@ function getRequiredLegalDocumentsForCurrentSession() {
     : [];
 }
 
-function renderLegalAcknowledgementFields() {
-  const documents = getRequiredLegalDocumentsForCurrentSession();
+function renderLegalDocumentSupplementFields(document) {
+  const key = escapeHtml(document.key);
+  const fields = [];
+
+  if (document.requiresInvestmentAmount) {
+    fields.push(`
+      <label>
+        Investment amount
+        <input
+          type="number"
+          name="legalInvestmentAmount:${key}"
+          min="0.01"
+          step="0.01"
+          required
+        />
+      </label>
+    `);
+  }
+
+  if (document.requiresDeferredAmount) {
+    fields.push(`
+      <label>
+        Deferred amount
+        <input
+          type="number"
+          name="legalDeferredAmount:${key}"
+          min="0.01"
+          step="0.01"
+          required
+        />
+      </label>
+    `);
+  }
+
+  if (document.requiresPaymentProof) {
+    fields.push(`
+      <label>
+        Proof of payment
+        <input
+          type="file"
+          name="legalPaymentProof:${key}"
+          accept="image/*,.pdf"
+          required
+        />
+      </label>
+    `);
+  }
+
+  if (!fields.length) {
+    return "";
+  }
+
+  return `
+    <div class="form-grid-2 legal-document-extra-grid">
+      ${fields.join("")}
+    </div>
+  `;
+}
+
+function renderLegalAcknowledgementFields({
+  documents = getRequiredLegalDocumentsForCurrentSession(),
+  introCopy = "These acknowledgements are required before the manager can approve account access.",
+  includeSupplementFields = true
+} = {}) {
 
   if (!documents.length) {
     return "";
@@ -262,7 +335,7 @@ function renderLegalAcknowledgementFields() {
       <div>
         <h3>Required legal documents</h3>
         <p class="section-copy">
-          These acknowledgements are required before the manager can approve account access.
+          ${escapeHtml(introCopy)}
         </p>
       </div>
       ${documents
@@ -283,6 +356,7 @@ function renderLegalAcknowledgementFields() {
                   Open PDF
                 </a>
               </div>
+              ${includeSupplementFields ? renderLegalDocumentSupplementFields(document) : ""}
               <label class="checkbox-field">
                 I have read and agree to this document.
                 <input type="checkbox" name="legalAck:${escapeHtml(document.key)}" required />
@@ -301,6 +375,65 @@ function renderLegalAcknowledgementFields() {
           `
         )
         .join("")}
+    </div>
+  `;
+}
+
+function renderInvestorQuestionnaireFields() {
+  if (!state.session?.requiresInvestorQuestionnaire) {
+    return "";
+  }
+
+  return `
+    <div class="questionnaire-card">
+      <div>
+        <p class="eyebrow">Investor Questionnaire</p>
+        <h3>Part II - Investor Questionnaire</h3>
+      </div>
+      <div class="form-grid-2">
+        <label>
+          Name / Entity
+          <input type="text" name="questionnaireNameEntity" value="${inputValue(state.session.name)}" required />
+        </label>
+        <label>
+          Email
+          <input type="email" name="questionnaireEmail" value="${inputValue(state.session.email)}" required />
+        </label>
+      </div>
+      <div class="form-grid-2">
+        <label>
+          Address
+          <textarea name="questionnaireAddress" rows="3" required></textarea>
+        </label>
+        <label>
+          Phone
+          <input type="text" name="questionnairePhone" placeholder="Phone or best contact number" required />
+        </label>
+      </div>
+      <div class="questionnaire-checklist">
+        <h4>Accreditation Check</h4>
+        <label class="checkbox-field">
+          Income over $200,000 ($300,000 with spouse)
+          <input type="checkbox" name="questionnaireIncomeOver200k" />
+        </label>
+        <label class="checkbox-field">
+          Net worth over $100,000
+          <input type="checkbox" name="questionnaireNetWorthOver100k" />
+        </label>
+        <label class="checkbox-field">
+          Entity with over $5,000,000 in assets
+          <input type="checkbox" name="questionnaireEntityOver5mAssets" />
+        </label>
+      </div>
+      <label>
+        Investment experience
+        <textarea
+          name="questionnaireInvestmentExperience"
+          rows="4"
+          placeholder="Describe your investment experience"
+          required
+        ></textarea>
+      </label>
     </div>
   `;
 }
@@ -390,8 +523,45 @@ function renderIdentityReviewGate() {
             Driver's license or ID card
             <input type="file" name="idCard" accept="image/*,.pdf" required />
           </label>
+          ${renderInvestorQuestionnaireFields()}
           ${renderLegalAcknowledgementFields()}
           <button class="button-primary" type="submit">Submit for review</button>
+        </form>
+      </section>
+    </div>
+  `;
+}
+
+function renderLegalAcknowledgementGate() {
+  const documents = Array.isArray(state.session?.pendingLegalDocuments)
+    ? state.session.pendingLegalDocuments
+    : [];
+
+  return `
+    <div class="shell">
+      <section class="panel password-gate">
+        <div class="section-head">
+          <div>
+            <p class="eyebrow">Document Acknowledgement Required</p>
+            <h2>${escapeHtml(state.session.name)}</h2>
+            <p class="section-copy">
+              One or more required legal documents were added or amended. Review and sign them before continuing to the portal.
+            </p>
+          </div>
+          <div class="button-row">
+            <span class="read-only-tag">${escapeHtml(state.session.email)}</span>
+            <button class="button-secondary" id="logout-button" type="button">Log out</button>
+          </div>
+        </div>
+        ${renderMessage(state.messages.legal)}
+        <form id="legal-acknowledgement-form">
+          ${renderLegalAcknowledgementFields({
+            documents,
+            introCopy:
+              "These acknowledgements are required because a document was added or amended after your account was approved.",
+            includeSupplementFields: false
+          })}
+          <button class="button-primary" type="submit">Submit acknowledgements</button>
         </form>
       </section>
     </div>
@@ -3148,17 +3318,32 @@ function renderAllocationPanel() {
           Participant
           <select name="participantId" required>
             <option value="">Select participant</option>
-            ${participants
-              .map(
-                (participant) => `
-                  <option value="${escapeHtml(participant.id)}">
-                    ${escapeHtml(participant.name)} · ${escapeHtml(titleCase(participant.category))}
-                  </option>
-                `
-              )
-              .join("")}
-          </select>
-        </label>
+	            ${participants
+	              .map(
+	                (participant) => `
+	                  <option
+	                    value="${escapeHtml(participant.id)}"
+	                    data-suggested-amount="${escapeHtml(participant.suggestedAllocationAmount ?? "")}"
+	                    data-enrollment-label="${escapeHtml(
+                        participant.enrollmentFundingLabel || "No enrollment amount recorded"
+                      )}"
+	                  >
+	                    ${escapeHtml(
+                        `${participant.name} · ${titleCase(participant.category)}${
+                          participant.enrollmentFundingLabel
+                            ? ` · ${participant.enrollmentFundingLabel}`
+                            : ""
+                        }`
+                      )}
+	                  </option>
+	                `
+	              )
+	              .join("")}
+	          </select>
+	          <p class="helper-copy" data-enrollment-amount-hint="true">
+	            Select a participant to view their enrollment amount.
+	          </p>
+	        </label>
         <label>
           Deal
           <select name="dealId" required>
@@ -3186,10 +3371,10 @@ function renderAllocationPanel() {
               <option value="Class C">Class C</option>
             </select>
           </label>
-          <label>
-            Contribution amount
-            <input type="number" name="contributionAmount" min="0" step="1000" required />
-          </label>
+	          <label>
+	            Contribution amount
+	            <input type="number" name="contributionAmount" min="0" step="0.01" required />
+	          </label>
         </div>
         <label>
           Contribution type
@@ -4348,15 +4533,15 @@ function renderIdentityReviewActions(row) {
     return documentLinks;
   }
 
-  const missingLegalDocuments = getMissingLegalDocumentsForUser(row);
-  const approvalDisabled = missingLegalDocuments.length ? "disabled" : "";
+  const legalReviewIssues = getLegalReviewIssuesForUser(row);
+  const approvalDisabled = legalReviewIssues.length ? "disabled" : "";
 
   return `
     ${documentLinks}
     ${
-      missingLegalDocuments.length
+      legalReviewIssues.length
         ? `<p class="table-note">${escapeHtml(
-            "Approval is locked until required legal documents are signed."
+            `Approval is locked until these legal items are complete: ${legalReviewIssues.join(", ")}.`
           )}</p>`
         : ""
     }
@@ -4414,10 +4599,85 @@ function getMissingLegalDocumentsForUser(row) {
   return missingDocuments;
 }
 
+function getLegalReviewIssuesForUser(row) {
+  const acknowledgements = row.legalAcknowledgements ?? [];
+  const requiredDocuments = getRequiredLegalDocumentsForCategory(row.category);
+  const acknowledgementByDocumentKey = new Map(
+    acknowledgements.map((acknowledgement) => [acknowledgement.documentKey, acknowledgement])
+  );
+  const issues = [];
+
+  for (const document of requiredDocuments) {
+    const acknowledgement = acknowledgementByDocumentKey.get(document.key);
+
+    if (!acknowledgement) {
+      issues.push(document.title);
+      continue;
+    }
+
+    if (document.requiresInvestmentAmount && !(Number(acknowledgement.investmentAmount) > 0)) {
+      issues.push(`${document.title} investment amount`);
+    }
+
+    if (document.requiresPaymentProof && !acknowledgement.proofOfPaymentFileName) {
+      issues.push(`${document.title} proof of payment`);
+    }
+
+    if (document.requiresDeferredAmount && !(Number(acknowledgement.deferredAmount) > 0)) {
+      issues.push(`${document.title} deferred amount`);
+    }
+  }
+
+  return issues;
+}
+
+function renderLegalAcknowledgementDetails(acknowledgement) {
+  const details = [];
+
+  if (Number(acknowledgement.investmentAmount) > 0) {
+    details.push(`Investment amount: ${formatCurrency(acknowledgement.investmentAmount)}`);
+  }
+
+  if (Number(acknowledgement.deferredAmount) > 0) {
+    details.push(`Deferred amount: ${formatCurrency(acknowledgement.deferredAmount)}`);
+  }
+
+  return `
+    <p>${escapeHtml(
+      `Signed by ${acknowledgement.signerName} on ${formatDateTime(acknowledgement.acknowledgedAt)}`
+    )}</p>
+    ${details.map((detail) => `<p>${escapeHtml(detail)}</p>`).join("")}
+    ${
+      acknowledgement.proofOfPaymentFileName
+        ? `
+          <div class="legal-proof-actions">
+            <a
+              class="button-secondary button-inline"
+              href="/api/admin/legal-acknowledgements/${encodeURIComponent(acknowledgement.id)}/proof?view=1"
+              target="_blank"
+              rel="noopener"
+            >
+              View proof
+            </a>
+            <a
+              class="button-secondary button-inline"
+              href="/api/admin/legal-acknowledgements/${encodeURIComponent(acknowledgement.id)}/proof"
+              download="${escapeHtml(acknowledgement.proofOfPaymentFileName)}"
+            >
+              Download proof
+            </a>
+          </div>
+        `
+        : ""
+    }
+  `;
+}
+
 function renderLegalAcknowledgementStatus(row) {
   const acknowledgements = row.legalAcknowledgements ?? [];
   const requiredDocuments = getRequiredLegalDocumentsForCategory(row.category);
   const missingDocuments = getMissingLegalDocumentsForUser(row);
+  const legalReviewIssues = getLegalReviewIssuesForUser(row);
 
   if (!requiredDocuments.length) {
     return "Not required";
@@ -4438,29 +4698,175 @@ function renderLegalAcknowledgementStatus(row) {
                       href="/api/legal-documents/${encodeURIComponent(acknowledgement.documentKey)}"
                       target="_blank"
                       rel="noopener"
-                    >
-                      ${escapeHtml(acknowledgement.documentTitle)}
-                    </a>
-                    <p>${escapeHtml(
-                      `Signed by ${acknowledgement.signerName} on ${formatDateTime(
-                        acknowledgement.acknowledgedAt
-                      )}`
-                    )}</p>
-                  </div>
-                `
+	                    >
+	                      ${escapeHtml(acknowledgement.documentTitle)}
+	                    </a>
+	                    ${renderLegalAcknowledgementDetails(acknowledgement)}
+	                  </div>
+	                `
               )
               .join("")
           : ""
       }
       ${
-        missingDocuments.length
+        legalReviewIssues.length
           ? `<p class="table-note">${escapeHtml(
-              `Missing: ${missingDocuments.map((document) => document.title).join(", ")}`
+              `Missing: ${legalReviewIssues.join(", ")}`
             )}</p>`
           : ""
       }
     </div>
   `;
+}
+
+function formatQuestionnaireCheck(value) {
+  return value ? "Checked" : "Not checked";
+}
+
+function isInvestorQuestionnaireRequiredForCategory(category) {
+  return ["investor", "pool_member"].includes(category);
+}
+
+function renderQuestionnaireAccreditationSummary(questionnaire) {
+  return `
+    <ul class="questionnaire-response-list">
+      <li>${escapeHtml(
+        `Income over $200,000 ($300,000 with spouse): ${formatQuestionnaireCheck(
+          questionnaire.incomeOver200k
+        )}`
+      )}</li>
+      <li>${escapeHtml(
+        `Net worth over $100,000: ${formatQuestionnaireCheck(
+          questionnaire.netWorthOver100k
+        )}`
+      )}</li>
+      <li>${escapeHtml(
+        `Entity with over $5,000,000 in assets: ${formatQuestionnaireCheck(
+          questionnaire.entityOver5mAssets
+        )}`
+      )}</li>
+    </ul>
+  `;
+}
+
+function renderInvestorQuestionnaireStatus(row) {
+  if (!isInvestorQuestionnaireRequiredForCategory(row.category)) {
+    return "Not required";
+  }
+
+  if (!row.investorQuestionnaire) {
+    return '<span class="read-only-tag">Missing</span>';
+  }
+
+  return `
+    <div class="legal-ack-list">
+      <span class="read-only-tag">${escapeHtml(
+        `Submitted ${formatDateTime(row.investorQuestionnaire.submittedAt)}`
+      )}</span>
+      ${renderQuestionnaireAccreditationSummary(row.investorQuestionnaire)}
+    </div>
+  `;
+}
+
+function renderManagerInvestorQuestionnairesPage() {
+  const questionnaires = state.dashboard.admin.investorQuestionnaires ?? [];
+  const filteredQuestionnaires = applyQuestionnaireFilters(questionnaires);
+  const accreditedMatches = filteredQuestionnaires.filter(
+    (questionnaire) =>
+      questionnaire.incomeOver200k ||
+      questionnaire.netWorthOver100k ||
+      questionnaire.entityOver5mAssets
+  ).length;
+
+  return renderCollapsibleSection({
+    sectionId: "manager-investor-questionnaires",
+    title: "Investor Questionnaires",
+    copy:
+      "Review onboarding questionnaire responses, filter by user name, and export the matching record set.",
+    message: renderMessage(state.messages.questionnaire),
+    body: `
+      <div class="metrics-grid">
+        ${metricCard("Matching submissions", String(filteredQuestionnaires.length))}
+        ${metricCard("With accreditation checks", String(accreditedMatches))}
+      </div>
+      <div class="table-toolbar">
+        <div class="filter-grid filter-grid-2">
+          <label>
+            User name
+            <input
+              type="search"
+              id="questionnaire-filter-search"
+              value="${inputValue(state.questionnaireFilters.search)}"
+              placeholder="Search by user name"
+            />
+          </label>
+        </div>
+        <span class="read-only-tag">Showing ${escapeHtml(
+          String(filteredQuestionnaires.length)
+        )} of ${escapeHtml(String(questionnaires.length))}</span>
+      </div>
+      <div class="button-row">
+        <button
+          class="button-secondary"
+          type="button"
+          data-questionnaire-export="text"
+          ${filteredQuestionnaires.length ? "" : "disabled"}
+        >
+          Export Text
+        </button>
+        <button
+          class="button-secondary"
+          type="button"
+          data-questionnaire-export="pdf"
+          ${filteredQuestionnaires.length ? "" : "disabled"}
+        >
+          Export PDF
+        </button>
+      </div>
+      ${
+        filteredQuestionnaires.length
+          ? `
+            <div class="questionnaire-report-grid">
+              ${filteredQuestionnaires
+                .map(
+                  (questionnaire) => `
+                    <article class="questionnaire-report-card">
+                      <div class="section-head">
+                        <div>
+                          <p class="eyebrow">${escapeHtml(titleCase(questionnaire.category))}</p>
+                          <h4>${escapeHtml(questionnaire.userName)}</h4>
+                          <p class="section-copy">${escapeHtml(questionnaire.userEmail)}</p>
+                        </div>
+                        <span class="read-only-tag">${escapeHtml(
+                          formatDateTime(questionnaire.submittedAt)
+                        )}</span>
+                      </div>
+                      <div class="summary-grid">
+                        ${summaryItem("Name / Entity", questionnaire.nameEntity)}
+                        ${summaryItem("Email", questionnaire.email)}
+                        ${summaryItem("Phone", questionnaire.phone)}
+                        ${summaryItem("Address", questionnaire.address)}
+                      </div>
+                      <div class="questionnaire-response-block">
+                        <h5>Accreditation Check</h5>
+                        ${renderQuestionnaireAccreditationSummary(questionnaire)}
+                      </div>
+                      <div class="questionnaire-response-block">
+                        <h5>Investment Experience</h5>
+                        <p>${escapeHtml(questionnaire.investmentExperience)}</p>
+                      </div>
+                    </article>
+                  `
+                )
+                .join("")}
+            </div>
+          `
+          : questionnaires.length
+            ? '<div class="empty-state">No investor questionnaires match the current user filter.</div>'
+            : '<div class="empty-state">No investor questionnaires have been submitted yet.</div>'
+      }
+    `
+  });
 }
 
 function renderManagerArchivedProjectCard(project) {
@@ -4651,6 +5057,7 @@ function renderPendingUserApprovalsPage() {
                     <th>ID card</th>
                     <th>ID dates</th>
                     <th>Legal documents</th>
+                    <th>Questionnaire</th>
                     <th>Submitted</th>
                     <th>Review</th>
                   </tr>
@@ -4671,6 +5078,7 @@ function renderPendingUserApprovalsPage() {
                               : "—"
                           )}</td>
                           <td>${renderLegalAcknowledgementStatus(row)}</td>
+                          <td>${renderInvestorQuestionnaireStatus(row)}</td>
                           <td>${escapeHtml(formatDateTime(row.onboardingSubmittedAt))}</td>
                           <td>
                             <div class="table-actions identity-review-actions">
@@ -5057,12 +5465,14 @@ function getManagerReviewAlertCounts() {
   const pendingWithdrawals = (admin.earlyWithdrawalReviews ?? []).filter(
     (review) => review.needsReview
   ).length;
+  const readyPools = (admin.investorPools ?? []).filter((pool) => pool.canFund).length;
 
   return {
     pendingAccounts,
     pendingDistributions,
     pendingWithdrawals,
-    total: pendingAccounts + pendingDistributions + pendingWithdrawals
+    readyPools,
+    total: pendingAccounts + pendingDistributions + pendingWithdrawals + readyPools
   };
 }
 
@@ -5079,7 +5489,7 @@ function renderManagerReviewAlertPanel() {
         <p class="eyebrow">Manager Inbox</p>
         <h3>${escapeHtml(String(counts.total))} item${counts.total === 1 ? "" : "s"} need review</h3>
         <p class="section-copy">
-          Pending account approvals, distribution elections, and early withdrawal requests are waiting for manager action.
+          Pending account approvals, distribution elections, early withdrawal requests, and ready pool funding actions are waiting for manager action.
         </p>
       </div>
       <div class="button-row">
@@ -5095,6 +5505,13 @@ function renderManagerReviewAlertPanel() {
             ? `<button class="button-secondary manager-alert-button" type="button" data-manager-page="distribution-reviews">! ${escapeHtml(
                 String(counts.pendingDistributions + counts.pendingWithdrawals)
               )} request${counts.pendingDistributions + counts.pendingWithdrawals === 1 ? "" : "s"}</button>`
+            : ""
+        }
+        ${
+          counts.readyPools
+            ? `<button class="button-secondary manager-alert-button" type="button" data-manager-page="pooled-investors">! ${escapeHtml(
+                String(counts.readyPools)
+              )} ready pool${counts.readyPools === 1 ? "" : "s"}</button>`
             : ""
         }
       </div>
@@ -5165,6 +5582,10 @@ function renderNotificationPanel(notificationCenter) {
                 <span>Withdrawal reviews</span>
                 <strong>${escapeHtml(String(managerCounts.pendingWithdrawals))}</strong>
               </button>
+              <button class="notification-summary-item" type="button" data-manager-page="pooled-investors">
+                <span>Pool funding</span>
+                <strong>${escapeHtml(String(managerCounts.readyPools))}</strong>
+              </button>
             </div>
           `
           : ""
@@ -5218,6 +5639,11 @@ const MANAGER_PAGE_ITEMS = [
     id: "distribution-reviews",
     label: "Distribution Reviews",
     copy: "Review sold-project elections and active-project withdrawal requests."
+  },
+  {
+    id: "investor-questionnaires",
+    label: "Investor Questionnaires",
+    copy: "Review and export investor questionnaire submissions."
   },
   {
     id: "company-library",
@@ -5567,21 +5993,36 @@ function renderManagerInvestorPoolCard(pool, { defaultCollapsed = false } = {}) 
                               Pooled member
                               <select name="participantId" required>
                                 <option value="">Select member</option>
-                                ${availablePoolMembers
-                                  .map(
-                                    (member) => `
-                                      <option value="${escapeHtml(member.id)}">
-                                        ${escapeHtml(member.name)} · ${escapeHtml(member.email || "No email")}
-                                      </option>
-                                    `
-                                  )
-                                  .join("")}
-                              </select>
-                            </label>
-                            <label>
-                              Commitment amount
-                              <input type="number" name="commitmentAmount" min="0" step="1000" required />
-                            </label>
+	                                ${availablePoolMembers
+	                                  .map(
+	                                    (member) => `
+	                                      <option
+	                                        value="${escapeHtml(member.id)}"
+	                                        data-suggested-amount="${escapeHtml(member.suggestedAllocationAmount ?? "")}"
+	                                        data-enrollment-label="${escapeHtml(
+                                            member.enrollmentFundingLabel || "No enrollment amount recorded"
+                                          )}"
+	                                      >
+	                                        ${escapeHtml(
+                                            `${member.name} · ${member.email || "No email"}${
+                                              member.enrollmentFundingLabel
+                                                ? ` · ${member.enrollmentFundingLabel}`
+                                                : ""
+                                            }`
+                                          )}
+	                                      </option>
+	                                    `
+	                                  )
+	                                  .join("")}
+	                              </select>
+	                              <p class="helper-copy" data-enrollment-amount-hint="true">
+	                                Select a pooled member to view their enrollment amount.
+	                              </p>
+	                            </label>
+	                            <label>
+	                              Commitment amount
+	                              <input type="number" name="commitmentAmount" min="0" step="0.01" required />
+	                            </label>
                             <button class="button-primary" type="submit">Save commitment</button>
                           </form>
                         `
@@ -5758,6 +6199,8 @@ function renderManagerPageContent(page, { overview, deals }) {
       return renderManagerArchivedProjectsPage();
     case "distribution-reviews":
       return renderDistributionReviewSection();
+    case "investor-questionnaires":
+      return renderManagerInvestorQuestionnairesPage();
     case "company-library":
       return renderManagerCompanyLibraryPage();
     case "user-directory":
@@ -5836,6 +6279,11 @@ export function render() {
 
   if (requiresIdentityGate(state.session)) {
     app.innerHTML = renderIdentityReviewGate();
+    return;
+  }
+
+  if (requiresLegalAcknowledgementGate(state.session)) {
+    app.innerHTML = renderLegalAcknowledgementGate();
     return;
   }
 

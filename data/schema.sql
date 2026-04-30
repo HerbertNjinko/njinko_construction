@@ -51,6 +51,48 @@ CREATE TABLE IF NOT EXISTS password_reset_tokens (
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS user_legal_acknowledgements (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  participant_id TEXT NOT NULL,
+  document_key TEXT NOT NULL,
+  document_title TEXT NOT NULL,
+  document_version TEXT NOT NULL,
+  document_file_name TEXT,
+  required_for_category TEXT NOT NULL,
+  signer_name TEXT NOT NULL,
+  investment_amount REAL,
+  deferred_amount REAL,
+  proof_of_payment_file_name TEXT,
+  proof_of_payment_mime_type TEXT,
+  proof_of_payment_data_url TEXT,
+  acknowledged_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE,
+  UNIQUE (user_id, document_key, document_version)
+);
+
+CREATE TABLE IF NOT EXISTS investor_questionnaires (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL UNIQUE,
+  participant_id TEXT NOT NULL,
+  name_entity TEXT NOT NULL,
+  address TEXT NOT NULL,
+  email TEXT NOT NULL,
+  phone TEXT NOT NULL,
+  income_over_200k INTEGER NOT NULL DEFAULT 0 CHECK (income_over_200k IN (0, 1)),
+  net_worth_over_100k INTEGER NOT NULL DEFAULT 0 CHECK (net_worth_over_100k IN (0, 1)),
+  entity_over_5m_assets INTEGER NOT NULL DEFAULT 0 CHECK (entity_over_5m_assets IN (0, 1)),
+  investment_experience TEXT NOT NULL,
+  submitted_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+  FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS deals (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL UNIQUE,
@@ -353,6 +395,14 @@ CREATE TABLE IF NOT EXISTS archived_records (
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_user_legal_acknowledgements_user_id
+  ON user_legal_acknowledgements(user_id, acknowledged_at DESC);
+CREATE INDEX IF NOT EXISTS idx_user_legal_acknowledgements_participant_id
+  ON user_legal_acknowledgements(participant_id, acknowledged_at DESC);
+CREATE INDEX IF NOT EXISTS idx_investor_questionnaires_participant_id
+  ON investor_questionnaires(participant_id, submitted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_investor_questionnaires_submitted_at
+  ON investor_questionnaires(submitted_at DESC);
 CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user_id
   ON password_reset_tokens(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_expires_at

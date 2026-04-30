@@ -23,8 +23,11 @@ import {
   fundInvestorPool,
   getAppDataSnapshot,
   getCompanyResourceDownload,
+  getLegalAcknowledgementPaymentProofDownload,
   getLegalDocumentDefinition,
+  getPendingLegalAcknowledgementDocuments,
   getRequiredLegalDocumentsForCategory,
+  isInvestorQuestionnaireRequired,
   getUserByEmail,
   getUserById,
   getUserIdentityDocumentDownload,
@@ -36,6 +39,7 @@ import {
   resetPasswordWithToken,
   setUserAccountActive,
   submitIdentityReview,
+  submitRequiredLegalAcknowledgements,
   updateUserCategory,
   upsertInvestorPoolCommitment,
   upsertEarlyWithdrawalRequest,
@@ -604,10 +608,30 @@ async function requireUnlockedUser(request, response) {
     return null;
   }
 
+  if (user.role !== "manager") {
+    const pendingLegalDocuments = await getPendingLegalAcknowledgementDocuments(
+      user.id,
+      user.category
+    );
+
+    if (pendingLegalDocuments.length) {
+      sendJson(response, 403, {
+        error: "Legal document acknowledgement is required before continuing.",
+        code: "LEGAL_ACKNOWLEDGEMENT_REQUIRED"
+      });
+      return null;
+    }
+  }
+
   return user;
 }
 
-function stripUserSecrets(user) {
+async function stripUserSecrets(user) {
+  const pendingLegalDocuments =
+    user.role !== "manager" && (user.accountApprovalStatus ?? "approved") === "approved"
+      ? await getPendingLegalAcknowledgementDocuments(user.id, user.category)
+      : [];
+
   return {
     id: user.id,
     name: user.name,
@@ -618,7 +642,10 @@ function stripUserSecrets(user) {
     accountApprovalStatus: user.accountApprovalStatus ?? "approved",
     accountRejectionComment: user.accountRejectionComment ?? "",
     onboardingSubmittedAt: user.onboardingSubmittedAt ?? null,
-    requiredLegalDocuments: getRequiredLegalDocumentsForCategory(user.category)
+    requiredLegalDocuments: getRequiredLegalDocumentsForCategory(user.category),
+    pendingLegalDocuments,
+    hasPendingLegalAcknowledgements: pendingLegalDocuments.length > 0,
+    requiresInvestorQuestionnaire: isInvestorQuestionnaireRequired(user.category)
   };
 }
 
@@ -637,6 +664,9 @@ const server = createServer(async (request, response) => {
     );
     const userIdentityDocumentMatch = url.pathname.match(
       /^\/api\/admin\/users\/([^/]+)\/id-card$/
+    );
+    const legalPaymentProofMatch = url.pathname.match(
+      /^\/api\/admin\/legal-acknowledgements\/([^/]+)\/proof$/
     );
     const legalDocumentMatch = url.pathname.match(/^\/api\/legal-documents\/([^/]+)$/);
     const userDeleteMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)$/);
@@ -749,7 +779,7 @@ const server = createServer(async (request, response) => {
         response,
         200,
         {
-          user: stripUserSecrets(user)
+          user: await stripUserSecrets(user)
         },
         {
           "Set-Cookie": buildSessionCookie(request, sessionId)
@@ -786,7 +816,7 @@ const server = createServer(async (request, response) => {
         response,
         200,
         {
-          user: user ? stripUserSecrets(user) : null,
+          user: user ? await stripUserSecrets(user) : null,
           expired
         },
         expired ? { "Set-Cookie": clearSessionCookie(request) } : {}
@@ -990,7 +1020,7 @@ const server = createServer(async (request, response) => {
 
       try {
         const updatedUser = await updateUserPassword(user.id, body.newPassword);
-        sendJson(response, 200, { user: stripUserSecrets(updatedUser) });
+        sendJson(response, 200, { user: await stripUserSecrets(updatedUser) });
       } catch (error) {
         sendJson(response, 400, { error: error.message });
       }
@@ -1014,7 +1044,47 @@ const server = createServer(async (request, response) => {
 
       try {
         const updatedUser = await submitIdentityReview(user.id, body);
-        sendJson(response, 200, { user: stripUserSecrets(updatedUser) });
+        sendJson(response, 200, { user: await stripUserSecrets(updatedUser) });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/profile/legal-acknowledgements") {
+      const user = await requireUser(request, response);
+
+      if (!user) {
+        return;
+      }
+
+      if (user.mustChangePassword) {
+        sendJson(response, 403, {
+          error: "Password change required before signing legal documents.",
+          code: "PASSWORD_CHANGE_REQUIRED"
+        });
+        return;
+      }
+
+      if (user.role !== "manager" && user.accountApprovalStatus !== "approved") {
+        sendJson(response, 403, {
+          error: "Account approval is required before signing amended legal documents.",
+          code: "ACCOUNT_APPROVAL_REQUIRED"
+        });
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const updatedUser = await submitRequiredLegalAcknowledgements(user.id, body);
+        sendJson(response, 200, { user: await stripUserSecrets(updatedUser) });
       } catch (error) {
         sendJson(response, 400, { error: error.message });
       }
@@ -1038,7 +1108,7 @@ const server = createServer(async (request, response) => {
 
       try {
         const updatedUser = await updateOwnProfile(user.id, body);
-        sendJson(response, 200, { user: stripUserSecrets(updatedUser) });
+        sendJson(response, 200, { user: await stripUserSecrets(updatedUser) });
       } catch (error) {
         sendJson(response, 400, { error: error.message });
       }
@@ -1133,7 +1203,7 @@ const server = createServer(async (request, response) => {
       try {
         const createdUser = await createManagedUser(body);
         sendJson(response, 201, {
-          user: stripUserSecrets(createdUser.user),
+          user: await stripUserSecrets(createdUser.user),
           notification: createdUser.notification
         });
       } catch (error) {
@@ -1195,7 +1265,7 @@ const server = createServer(async (request, response) => {
           manager.id
         );
         sendJson(response, 200, {
-          user: stripUserSecrets(result.user),
+          user: await stripUserSecrets(result.user),
           notification: result.notification
         });
       } catch (error) {
@@ -1519,6 +1589,37 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    if (method === "GET" && legalPaymentProofMatch) {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      try {
+        const document = await getLegalAcknowledgementPaymentProofDownload(
+          decodeURIComponent(legalPaymentProofMatch[1])
+        );
+        const decoded = decodeDataUrl(document.fileDataUrl);
+        const disposition =
+          url.searchParams.get("view") === "1"
+            ? buildInlineDisposition(document.fileName)
+            : buildAttachmentDisposition(document.fileName);
+
+        response.writeHead(200, {
+          "Content-Type": sanitizeContentType(document.fileMimeType || decoded.mimeType),
+          "Content-Disposition": disposition,
+          "Cache-Control": "private, max-age=0, must-revalidate",
+          ...getSecurityHeaders()
+        });
+        response.end(decoded.buffer);
+      } catch (error) {
+        sendJson(response, 404, { error: error.message });
+      }
+
+      return;
+    }
+
     if (method === "PATCH" && userStatusMatch) {
       const manager = await requireManager(request, response);
 
@@ -1539,7 +1640,7 @@ const server = createServer(async (request, response) => {
           body.isActive,
           manager.id
         );
-        sendJson(response, 200, { user: stripUserSecrets(user) });
+        sendJson(response, 200, { user: await stripUserSecrets(user) });
       } catch (error) {
         sendJson(response, 400, { error: error.message });
       }
@@ -1567,7 +1668,7 @@ const server = createServer(async (request, response) => {
           body.category,
           manager.id
         );
-        sendJson(response, 200, { user: stripUserSecrets(user) });
+        sendJson(response, 200, { user: await stripUserSecrets(user) });
       } catch (error) {
         sendJson(response, 400, { error: error.message });
       }

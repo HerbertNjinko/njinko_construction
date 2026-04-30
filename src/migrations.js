@@ -26,7 +26,8 @@ const REQUIRED_TABLES = [
   "investor_pool_commitments",
   "investor_pool_votes",
   "archived_records",
-  "user_legal_acknowledgements"
+  "user_legal_acknowledgements",
+  "investor_questionnaires"
 ];
 
 function listMigrationFiles() {

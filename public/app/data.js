@@ -1,5 +1,5 @@
-import { state } from "./state.js?v=20260430-frontend-19";
-import { roundMoney } from "./helpers.js?v=20260430-frontend-19";
+import { state } from "./state.js?v=20260430-frontend-24";
+import { roundMoney } from "./helpers.js?v=20260430-frontend-24";
 
 export function getCreateDealDefaults() {
   const investmentCloseOn = new Date();
@@ -136,6 +136,20 @@ export function applyArchivedProjectFilters(rows) {
 
   return rows.filter((row) =>
     `${row.name ?? ""} ${row.projectName ?? ""} ${row.dealId ?? ""}`
+      .toLowerCase()
+      .includes(search)
+  );
+}
+
+export function applyQuestionnaireFilters(rows) {
+  const search = state.questionnaireFilters.search.trim().toLowerCase();
+
+  if (!search) {
+    return rows;
+  }
+
+  return rows.filter((row) =>
+    `${row.userName ?? ""} ${row.nameEntity ?? ""} ${row.email ?? ""} ${row.userEmail ?? ""}`
       .toLowerCase()
       .includes(search)
   );

@@ -7,6 +7,14 @@ export function roundCurrency(value) {
   return Math.round((value + Number.EPSILON) * 100) / 100;
 }
 
+function formatCurrencyLabel(value) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: Number.isInteger(Number(value)) ? 0 : 2
+  }).format(Number(value ?? 0));
+}
+
 export function monthsBetween(startDate, endDate) {
   const start = new Date(startDate);
   const end = new Date(endDate);
@@ -395,7 +403,8 @@ function buildNotificationCenter(user, data = seedData) {
   const managerActionSubjects = [
     "Account approval requested:",
     "Investor distribution election submitted",
-    "Early withdrawal request submitted"
+    "Early withdrawal request submitted",
+    "Pool vote submitted:"
   ];
   const items = (data.emailNotifications ?? [])
     .filter((notification) => notification.userId === user.id)
@@ -454,6 +463,12 @@ function getDistributionElectionMap(data) {
       election
     ])
   );
+}
+
+function hasApprovedDistributionElection(election) {
+  const approvalStatus = election?.approvalStatus ?? (election?.reviewedAt ? "approved" : "pending");
+
+  return approvalStatus === "approved";
 }
 
 function getEarlyWithdrawalRequestMap(data) {
@@ -1911,6 +1926,12 @@ export function buildManagerDashboard(user, data = seedData) {
   const userMap = new Map(data.users.map((item) => [item.participantId, item]));
   const userMapById = getUserMapById(data);
   const legalAcknowledgementsByUserId = new Map();
+  const investorQuestionnaireByUserId = new Map(
+    (data.investorQuestionnaires ?? []).map((questionnaire) => [
+      questionnaire.userId,
+      questionnaire
+    ])
+  );
 
   for (const acknowledgement of data.userLegalAcknowledgements ?? []) {
     if (!legalAcknowledgementsByUserId.has(acknowledgement.userId)) {
@@ -1924,6 +1945,12 @@ export function buildManagerDashboard(user, data = seedData) {
     data.contractors.map((item) => [`${item.dealId}:${item.participantId}`, item])
   );
   const distributionElectionMap = getDistributionElectionMap(data);
+  const poolDistributionContextMap = new Map(
+    buildPoolDistributionContexts(data).map((context) => [
+      `${context.dealId}:${context.participantId}`,
+      context
+    ])
+  );
   const participant = participantMap.get(user.participantId);
   const governanceIssues = buildGovernanceIssues(data, user.participantId, {
     includeAll: true
@@ -2036,37 +2063,117 @@ export function buildManagerDashboard(user, data = seedData) {
     };
   });
 
+  function getEnrollmentFundingDetails(participantId, participantCategory) {
+    const linkedUser = userMap.get(participantId);
+    const acknowledgements = linkedUser
+      ? legalAcknowledgementsByUserId.get(linkedUser.id) ?? []
+      : [];
+    const subscriptionAcknowledgement = acknowledgements.find(
+      (acknowledgement) =>
+        acknowledgement.documentKey === "subscription_agreement_237_ville" &&
+        Number(acknowledgement.investmentAmount) > 0
+    );
+    const contractorAcknowledgement = acknowledgements.find(
+      (acknowledgement) =>
+        acknowledgement.documentKey === "contractor_equity_election_form" &&
+        Number(acknowledgement.deferredAmount) > 0
+    );
+    const investmentAmount = roundCurrency(subscriptionAcknowledgement?.investmentAmount ?? 0);
+    const deferredAmount = roundCurrency(contractorAcknowledgement?.deferredAmount ?? 0);
+    const enrollmentFundingAmount =
+      participantCategory === "contractor" ? deferredAmount : investmentAmount;
+    const allocatedAmount = roundCurrency(
+      participantCategory === "pool_member"
+        ? (data.investorPoolCommitments ?? [])
+            .filter((commitment) => commitment.participantId === participantId)
+            .reduce((sum, commitment) => sum + commitment.commitmentAmount, 0)
+        : (data.positions ?? [])
+            .filter((position) => position.participantId === participantId)
+            .reduce((sum, position) => sum + position.contributionAmount, 0)
+    );
+    const remainingAmount =
+      enrollmentFundingAmount > 0
+        ? roundCurrency(Math.max(enrollmentFundingAmount - allocatedAmount, 0))
+        : null;
+    const fundingLabel =
+      participantCategory === "contractor"
+        ? deferredAmount > 0
+          ? `Deferred Amount: ${formatCurrencyLabel(deferredAmount)}${
+              remainingAmount !== null ? `; Remaining: ${formatCurrencyLabel(remainingAmount)}` : ""
+            }`
+          : ""
+        : investmentAmount > 0
+          ? `Investment Amount: ${formatCurrencyLabel(investmentAmount)}${
+              remainingAmount !== null ? `; Remaining: ${formatCurrencyLabel(remainingAmount)}` : ""
+            }`
+          : "";
+
+    return {
+      enrollmentInvestmentAmount: investmentAmount || null,
+      enrollmentDeferredAmount: deferredAmount || null,
+      enrollmentFundingAmount: enrollmentFundingAmount || null,
+      enrollmentAllocatedAmount: allocatedAmount || null,
+      enrollmentRemainingAmount: remainingAmount,
+      suggestedAllocationAmount: remainingAmount && remainingAmount > 0 ? remainingAmount : null,
+      enrollmentFundingLabel: fundingLabel
+    };
+  }
+
   const adminUsers = data.users
-    .map((account) => ({
-      id: account.id,
-      participantId: account.participantId,
-      name: account.name,
-      firstName: account.firstName ?? "",
-      middleName: account.middleName ?? "",
-      lastName: account.lastName ?? "",
-      email: account.email,
-      role: account.role,
-      category: participantMap.get(account.participantId)?.category ?? "investor",
-      contactPhone: account.contactPhone ?? "",
-      currentAddress: account.currentAddress ?? "",
-      mailingAddress: account.mailingAddress ?? "",
-      driverLicenseNumber: account.driverLicenseNumber ?? "",
-      idCardFileName: account.idCardFileName ?? "",
-      idDocumentIssueDate: account.idDocumentIssueDate ?? "",
-      idDocumentExpirationDate: account.idDocumentExpirationDate ?? "",
-      isActive: Boolean(account.isActive),
-      mustChangePassword: Boolean(account.mustChangePassword),
-      accountApprovalStatus: account.accountApprovalStatus ?? "approved",
-      accountRejectionComment: account.accountRejectionComment ?? "",
-      accountReviewedAt: account.accountReviewedAt ?? null,
-      onboardingSubmittedAt: account.onboardingSubmittedAt ?? null,
-      legalAcknowledgements: legalAcknowledgementsByUserId.get(account.id) ?? [],
-      lastLoginAt: account.lastLoginAt ?? null,
-      notificationStatus: account.notificationStatus ?? null,
-      notificationProvider: account.notificationProvider ?? null,
-      notificationLocalPath: account.notificationLocalPath ?? null
-    }))
+    .map((account) => {
+      const category = participantMap.get(account.participantId)?.category ?? "investor";
+
+      return {
+        id: account.id,
+        participantId: account.participantId,
+        name: account.name,
+        firstName: account.firstName ?? "",
+        middleName: account.middleName ?? "",
+        lastName: account.lastName ?? "",
+        email: account.email,
+        role: account.role,
+        category,
+        contactPhone: account.contactPhone ?? "",
+        currentAddress: account.currentAddress ?? "",
+        mailingAddress: account.mailingAddress ?? "",
+        driverLicenseNumber: account.driverLicenseNumber ?? "",
+        idCardFileName: account.idCardFileName ?? "",
+        idDocumentIssueDate: account.idDocumentIssueDate ?? "",
+        idDocumentExpirationDate: account.idDocumentExpirationDate ?? "",
+        isActive: Boolean(account.isActive),
+        mustChangePassword: Boolean(account.mustChangePassword),
+        accountApprovalStatus: account.accountApprovalStatus ?? "approved",
+        accountRejectionComment: account.accountRejectionComment ?? "",
+        accountReviewedAt: account.accountReviewedAt ?? null,
+        onboardingSubmittedAt: account.onboardingSubmittedAt ?? null,
+        legalAcknowledgements: legalAcknowledgementsByUserId.get(account.id) ?? [],
+        investorQuestionnaire: investorQuestionnaireByUserId.get(account.id) ?? null,
+        ...getEnrollmentFundingDetails(account.participantId, category),
+        lastLoginAt: account.lastLoginAt ?? null,
+        notificationStatus: account.notificationStatus ?? null,
+        notificationProvider: account.notificationProvider ?? null,
+        notificationLocalPath: account.notificationLocalPath ?? null
+      };
+    })
     .sort((left, right) => left.name.localeCompare(right.name));
+  const investorQuestionnaires = (data.investorQuestionnaires ?? [])
+    .map((questionnaire) => {
+      const account = userMapById.get(questionnaire.userId);
+      const participantRecord = participantMap.get(questionnaire.participantId);
+
+      return {
+        ...questionnaire,
+        userName: account?.name ?? participantRecord?.name ?? questionnaire.nameEntity,
+        userEmail: account?.email ?? questionnaire.email,
+        category: participantRecord?.category ?? account?.category ?? "investor"
+      };
+    })
+    .sort((left, right) => {
+      const nameCompare = left.userName.localeCompare(right.userName);
+      return nameCompare !== 0
+        ? nameCompare
+        : String(right.submittedAt ?? "").localeCompare(String(left.submittedAt ?? ""));
+    });
 
   const adminParticipants = data.participants
     .filter((participant) => !["sponsor", "manager"].includes(participant.category))
@@ -2080,7 +2187,8 @@ export function buildManagerDashboard(user, data = seedData) {
         hasUser: Boolean(linkedUser),
         email: linkedUser?.email ?? null,
         contactPhone: participant.contactPhone ?? "",
-        idCardFileName: participant.idCardFileName ?? ""
+        idCardFileName: participant.idCardFileName ?? "",
+        ...getEnrollmentFundingDetails(participant.id, participant.category)
       };
     })
     .sort((left, right) => left.name.localeCompare(right.name));
@@ -2090,6 +2198,55 @@ export function buildManagerDashboard(user, data = seedData) {
   const poolMembers = adminParticipants.filter(
     (participant) => participant.category === "pool_member" && participant.hasUser
   );
+
+  function resolveAllocationStatus({ deal, position, participant: allocationParticipant, contractorRecord }) {
+    if (!deal) {
+      return contractorRecord?.status ?? "Active";
+    }
+
+    if (deal.status !== "sold") {
+      return contractorRecord?.status ?? "Active";
+    }
+
+    if (allocationParticipant?.category === "investor") {
+      const positionResult = deals
+        .find((item) => item.id === position.dealId)
+        ?.participantResults.find((result) => result.positionId === position.id);
+
+      if (!positionResult || positionResult.totalPayout <= 0) {
+        return "Complete";
+      }
+
+      const election = distributionElectionMap.get(`${position.dealId}:${position.participantId}`);
+
+      return hasApprovedDistributionElection(election) ? "Complete" : "Pending election";
+    }
+
+    if (allocationParticipant?.category === "pool") {
+      const investmentPool = (data.investorPools ?? []).find(
+        (pool) =>
+          pool.poolParticipantId === position.participantId && pool.selectedDealId === position.dealId
+      );
+      const commitments = (data.investorPoolCommitments ?? []).filter(
+        (commitment) => commitment.poolId === investmentPool?.id
+      );
+      const requiredContexts = commitments
+        .map((commitment) => poolDistributionContextMap.get(`${position.dealId}:${commitment.participantId}`))
+        .filter(Boolean);
+
+      if (!requiredContexts.length) {
+        return "Complete";
+      }
+
+      return requiredContexts.every((context) =>
+        hasApprovedDistributionElection(context.distributionPlan)
+      )
+        ? "Complete"
+        : "Pending election";
+    }
+
+    return contractorRecord?.status ?? "Complete";
+  }
 
   const adminAllocations = data.positions
     .filter((position) => position.contributionAmount > 0)
@@ -2111,7 +2268,12 @@ export function buildManagerDashboard(user, data = seedData) {
         trade: contractorRecord?.trade ?? null,
         cashPaid: contractorRecord?.cashPaid ?? 0,
         deferredAmount: contractorRecord?.deferredAmount ?? position.contributionAmount,
-        status: contractorRecord?.status ?? null
+        status: resolveAllocationStatus({
+          deal,
+          position,
+          participant: participant,
+          contractorRecord
+        })
       };
     })
     .sort((left, right) => {
@@ -2388,6 +2550,7 @@ export function buildManagerDashboard(user, data = seedData) {
     admin: {
       users: adminUsers,
       participants: adminParticipants,
+      investorQuestionnaires,
       allocationParticipants,
       poolMembers,
       investorPools,
