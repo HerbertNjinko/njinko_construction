@@ -178,6 +178,12 @@ export function calculateWaterfall({ deal, positions, overrides = {} }) {
   const distributableEquity = roundCurrency(
     Math.max(0, salePrice - debt - taxExpense - totalInterestPaid)
   );
+  const projectCostBasis = roundCurrency(
+    financing.effectiveProjectCost + taxExpense + totalInterestPaid
+  );
+  const netProjectProfit = roundCurrency(salePrice - projectCostBasis);
+  const costRecoveryShortfall = roundCurrency(Math.max(0, -netProjectProfit));
+  const hasClearedCostRecovery = netProjectProfit > 0;
   const capitalPool = roundCurrency(Math.min(distributableEquity, totalEquity));
   const prefTargets = positions.map((position) => ({
     positionId: position.id,
@@ -186,22 +192,24 @@ export function calculateWaterfall({ deal, positions, overrides = {} }) {
   const totalPrefTarget = roundCurrency(
     prefTargets.reduce((sum, item) => sum + item.prefTarget, 0)
   );
+  const profitEligiblePool = roundCurrency(
+    hasClearedCostRecovery
+      ? Math.max(0, Math.min(netProjectProfit, distributableEquity - capitalPool))
+      : 0
+  );
   const prefPool = roundCurrency(
-    Math.min(Math.max(distributableEquity - capitalPool, 0), totalPrefTarget)
+    Math.min(profitEligiblePool, totalPrefTarget)
   );
   const remainingAfterPref = roundCurrency(
-    Math.max(distributableEquity - capitalPool - prefPool, 0)
+    Math.max(profitEligiblePool - prefPool, 0)
   );
-  const projectIrr = annualizedIrr(totalEquity, distributableEquity, holdMonths);
-  const activeTier = getTriggeredTier(projectIrr, promoteTiers);
+  const grossIrrProceeds = roundCurrency(capitalPool + profitEligiblePool);
+  const projectIrr = annualizedIrr(totalEquity, grossIrrProceeds, holdMonths);
+  const activeTier = hasClearedCostRecovery ? getTriggeredTier(projectIrr, promoteTiers) : null;
   const sponsorPromote = roundCurrency(
     remainingAfterPref * (activeTier?.sponsorShare ?? 0)
   );
   const investorProfitPool = roundCurrency(remainingAfterPref - sponsorPromote);
-  const projectCostBasis = roundCurrency(
-    financing.effectiveProjectCost + taxExpense + totalInterestPaid
-  );
-  const netProjectProfit = roundCurrency(salePrice - projectCostBasis);
   const returnOnCost = projectCostBasis > 0 ? netProjectProfit / projectCostBasis : 0;
 
   const participantResults = positions.map((position) => {
@@ -256,7 +264,8 @@ export function calculateWaterfall({ deal, positions, overrides = {} }) {
     prefRate,
     totalEquity,
     distributableEquity,
-    projectProfit: roundCurrency(distributableEquity - totalEquity),
+    grossIrrProceeds,
+    projectProfit: netProjectProfit,
     budgetedProjectCost: financing.budgetedProjectCost,
     actualProjectCost: financing.actualProjectCost,
     totalProjectCost: financing.actualProjectCost,
@@ -269,6 +278,9 @@ export function calculateWaterfall({ deal, positions, overrides = {} }) {
     latestDrawBalance: financing.latestDrawBalance,
     projectCostBasis,
     netProjectProfit,
+    costRecoveryShortfall,
+    hasClearedCostRecovery,
+    preferredReturnPaid: prefPool,
     returnOnCost,
     totalPrefTarget,
     projectIrr,
@@ -291,17 +303,31 @@ export function calculateWaterfall({ deal, positions, overrides = {} }) {
         amount: capitalPool
       },
       {
-        label: "Preferred return",
+        label: hasClearedCostRecovery
+          ? "Preferred return"
+          : "Preferred return (blocked until cost recovery)",
         amount: prefPool
       },
       {
-        label: "Investor profit pool",
+        label: hasClearedCostRecovery
+          ? "Investor profit pool"
+          : "Investor profit pool (blocked until cost recovery)",
         amount: investorProfitPool
       },
       {
-        label: "Sponsor promote",
+        label: hasClearedCostRecovery
+          ? "Sponsor promote"
+          : "Sponsor promote (blocked until cost recovery)",
         amount: sponsorPromote
-      }
+      },
+      ...(hasClearedCostRecovery
+        ? []
+        : [
+            {
+              label: "Cost recovery shortfall",
+              amount: costRecoveryShortfall
+            }
+          ])
     ]
   };
 }
@@ -1907,12 +1933,16 @@ export function calculateScenarioForDeal(dealId, overrides = {}, data = seedData
     outputs: {
       projectIrr: waterfall.projectIrr,
       distributableEquity: waterfall.distributableEquity,
+      grossIrrProceeds: waterfall.grossIrrProceeds,
       totalInterestPaid: waterfall.totalInterestPaid,
       budgetedProjectCost: waterfall.budgetedProjectCost,
       totalProjectCost: waterfall.totalProjectCost,
       effectiveProjectCost: waterfall.effectiveProjectCost,
       projectCostBasis: waterfall.projectCostBasis,
       netProjectProfit: waterfall.netProjectProfit,
+      costRecoveryShortfall: waterfall.costRecoveryShortfall,
+      hasClearedCostRecovery: waterfall.hasClearedCostRecovery,
+      preferredReturnPaid: waterfall.preferredReturnPaid,
       returnOnCost: waterfall.returnOnCost,
       taxExpense: waterfall.taxExpense,
       sponsorPromote: waterfall.sponsorPromote,

@@ -2492,6 +2492,24 @@ function renderCalculator() {
                     </p>
                   </div>
                 </div>
+                ${
+                  result.outputs.hasClearedCostRecovery
+                    ? ""
+                    : `
+                      <div class="panel panel-inline">
+                        <div class="section-head">
+                          <div>
+                            <h4>Cost recovery gate</h4>
+                            <p class="section-copy">
+                              Profit distributions and sponsor promote stay blocked until sale proceeds clear the full project cost basis. Current shortfall: ${escapeHtml(
+                                formatCurrency(result.outputs.costRecoveryShortfall)
+                              )}.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    `
+                }
                 <div class="metrics-grid">
                   ${metricCard("Gross project IRR", formatPercent(result.outputs.projectIrr))}
                   ${metricCard(
@@ -2512,6 +2530,10 @@ function renderCalculator() {
                   )}
                   ${metricCard("Tax expense", formatCurrency(result.outputs.taxExpense))}
                   ${metricCard(
+                    "Preferred return paid",
+                    formatCurrency(result.outputs.preferredReturnPaid)
+                  )}
+                  ${metricCard(
                     "Investor profit pool",
                     formatCurrency(result.outputs.investorProfitPool)
                   )}
@@ -2528,7 +2550,9 @@ function renderCalculator() {
                   <div class="section-head">
                     <div>
                       <h4>Promote tiers</h4>
-                      <p class="section-copy">Highest cleared IRR tier becomes the active split in this prototype.</p>
+                      <p class="section-copy">
+                        Highest cleared IRR tier becomes active only after the project clears the full cost recovery test.
+                      </p>
                     </div>
                   </div>
                   <div class="tier-grid">

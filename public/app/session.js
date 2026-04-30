@@ -27,7 +27,7 @@ import {
   getInvestorProjectFilterOptions,
   getUserFilterOptions
 } from "./data.js?v=20260429-frontend-4";
-import { render } from "./renderers.js?v=20260429-frontend-6";
+import { render } from "./renderers.js?v=20260430-frontend-8";
 
 export async function api(path, options = {}) {
   const response = await fetch(path, {

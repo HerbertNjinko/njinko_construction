@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
-import { extname, join, normalize } from "node:path";
+import { extname, isAbsolute, relative, resolve } from "node:path";
 import { readFile } from "node:fs/promises";
 
 import { buildDashboardForUser, calculateScenarioForDeal } from "./calculations.js";
@@ -40,9 +40,43 @@ import {
 
 const HOST = "0.0.0.0";
 const PORT = Number(process.env.PORT ?? 3000);
-const PUBLIC_DIR = join(process.cwd(), "public");
+const PUBLIC_DIR = resolve(process.cwd(), "public");
 const SESSION_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000;
+const DEFAULT_JSON_BODY_MAX_BYTES = 15 * 1024 * 1024;
+const JSON_BODY_MAX_BYTES = readPositiveIntegerEnv(
+  "JSON_BODY_MAX_BYTES",
+  DEFAULT_JSON_BODY_MAX_BYTES
+);
+const RATE_LIMIT_WINDOW_MS = readPositiveIntegerEnv("RATE_LIMIT_WINDOW_MS", 15 * 60 * 1000);
+const LOGIN_RATE_LIMIT_MAX = readPositiveIntegerEnv("LOGIN_RATE_LIMIT_MAX", 10);
+const PASSWORD_RESET_RATE_LIMIT_MAX = readPositiveIntegerEnv("PASSWORD_RESET_RATE_LIMIT_MAX", 5);
+const PASSWORD_RESET_TOKEN_RATE_LIMIT_MAX = readPositiveIntegerEnv(
+  "PASSWORD_RESET_TOKEN_RATE_LIMIT_MAX",
+  10
+);
 const sessions = new Map();
+const rateLimitBuckets = new Map();
+const unsafeMethods = new Set(["DELETE", "PATCH", "POST", "PUT"]);
+
+const securityHeaders = {
+  "Content-Security-Policy": [
+    "default-src 'self'",
+    "base-uri 'self'",
+    "connect-src 'self'",
+    "font-src 'self'",
+    "form-action 'self'",
+    "frame-ancestors 'none'",
+    "img-src 'self' data:",
+    "object-src 'none'",
+    "script-src 'self'",
+    "style-src 'self'"
+  ].join("; "),
+  "Cross-Origin-Resource-Policy": "same-origin",
+  "Permissions-Policy": "camera=(), geolocation=(), microphone=(), payment=()",
+  "Referrer-Policy": "same-origin",
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY"
+};
 
 const mimeTypes = {
   ".css": "text/css; charset=utf-8",
@@ -51,6 +85,195 @@ const mimeTypes = {
   ".json": "application/json; charset=utf-8",
   ".svg": "image/svg+xml"
 };
+
+function readPositiveIntegerEnv(name, fallback) {
+  const parsed = Number(process.env[name]);
+
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function createHttpError(statusCode, message, code = undefined) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  error.publicMessage = message;
+  error.code = code;
+
+  return error;
+}
+
+function getHeaderValue(request, name) {
+  const value = request.headers[name];
+
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function getRequestHost(request) {
+  return String(getHeaderValue(request, "host") ?? "")
+    .split(",")[0]
+    .trim()
+    .toLowerCase();
+}
+
+function getRequestUrl(request) {
+  const host = getRequestHost(request) || "localhost";
+
+  try {
+    return new URL(request.url, `http://${host}`);
+  } catch {
+    throw createHttpError(400, "Request URL is invalid.");
+  }
+}
+
+function getTrustedHosts(request) {
+  const hosts = new Set();
+  const requestHost = getRequestHost(request);
+
+  if (requestHost) {
+    hosts.add(requestHost);
+  }
+
+  if (process.env.APP_URL) {
+    try {
+      hosts.add(new URL(process.env.APP_URL).host.toLowerCase());
+    } catch {}
+  }
+
+  return hosts;
+}
+
+function hasTrustedOrigin(request) {
+  const secFetchSite = String(getHeaderValue(request, "sec-fetch-site") ?? "").toLowerCase();
+
+  if (secFetchSite && !["none", "same-origin", "same-site"].includes(secFetchSite)) {
+    return false;
+  }
+
+  const origin = getHeaderValue(request, "origin");
+
+  if (!origin) {
+    return true;
+  }
+
+  try {
+    return getTrustedHosts(request).has(new URL(origin).host.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+function enforceTrustedOrigin(request) {
+  if (unsafeMethods.has(request.method ?? "GET") && !hasTrustedOrigin(request)) {
+    throw createHttpError(403, "Request origin is not allowed.", "UNTRUSTED_ORIGIN");
+  }
+}
+
+function getClientAddress(request) {
+  return String(
+    getHeaderValue(request, "cf-connecting-ip") ??
+      getHeaderValue(request, "x-forwarded-for") ??
+      request.socket.remoteAddress ??
+      "unknown"
+  )
+    .split(",")[0]
+    .trim();
+}
+
+function normalizeRateLimitPart(value) {
+  return String(value ?? "unknown").trim().toLowerCase() || "unknown";
+}
+
+function assertRateLimit(scope, key, limit) {
+  const now = Date.now();
+  const bucketKey = `${scope}:${key}`;
+  const bucket = rateLimitBuckets.get(bucketKey);
+
+  if (!bucket || now >= bucket.resetAt) {
+    rateLimitBuckets.set(bucketKey, {
+      count: 1,
+      resetAt: now + RATE_LIMIT_WINDOW_MS
+    });
+    return;
+  }
+
+  bucket.count += 1;
+
+  if (bucket.count > limit) {
+    throw createHttpError(429, "Too many attempts. Try again later.", "RATE_LIMITED");
+  }
+}
+
+function clearRateLimit(scope, key) {
+  rateLimitBuckets.delete(`${scope}:${key}`);
+}
+
+function getLoginRateLimitKey(request, email) {
+  return `${getClientAddress(request)}:${normalizeRateLimitPart(email)}`;
+}
+
+function isLocalHostname(hostname) {
+  return ["localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]"].includes(
+    String(hostname ?? "").toLowerCase()
+  );
+}
+
+function shouldUseSecureCookie(request) {
+  const setting = String(process.env.SESSION_COOKIE_SECURE ?? "").trim().toLowerCase();
+
+  if (setting === "true") {
+    return true;
+  }
+
+  if (setting === "false") {
+    return false;
+  }
+
+  const forwardedProto = String(getHeaderValue(request, "x-forwarded-proto") ?? "")
+    .split(",")[0]
+    .trim()
+    .toLowerCase();
+
+  if (forwardedProto === "https") {
+    return true;
+  }
+
+  const host = getRequestHost(request);
+
+  if (!host) {
+    return false;
+  }
+
+  try {
+    return !isLocalHostname(new URL(`http://${host}`).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function buildSessionCookie(request, sessionId, options = {}) {
+  const parts = [
+    `sessionId=${encodeURIComponent(sessionId)}`,
+    "HttpOnly",
+    "Path=/",
+    "SameSite=Lax"
+  ];
+
+  if (options.maxAge !== undefined) {
+    parts.push(`Max-Age=${options.maxAge}`);
+  }
+
+  if (shouldUseSecureCookie(request)) {
+    parts.push("Secure");
+  }
+
+  return parts.join("; ");
+}
+
+function getSecurityHeaders(headers = {}) {
+  return {
+    ...securityHeaders,
+    ...headers
+  };
+}
 
 function parseCookies(request) {
   const header = request.headers.cookie;
@@ -66,15 +289,34 @@ function parseCookies(request) {
       return cookies;
     }
 
-    cookies[rawKey.trim()] = decodeURIComponent(rawValue.trim());
+    try {
+      cookies[rawKey.trim()] = decodeURIComponent(rawValue.trim());
+    } catch {
+      cookies[rawKey.trim()] = rawValue.trim();
+    }
     return cookies;
   }, {});
 }
 
 async function readJsonBody(request) {
+  const contentType = String(getHeaderValue(request, "content-type") ?? "").toLowerCase();
+
+  const mediaType = contentType.split(";")[0].trim();
+
+  if (contentType && mediaType !== "application/json" && !mediaType.endsWith("+json")) {
+    throw createHttpError(415, "Request body must be JSON.", "UNSUPPORTED_MEDIA_TYPE");
+  }
+
   const chunks = [];
+  let byteLength = 0;
 
   for await (const chunk of request) {
+    byteLength += chunk.length;
+
+    if (byteLength > JSON_BODY_MAX_BYTES) {
+      throw createHttpError(413, "Request body is too large.", "REQUEST_BODY_TOO_LARGE");
+    }
+
     chunks.push(chunk);
   }
 
@@ -92,33 +334,51 @@ async function readJsonBody(request) {
 function sendJson(response, statusCode, payload, headers = {}) {
   response.writeHead(statusCode, {
     "Content-Type": "application/json; charset=utf-8",
-    ...headers
+    "Cache-Control": "no-store",
+    ...getSecurityHeaders(headers)
   });
   response.end(JSON.stringify(payload));
 }
 
-function sanitizePath(pathname) {
-  const safePath = pathname === "/" ? "/index.html" : pathname;
+function getStaticFilePath(pathname) {
+  const rawPath = pathname === "/" ? "/index.html" : pathname;
+  let decodedPath = rawPath;
 
-  return normalize(safePath)
-    .replace(/^(\.\.[/\\])+/, "")
-    .replace(/^[/\\]+/, "");
+  try {
+    decodedPath = decodeURIComponent(rawPath);
+  } catch {
+    throw createHttpError(400, "Request path is invalid.");
+  }
+
+  const filePath = resolve(PUBLIC_DIR, `.${decodedPath}`);
+  const relativePath = relative(PUBLIC_DIR, filePath);
+
+  if (relativePath.startsWith("..") || isAbsolute(relativePath)) {
+    throw createHttpError(404, "Not found.");
+  }
+
+  return filePath;
 }
 
 async function serveStatic(request, response) {
-  const url = new URL(request.url, `http://${request.headers.host}`);
-  const filePath = join(PUBLIC_DIR, sanitizePath(url.pathname));
+  const url = getRequestUrl(request);
+  const filePath = getStaticFilePath(url.pathname);
 
   try {
     const file = await readFile(filePath);
     const contentType = mimeTypes[extname(filePath)] ?? "application/octet-stream";
     response.writeHead(200, {
       "Content-Type": contentType,
-      "Cache-Control": "no-store"
+      "Cache-Control": "no-store",
+      ...getSecurityHeaders()
     });
     response.end(file);
   } catch {
-    response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+    response.writeHead(404, {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-store",
+      ...getSecurityHeaders()
+    });
     response.end("Not found");
   }
 }
@@ -132,11 +392,19 @@ function verifyPassword(user, password) {
 
 function buildAttachmentDisposition(fileName) {
   const safeFileName = String(fileName ?? "download")
-    .replaceAll('"', "")
-    .replaceAll("\r", "")
-    .replaceAll("\n", "");
+    .replace(/[\\/\r\n"]/g, "")
+    .replace(/[^\x20-\x7E]/g, "_")
+    .trim() || "download";
 
   return `attachment; filename="${safeFileName}"`;
+}
+
+function sanitizeContentType(contentType) {
+  const normalized = String(contentType ?? "").replace(/[\r\n]/g, "").trim();
+
+  return /^[\w.+-]+\/[\w.+-]+(?:\s*;\s*[\w-]+=[\w.+-]+)*$/.test(normalized)
+    ? normalized
+    : "application/octet-stream";
 }
 
 function decodeDataUrl(dataUrl) {
@@ -170,8 +438,8 @@ function createSession(userId) {
   return sessionId;
 }
 
-function clearSessionCookie() {
-  return "sessionId=; HttpOnly; Max-Age=0; Path=/; SameSite=Lax";
+function clearSessionCookie(request) {
+  return buildSessionCookie(request, "", { maxAge: 0 });
 }
 
 function destroySession(request) {
@@ -182,7 +450,7 @@ function destroySession(request) {
     sessions.delete(sessionId);
   }
 
-  return clearSessionCookie();
+  return clearSessionCookie(request);
 }
 
 function getSessionState(request, { touch = true } = {}) {
@@ -274,7 +542,7 @@ async function requireUser(request, response) {
           : "Authentication required.",
         code: expired ? "SESSION_EXPIRED" : "AUTH_REQUIRED"
       },
-      expired ? { "Set-Cookie": clearSessionCookie() } : {}
+      expired ? { "Set-Cookie": clearSessionCookie(request) } : {}
     );
     return null;
   }
@@ -329,7 +597,8 @@ function stripUserSecrets(user) {
 const server = createServer(async (request, response) => {
   try {
     const method = request.method ?? "GET";
-    const url = new URL(request.url, `http://${request.headers.host}`);
+    enforceTrustedOrigin(request);
+    const url = getRequestUrl(request);
     const dealUpdateMatch = url.pathname.match(/^\/api\/admin\/deals\/([^/]+)$/);
     const issueVoteMatch = url.pathname.match(/^\/api\/issues\/([^/]+)\/vote$/);
     const userStatusMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)\/status$/);
@@ -361,6 +630,12 @@ const server = createServer(async (request, response) => {
         return;
       }
 
+      assertRateLimit(
+        "password-reset-request",
+        `${getClientAddress(request)}:${normalizeRateLimitPart(body.email)}`,
+        PASSWORD_RESET_RATE_LIMIT_MAX
+      );
+
       try {
         await requestPasswordReset(body.email);
         sendJson(response, 200, {
@@ -389,6 +664,12 @@ const server = createServer(async (request, response) => {
         return;
       }
 
+      assertRateLimit(
+        "password-reset-token",
+        `${getClientAddress(request)}:${normalizeRateLimitPart(body.token).slice(0, 32)}`,
+        PASSWORD_RESET_TOKEN_RATE_LIMIT_MAX
+      );
+
       try {
         await resetPasswordWithToken(body.token, body.newPassword);
         sendJson(response, 200, { ok: true });
@@ -407,6 +688,8 @@ const server = createServer(async (request, response) => {
         return;
       }
 
+      const loginRateLimitKey = getLoginRateLimitKey(request, body.email);
+      assertRateLimit("login", loginRateLimitKey, LOGIN_RATE_LIMIT_MAX);
       const user = await getUserByEmail(body.email);
 
       if (!user || !verifyPassword(user, body.password)) {
@@ -415,6 +698,7 @@ const server = createServer(async (request, response) => {
       }
 
       await markUserLogin(user.id);
+      clearRateLimit("login", loginRateLimitKey);
       const sessionId = createSession(user.id);
       sendJson(
         response,
@@ -423,7 +707,7 @@ const server = createServer(async (request, response) => {
           user: stripUserSecrets(user)
         },
         {
-          "Set-Cookie": `sessionId=${sessionId}; HttpOnly; Path=/; SameSite=Lax`
+          "Set-Cookie": buildSessionCookie(request, sessionId)
         }
       );
       return;
@@ -443,7 +727,7 @@ const server = createServer(async (request, response) => {
           user: user ? stripUserSecrets(user) : null,
           expired
         },
-        expired ? { "Set-Cookie": clearSessionCookie() } : {}
+        expired ? { "Set-Cookie": clearSessionCookie(request) } : {}
       );
       return;
     }
@@ -513,9 +797,10 @@ const server = createServer(async (request, response) => {
         const decoded = decodeDataUrl(resource.fileDataUrl);
 
         response.writeHead(200, {
-          "Content-Type": resource.fileMimeType || decoded.mimeType,
+          "Content-Type": sanitizeContentType(resource.fileMimeType || decoded.mimeType),
           "Content-Disposition": buildAttachmentDisposition(resource.fileName),
-          "Cache-Control": "private, max-age=0, must-revalidate"
+          "Cache-Control": "private, max-age=0, must-revalidate",
+          ...getSecurityHeaders()
         });
         response.end(decoded.buffer);
       } catch (error) {
@@ -1128,12 +1413,17 @@ const server = createServer(async (request, response) => {
       return;
     }
 
-    response.writeHead(405, { "Content-Type": "application/json; charset=utf-8" });
-    response.end(JSON.stringify({ error: "Method not allowed." }));
+    sendJson(response, 405, { error: "Method not allowed." });
   } catch (error) {
-    sendJson(response, 500, {
-      error: "Internal server error.",
-      detail: error.message
+    const statusCode = Number(error.statusCode) || 500;
+
+    if (statusCode >= 500) {
+      process.stderr.write(`${error.stack || error.message}\n`);
+    }
+
+    sendJson(response, statusCode, {
+      error: statusCode >= 500 ? "Internal server error." : error.publicMessage || error.message,
+      ...(error.code ? { code: error.code } : {})
     });
   }
 });

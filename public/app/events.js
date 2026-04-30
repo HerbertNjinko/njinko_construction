@@ -32,8 +32,8 @@ import {
   loadSession,
   recordSessionActivity,
   refreshDashboard
-} from "./session.js?v=20260429-frontend-6";
-import { render } from "./renderers.js?v=20260429-frontend-6";
+} from "./session.js?v=20260430-frontend-8";
+import { render } from "./renderers.js?v=20260430-frontend-8";
 
 let listenersBound = false;
 

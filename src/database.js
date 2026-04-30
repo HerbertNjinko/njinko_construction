@@ -17,8 +17,45 @@ import {
 import { pool, queryAll, queryOne, withTransaction } from "./postgres.js";
 
 const PASSWORD_RESET_TTL_MINUTES = 60;
-const RESOURCE_UPLOAD_MAX_BYTES = 100 * 1024 * 1024;
+const ID_CARD_UPLOAD_MAX_BYTES = readPositiveIntegerEnv(
+  "ID_CARD_UPLOAD_MAX_BYTES",
+  3 * 1024 * 1024
+);
+const RESOURCE_UPLOAD_MAX_BYTES = readPositiveIntegerEnv(
+  "RESOURCE_UPLOAD_MAX_BYTES",
+  10 * 1024 * 1024
+);
 const DEFAULT_EARLY_WITHDRAWAL_PENALTY_RATE = 0.3;
+const ALLOWED_ID_CARD_MIME_TYPES = new Set([
+  "application/pdf",
+  "image/jpeg",
+  "image/png",
+  "image/webp"
+]);
+const ALLOWED_RESOURCE_MIME_TYPES = new Set([
+  "application/msword",
+  "application/pdf",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "text/csv",
+  "text/plain"
+]);
+
+function readPositiveIntegerEnv(name, fallback) {
+  const parsed = Number(process.env[name]);
+
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function formatByteLimit(bytes) {
+  const megabytes = bytes / (1024 * 1024);
+
+  return Number.isInteger(megabytes) ? `${megabytes} MB` : `${bytes} bytes`;
+}
 
 function nowTimestamp() {
   return new Date().toISOString();
@@ -77,6 +114,49 @@ function normalizeConfigValue(value) {
     .trim()
     .replace(/\s+#.*$/, "")
     .trim();
+}
+
+function parseDataUrl(dataUrl) {
+  const match = String(dataUrl ?? "").match(/^data:([^;,]+)?(;base64)?,([\s\S]*)$/);
+
+  if (!match) {
+    throw new Error("Uploads must be sent as a valid data URL.");
+  }
+
+  const mimeType = normalizeOptionalText(match[1])?.toLowerCase() ?? "";
+  const isBase64 = Boolean(match[2]);
+  const payload = match[3] || "";
+  let byteLength = 0;
+
+  try {
+    byteLength = isBase64
+      ? Buffer.from(payload, "base64").length
+      : Buffer.byteLength(decodeURIComponent(payload), "utf8");
+  } catch {
+    throw new Error("Uploaded file data is invalid.");
+  }
+
+  return {
+    mimeType,
+    byteLength
+  };
+}
+
+function assertUploadedFileData({ dataUrl, mimeType, maxBytes, allowedMimeTypes, maxBytesLabel }) {
+  const normalizedMimeType = String(mimeType ?? "").trim().toLowerCase();
+  const parsed = parseDataUrl(dataUrl);
+
+  if (parsed.mimeType && parsed.mimeType !== normalizedMimeType) {
+    throw new Error("Uploaded file type does not match the file data.");
+  }
+
+  if (!allowedMimeTypes.has(normalizedMimeType)) {
+    throw new Error("Uploaded file type is not allowed.");
+  }
+
+  if (parsed.byteLength <= 0 || parsed.byteLength > maxBytes) {
+    throw new Error(`Uploads must be smaller than ${maxBytesLabel}.`);
+  }
 }
 
 function roundNumber(value) {
@@ -418,13 +498,19 @@ function normalizeIdCardFile(file) {
     throw new Error("ID card uploads must include a file name, mime type, and file data.");
   }
 
-  if (!dataUrl.startsWith("data:")) {
-    throw new Error("ID card uploads must be sent as a data URL.");
+  if (!Number.isFinite(size) || size <= 0 || size > ID_CARD_UPLOAD_MAX_BYTES) {
+    throw new Error(
+      `ID card uploads must be smaller than ${formatByteLimit(ID_CARD_UPLOAD_MAX_BYTES)}.`
+    );
   }
 
-  if (!Number.isFinite(size) || size <= 0 || size > 3_000_000) {
-    throw new Error("ID card uploads must be smaller than 3 MB.");
-  }
+  assertUploadedFileData({
+    dataUrl,
+    mimeType,
+    maxBytes: ID_CARD_UPLOAD_MAX_BYTES,
+    maxBytesLabel: formatByteLimit(ID_CARD_UPLOAD_MAX_BYTES),
+    allowedMimeTypes: ALLOWED_ID_CARD_MIME_TYPES
+  });
 
   return {
     fileName,
@@ -447,13 +533,19 @@ function normalizeResourceFile(file) {
     throw new Error("Uploads must include a file name, mime type, and file data.");
   }
 
-  if (!dataUrl.startsWith("data:")) {
-    throw new Error("Uploads must be sent as a data URL.");
+  if (!Number.isFinite(size) || size <= 0 || size > RESOURCE_UPLOAD_MAX_BYTES) {
+    throw new Error(
+      `Uploads must be smaller than ${formatByteLimit(RESOURCE_UPLOAD_MAX_BYTES)}.`
+    );
   }
 
-  if (!Number.isFinite(size) || size <= 0 || size > RESOURCE_UPLOAD_MAX_BYTES) {
-    throw new Error("Uploads must be smaller than 100 MB.");
-  }
+  assertUploadedFileData({
+    dataUrl,
+    mimeType,
+    maxBytes: RESOURCE_UPLOAD_MAX_BYTES,
+    maxBytesLabel: formatByteLimit(RESOURCE_UPLOAD_MAX_BYTES),
+    allowedMimeTypes: ALLOWED_RESOURCE_MIME_TYPES
+  });
 
   return {
     fileName,
