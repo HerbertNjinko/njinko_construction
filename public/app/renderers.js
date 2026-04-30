@@ -5,7 +5,7 @@ import {
   LOGIN_PAGE_TITLE,
   app,
   state
-} from "./state.js?v=20260430-frontend-13";
+} from "./state.js?v=20260430-frontend-16";
 import {
   breakdownItem,
   escapeHtml,
@@ -21,7 +21,7 @@ import {
   renderSectionToggle,
   summaryItem,
   titleCase
-} from "./helpers.js?v=20260430-frontend-13";
+} from "./helpers.js?v=20260430-frontend-16";
 import {
   applyAllocationFilters,
   applyArchivedProjectFilters,
@@ -43,7 +43,7 @@ import {
   getInvestorProjectFilterOptions,
   getManagerEditableDeal,
   getUserFilterOptions
-} from "./data.js?v=20260430-frontend-13";
+} from "./data.js?v=20260430-frontend-16";
 
 function renderLogin() {
   const errorMarkup = state.loginError
@@ -2040,6 +2040,7 @@ function renderInvestorDashboard() {
         </div>
         <div class="button-row">
           <span class="read-only-tag">Deal data remains read only</span>
+          ${renderNotificationBell()}
           <button class="button-secondary" id="logout-button" type="button">Log out</button>
         </div>
       </section>
@@ -2449,6 +2450,7 @@ function renderPoolMemberDashboard() {
         </div>
         <div class="button-row">
           <span class="read-only-tag">Project allocations remain pooled</span>
+          ${renderNotificationBell()}
           <button class="button-secondary" id="logout-button" type="button">Log out</button>
         </div>
       </section>
@@ -3049,6 +3051,15 @@ function renderCreateUserPanel() {
           <label>
             Temporary password
             <input type="password" name="password" minlength="8" required />
+          </label>
+          <label>
+            Category / role
+            <select name="category" required>
+              <option value="investor" selected>Investor</option>
+              <option value="pool_member">Pool member</option>
+              <option value="contractor">Contractor</option>
+              <option value="manager">Manager</option>
+            </select>
           </label>
         </div>
         <button class="button-primary" type="submit">Create user</button>
@@ -4461,6 +4472,73 @@ function renderManagerArchivedProjectsPage() {
   });
 }
 
+function renderPendingUserApprovalsPage() {
+  const rows = (state.dashboard.admin.users ?? []).filter(
+    (row) => row.accountApprovalStatus === "pending_review"
+  );
+
+  return renderCollapsibleSection({
+    sectionId: "manager-pending-user-approvals",
+    title: "Pending Account Approvals",
+    copy:
+      "Review accounts that submitted identity information and are waiting for approval or a request for more information.",
+    message: renderMessage(state.messages.directory),
+    body: `
+      <div class="metrics-grid">
+        ${metricCard("Accounts waiting", String(rows.length))}
+      </div>
+      ${
+        rows.length
+          ? `
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Category</th>
+                    <th>Email</th>
+                    <th>Contact</th>
+                    <th>ID card</th>
+                    <th>ID dates</th>
+                    <th>Submitted</th>
+                    <th>Review</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${rows
+                    .map(
+                      (row) => `
+                        <tr>
+                          <td>${escapeHtml(row.name)}</td>
+                          <td>${escapeHtml(titleCase(row.category))}</td>
+                          <td>${escapeHtml(row.email)}</td>
+                          <td>${escapeHtml(row.contactPhone || "—")}</td>
+                          <td>${escapeHtml(row.idCardFileName || "—")}</td>
+                          <td>${escapeHtml(
+                            row.idDocumentIssueDate && row.idDocumentExpirationDate
+                              ? `${formatDate(row.idDocumentIssueDate)} to ${formatDate(row.idDocumentExpirationDate)}`
+                              : "—"
+                          )}</td>
+                          <td>${escapeHtml(formatDateTime(row.onboardingSubmittedAt))}</td>
+                          <td>
+                            <div class="table-actions identity-review-actions">
+                              ${renderIdentityReviewActions(row)}
+                            </div>
+                          </td>
+                        </tr>
+                      `
+                    )
+                    .join("")}
+                </tbody>
+              </table>
+            </div>
+          `
+          : '<div class="empty-state">No user accounts are waiting for manager approval.</div>'
+      }
+    `
+  });
+}
+
 function renderUserDirectory() {
   const rows = state.dashboard.admin.users;
   const filteredRows = applyUserFilters(rows);
@@ -4814,11 +4892,163 @@ function renderAllocationTable() {
   });
 }
 
+function getManagerReviewAlertCounts() {
+  const admin = state.dashboard?.admin ?? {};
+  const pendingAccounts = (admin.users ?? []).filter(
+    (row) => row.accountApprovalStatus === "pending_review"
+  ).length;
+  const pendingDistributions = (admin.distributionReviews ?? []).filter(
+    (review) => review.needsReview
+  ).length;
+  const pendingWithdrawals = (admin.earlyWithdrawalReviews ?? []).filter(
+    (review) => review.needsReview
+  ).length;
+
+  return {
+    pendingAccounts,
+    pendingDistributions,
+    pendingWithdrawals,
+    total: pendingAccounts + pendingDistributions + pendingWithdrawals
+  };
+}
+
+function renderManagerReviewAlertPanel() {
+  const counts = getManagerReviewAlertCounts();
+
+  if (!counts.total) {
+    return "";
+  }
+
+  return `
+    <section class="panel manager-alert-panel" aria-live="polite">
+      <div>
+        <p class="eyebrow">Manager Inbox</p>
+        <h3>${escapeHtml(String(counts.total))} item${counts.total === 1 ? "" : "s"} need review</h3>
+        <p class="section-copy">
+          Pending account approvals, distribution elections, and early withdrawal requests are waiting for manager action.
+        </p>
+      </div>
+      <div class="button-row">
+        ${
+          counts.pendingAccounts
+            ? `<button class="button-secondary manager-alert-button" type="button" data-manager-page="pending-approvals">! ${escapeHtml(
+                String(counts.pendingAccounts)
+              )} account${counts.pendingAccounts === 1 ? "" : "s"}</button>`
+            : ""
+        }
+        ${
+          counts.pendingDistributions + counts.pendingWithdrawals
+            ? `<button class="button-secondary manager-alert-button" type="button" data-manager-page="distribution-reviews">! ${escapeHtml(
+                String(counts.pendingDistributions + counts.pendingWithdrawals)
+              )} request${counts.pendingDistributions + counts.pendingWithdrawals === 1 ? "" : "s"}</button>`
+            : ""
+        }
+      </div>
+    </section>
+  `;
+}
+
+function renderNotificationBell() {
+  const notificationCenter = state.dashboard?.notifications ?? { unreadCount: 0, items: [] };
+  const unreadCount = Number(notificationCenter.unreadCount ?? 0);
+  const isOpen = Boolean(state.notificationPanelOpen);
+
+  return `
+    <div class="notification-bell-shell">
+      <button
+        class="button-secondary notification-bell-button"
+        id="notification-bell-button"
+        type="button"
+        aria-label="${escapeHtml(
+          unreadCount
+            ? `${unreadCount} unread portal notification${unreadCount === 1 ? "" : "s"}`
+            : "Portal notifications"
+        )}"
+        aria-expanded="${isOpen ? "true" : "false"}"
+      >
+        <span aria-hidden="true">&#128276;</span>
+        ${
+          unreadCount
+            ? `<span class="notification-count">${escapeHtml(String(unreadCount))}</span>`
+            : ""
+        }
+      </button>
+      ${isOpen ? renderNotificationPanel(notificationCenter) : ""}
+    </div>
+  `;
+}
+
+function renderNotificationPanel(notificationCenter) {
+  const notifications = notificationCenter.items ?? [];
+  const managerCounts =
+    state.dashboard?.role === "manager" ? getManagerReviewAlertCounts() : null;
+
+  return `
+    <div class="notification-popover" role="dialog" aria-label="Portal notification summary">
+      <div class="notification-popover-head">
+        <div>
+          <p class="eyebrow">Notifications</p>
+          <h4>${escapeHtml(
+            notificationCenter.unreadCount
+              ? `${notificationCenter.unreadCount} unread`
+              : "No unread alerts"
+          )}</h4>
+        </div>
+      </div>
+      ${
+        managerCounts
+          ? `
+            <div class="notification-summary-grid">
+              <button class="notification-summary-item" type="button" data-manager-page="pending-approvals">
+                <span>Account approvals</span>
+                <strong>${escapeHtml(String(managerCounts.pendingAccounts))}</strong>
+              </button>
+              <button class="notification-summary-item" type="button" data-manager-page="distribution-reviews">
+                <span>Distribution reviews</span>
+                <strong>${escapeHtml(String(managerCounts.pendingDistributions))}</strong>
+              </button>
+              <button class="notification-summary-item" type="button" data-manager-page="distribution-reviews">
+                <span>Withdrawal reviews</span>
+                <strong>${escapeHtml(String(managerCounts.pendingWithdrawals))}</strong>
+              </button>
+            </div>
+          `
+          : ""
+      }
+      <div class="notification-list">
+        ${
+          notifications.length
+            ? notifications
+                .map(
+                  (notification) => `
+                    <article class="notification-item ${notification.isUnread ? "unread" : ""}">
+                      <div>
+                        <h5>${escapeHtml(notification.subject)}</h5>
+                        <p>${escapeHtml(notification.bodyPreview || "Email notification sent.")}</p>
+                      </div>
+                      <span>${escapeHtml(formatDateTime(notification.createdAt))}</span>
+                    </article>
+                  `
+                )
+                .join("")
+            : '<div class="empty-state compact-empty-state">No email notifications have been recorded yet.</div>'
+        }
+      </div>
+      <p class="helper-copy">Unread email notices are marked read when this panel opens.</p>
+    </div>
+  `;
+}
+
 const MANAGER_PAGE_ITEMS = [
   {
     id: "overview",
     label: "Overview",
     copy: "Profile and sponsor-level portfolio snapshot."
+  },
+  {
+    id: "pending-approvals",
+    label: "Pending Approvals",
+    copy: "Approve user identity submissions waiting for manager review."
   },
   {
     id: "project-admin",
@@ -4897,17 +5127,17 @@ function renderManagerNavigation() {
       <div class="manager-nav-list" role="tablist" aria-label="Manager pages">
         ${MANAGER_PAGE_ITEMS.map(
           (item) => `
-            <button
-              class="manager-nav-button ${item.id === activePage.id ? "active" : ""}"
-              type="button"
-              data-manager-page="${escapeHtml(item.id)}"
-              role="tab"
-              aria-selected="${item.id === activePage.id ? "true" : "false"}"
-            >
-              <span class="manager-nav-label">${escapeHtml(item.label)}</span>
-              <span class="manager-nav-copy">${escapeHtml(item.copy)}</span>
-            </button>
-          `
+              <button
+                class="manager-nav-button ${item.id === activePage.id ? "active" : ""}"
+                type="button"
+                data-manager-page="${escapeHtml(item.id)}"
+                role="tab"
+                aria-selected="${item.id === activePage.id ? "true" : "false"}"
+              >
+                <span class="manager-nav-label">${escapeHtml(item.label)}</span>
+                <span class="manager-nav-copy">${escapeHtml(item.copy)}</span>
+              </button>
+            `
         ).join("")}
       </div>
     </aside>
@@ -5314,6 +5544,8 @@ function renderManagerPageContent(page, { overview, deals }) {
   switch (page.id) {
     case "overview":
       return renderManagerOverviewPage(overview);
+    case "pending-approvals":
+      return renderPendingUserApprovalsPage();
     case "project-admin":
       return renderManagerProjectAdminPage();
     case "archived-projects":
@@ -5353,6 +5585,7 @@ function renderManagerDashboard() {
         </div>
         <div class="button-row">
           <span class="read-only-tag">Investors remain read only</span>
+          ${renderNotificationBell()}
           <button class="button-secondary" id="logout-button" type="button">Log out</button>
         </div>
       </section>

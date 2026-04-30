@@ -12,11 +12,11 @@ import {
   createInitialUserFilters,
   sessionRuntime,
   state
-} from "./state.js?v=20260430-frontend-13";
+} from "./state.js?v=20260430-frontend-16";
 import {
   clearAuthFeedback,
   clearMessages
-} from "./helpers.js?v=20260430-frontend-13";
+} from "./helpers.js?v=20260430-frontend-16";
 import {
   applyAllocationFilters,
   getAllocationFilterOptions,
@@ -26,8 +26,8 @@ import {
   getInvestorIssueFilterOptions,
   getInvestorProjectFilterOptions,
   getUserFilterOptions
-} from "./data.js?v=20260430-frontend-13";
-import { render } from "./renderers.js?v=20260430-frontend-13";
+} from "./data.js?v=20260430-frontend-16";
+import { render } from "./renderers.js?v=20260430-frontend-16";
 
 export async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -66,6 +66,7 @@ export function resetDashboardState() {
   state.rollupDealFilter = "";
   state.contractorDealFilter = "";
   state.archivedProjectFilter = "";
+  state.notificationPanelOpen = false;
   state.allocationPage = 1;
   state.allocationFilters = createInitialAllocationFilters();
   state.distributionReviewFilters = createInitialDistributionReviewFilters();

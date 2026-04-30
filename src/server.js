@@ -26,6 +26,7 @@ import {
   getUserByEmail,
   getUserById,
   getUserIdentityDocumentDownload,
+  markUserNotificationsRead,
   markUserLogin,
   requestPasswordReset,
   reviewEarlyWithdrawalRequest,
@@ -755,6 +756,23 @@ const server = createServer(async (request, response) => {
 
     if (method === "POST" && url.pathname === "/api/logout") {
       sendJson(response, 200, { ok: true }, { "Set-Cookie": destroySession(request) });
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/notifications/read") {
+      const user = await requireUser(request, response);
+
+      if (!user) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+      const result = await markUserNotificationsRead(
+        user.id,
+        Array.isArray(body?.notificationIds) ? body.notificationIds : []
+      );
+
+      sendJson(response, 200, result);
       return;
     }
 

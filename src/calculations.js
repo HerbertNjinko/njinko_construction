@@ -391,6 +391,49 @@ function buildProfilePayload(user, participant) {
   };
 }
 
+function buildNotificationCenter(user, data = seedData) {
+  const managerActionSubjects = [
+    "Account approval requested:",
+    "Investor distribution election submitted",
+    "Early withdrawal request submitted"
+  ];
+  const items = (data.emailNotifications ?? [])
+    .filter((notification) => notification.userId === user.id)
+    .filter(
+      (notification) =>
+        user.role !== "manager" ||
+        managerActionSubjects.some((subjectPrefix) =>
+          String(notification.subject ?? "").startsWith(subjectPrefix)
+        )
+    )
+    .map((notification) => {
+      const bodyLines = String(notification.bodyText ?? "")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean);
+
+      return {
+        id: notification.id,
+        subject: notification.subject ?? "Portal notification",
+        bodyPreview: bodyLines.find((line) => !line.toLowerCase().startsWith("hello ")) ?? "",
+        status: notification.status ?? "queued",
+        provider: notification.provider ?? "",
+        localPath: notification.localPath ?? null,
+        errorMessage: notification.errorMessage ?? null,
+        createdAt: notification.createdAt ?? null,
+        sentAt: notification.sentAt ?? null,
+        readAt: notification.readAt ?? null,
+        isUnread: !notification.readAt
+      };
+    })
+    .sort((left, right) => String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? "")));
+
+  return {
+    unreadCount: items.filter((notification) => notification.isUnread).length,
+    items: items.slice(0, 10)
+  };
+}
+
 function buildPayoutInstructionPayload(participant) {
   return {
     payoutMethod: participant?.payoutMethod ?? "",
@@ -1439,6 +1482,7 @@ export function buildPoolMemberDashboard(user, data = seedData) {
       category: participant?.category ?? "pool_member"
     },
     profile: buildProfilePayload(user, participant),
+    notifications: buildNotificationCenter(user, data),
     companyResources: data.companyResources ?? [],
     poolPortfolio: {
       totalCommitted,
@@ -1841,6 +1885,7 @@ export function buildInvestorDashboard(user, data = seedData) {
       category: participantMap.get(user.participantId)?.category ?? "investor"
     },
     profile: buildProfilePayload(user, participant),
+    notifications: buildNotificationCenter(user, data),
     portfolio: {
       totalInvested,
       totalReturned,
@@ -2316,6 +2361,7 @@ export function buildManagerDashboard(user, data = seedData) {
       category: participant?.category ?? "manager"
     },
     profile: buildProfilePayload(user, participant),
+    notifications: buildNotificationCenter(user, data),
     overview: {
       totalDeals: deals.length,
       activeDeals: deals.filter((deal) => deal.status !== "sold").length,

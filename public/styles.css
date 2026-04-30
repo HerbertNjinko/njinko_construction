@@ -363,6 +363,116 @@ button:disabled {
   gap: 0.75rem;
 }
 
+.notification-bell-shell {
+  position: relative;
+  display: inline-flex;
+}
+
+.notification-bell-button {
+  position: relative;
+  min-width: 2.8rem;
+  min-height: 2.4rem;
+  padding: 0.55rem 0.75rem;
+}
+
+.notification-count {
+  position: absolute;
+  top: -0.45rem;
+  right: -0.4rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.45rem;
+  height: 1.45rem;
+  border-radius: 999px;
+  padding: 0 0.35rem;
+  background: #922727;
+  color: #fffaf2;
+  border: 2px solid #fffaf2;
+  font-size: 0.72rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.notification-popover {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.7rem);
+  z-index: 30;
+  width: min(25rem, calc(100vw - 2rem));
+  display: grid;
+  gap: 0.85rem;
+  padding: 1rem;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background: rgba(255, 252, 249, 0.98);
+  box-shadow: 0 22px 50px rgba(31, 26, 23, 0.18);
+}
+
+.notification-popover-head,
+.notification-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.85rem;
+}
+
+.notification-popover h4,
+.notification-item h5 {
+  margin: 0;
+}
+
+.notification-summary-grid,
+.notification-list {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.notification-summary-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.notification-summary-item {
+  display: grid;
+  gap: 0.25rem;
+  border-radius: 14px;
+  border: 1px solid rgba(31, 26, 23, 0.1);
+  background: rgba(255, 255, 255, 0.72);
+  padding: 0.75rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.notification-summary-item span,
+.notification-item p,
+.notification-item > span {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.notification-summary-item strong {
+  font-size: 1.35rem;
+}
+
+.notification-item {
+  border-radius: 14px;
+  border: 1px solid rgba(31, 26, 23, 0.08);
+  background: rgba(255, 255, 255, 0.62);
+  padding: 0.75rem;
+}
+
+.notification-item.unread {
+  border-color: rgba(146, 39, 39, 0.18);
+  background: rgba(255, 248, 245, 0.86);
+}
+
+.notification-item p {
+  margin: 0.25rem 0 0;
+}
+
+.compact-empty-state {
+  padding: 1rem;
+}
+
 .error-message {
   padding: 0.9rem 1rem;
   border-radius: 16px;
@@ -1079,10 +1189,50 @@ td {
   color: var(--ink);
 }
 
+.manager-nav-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.65rem;
+}
+
+.manager-alert-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 2rem;
+  border-radius: 999px;
+  padding: 0.25rem 0.55rem;
+  background: rgba(146, 39, 39, 0.12);
+  color: #922727;
+  border: 1px solid rgba(146, 39, 39, 0.22);
+  font-size: 0.74rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
 .manager-nav-copy {
   font-size: 0.86rem;
   line-height: 1.45;
   color: var(--muted);
+}
+
+.manager-alert-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border-color: rgba(146, 39, 39, 0.14);
+  background: rgba(255, 248, 245, 0.84);
+}
+
+.manager-alert-panel h3 {
+  margin: 0.1rem 0 0;
+}
+
+.manager-alert-button {
+  border-color: rgba(146, 39, 39, 0.2);
+  color: #7d2318;
 }
 
 .manager-page-column {
@@ -1255,6 +1405,7 @@ td {
   }
 
   .distribution-review-head,
+  .manager-alert-panel,
   .distribution-review-toolbar {
     flex-direction: column;
     align-items: flex-start;
@@ -1266,5 +1417,15 @@ td {
 
   .app-header {
     flex-direction: column;
+  }
+
+  .notification-bell-shell {
+    position: static;
+  }
+
+  .notification-popover {
+    left: 0.75rem;
+    right: 0.75rem;
+    width: auto;
   }
 }

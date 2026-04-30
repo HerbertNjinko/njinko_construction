@@ -13,6 +13,7 @@ import {
   sendEarlyWithdrawalApprovedNotification,
   sendEarlyWithdrawalRejectedNotification,
   sendEarlyWithdrawalRequestAlertNotification,
+  sendIdentityReviewAlertNotification,
   sendIssueCreatedNotification,
   sendNewDealAnnouncementNotification,
   sendPasswordResetNotification
@@ -1821,6 +1822,27 @@ export async function getAppDataSnapshot({ skipAutomation = false } = {}) {
         : Number(row.approvedPayoutAmount)
   }));
 
+  const emailNotifications = await queryAll(
+    `
+      SELECT
+        id,
+        user_id AS "userId",
+        participant_id AS "participantId",
+        recipient_email AS "recipientEmail",
+        subject,
+        body_text AS "bodyText",
+        status,
+        provider,
+        local_path AS "localPath",
+        error_message AS "errorMessage",
+        created_at AS "createdAt",
+        sent_at AS "sentAt",
+        read_at AS "readAt"
+      FROM email_notifications
+      ORDER BY created_at DESC, id DESC
+    `
+  );
+
   const companyResources = (await queryAll(
     `
       SELECT
@@ -1921,10 +1943,49 @@ export async function getAppDataSnapshot({ skipAutomation = false } = {}) {
     contractors,
     distributionElections,
     earlyWithdrawalRequests,
+    emailNotifications,
     companyResources,
     dealIssues,
     issueVotes,
     archivedRecords
+  };
+}
+
+export async function markUserNotificationsRead(userId, notificationIds = []) {
+  const normalizedUserId = String(userId ?? "").trim();
+
+  if (!normalizedUserId) {
+    throw new Error("User id is required.");
+  }
+
+  const normalizedIds = Array.isArray(notificationIds)
+    ? notificationIds.map((item) => String(item ?? "").trim()).filter(Boolean)
+    : [];
+  const timestamp = nowTimestamp();
+  const result = normalizedIds.length
+    ? await pool.query(
+        `
+          UPDATE email_notifications
+          SET read_at = COALESCE(read_at, $1)
+          WHERE user_id = $2
+            AND id = ANY($3::text[])
+            AND read_at IS NULL
+        `,
+        [timestamp, normalizedUserId, normalizedIds]
+      )
+    : await pool.query(
+        `
+          UPDATE email_notifications
+          SET read_at = COALESCE(read_at, $1)
+          WHERE user_id = $2
+            AND read_at IS NULL
+        `,
+        [timestamp, normalizedUserId]
+      );
+
+  return {
+    updatedCount: result.rowCount ?? 0,
+    readAt: timestamp
   };
 }
 
@@ -2069,11 +2130,13 @@ async function createUserRecord(
 }
 
 export async function createManagedUser(input) {
+  const category = normalizeCategory(input?.category || "investor");
+
   return createUserRecord(
     {
       ...input,
-      category: "investor",
-      accountApprovalStatus: "profile_required"
+      category,
+      accountApprovalStatus: category === "manager" ? "approved" : "profile_required"
     },
     {
       mustChangePassword: true,
@@ -2699,7 +2762,29 @@ export async function submitIdentityReview(userId, input) {
     );
   });
 
-  return getUserById(userId);
+  const updatedUser = await getUserById(userId);
+  const managerRecipients = await getActiveManagerRecipients();
+
+  await Promise.all(
+    managerRecipients.map(async (managerRecipient) => {
+      try {
+        return await sendIdentityReviewAlertNotification({
+          userId: managerRecipient.userId,
+          participantId: managerRecipient.participantId,
+          managerName: managerRecipient.fullName,
+          email: managerRecipient.email,
+          investorName: updatedUser.name,
+          investorEmail: updatedUser.email,
+          category: updatedUser.category,
+          submittedAt: timestamp
+        });
+      } catch {
+        return null;
+      }
+    })
+  );
+
+  return updatedUser;
 }
 
 export async function updateOwnProfile(userId, input) {

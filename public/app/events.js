@@ -1,4 +1,4 @@
-import { state } from "./state.js?v=20260430-frontend-13";
+import { state } from "./state.js?v=20260430-frontend-16";
 import {
   clearAuthFeedback,
   clearMessages,
@@ -10,7 +10,7 @@ import {
   setAuthMode,
   setMessage,
   toggleSectionCollapsed
-} from "./helpers.js?v=20260430-frontend-13";
+} from "./helpers.js?v=20260430-frontend-16";
 import {
   applyArchivedProjectFilters,
   buildCreateDealDraft,
@@ -25,7 +25,7 @@ import {
   syncDealEditorField,
   updateCreateDealDraft,
   updateDealEditorDraft
-} from "./data.js?v=20260430-frontend-13";
+} from "./data.js?v=20260430-frontend-16";
 import {
   api,
   applyLoggedOutState,
@@ -33,8 +33,8 @@ import {
   loadSession,
   recordSessionActivity,
   refreshDashboard
-} from "./session.js?v=20260430-frontend-13";
-import { render } from "./renderers.js?v=20260430-frontend-13";
+} from "./session.js?v=20260430-frontend-16";
+import { render } from "./renderers.js?v=20260430-frontend-16";
 
 let listenersBound = false;
 
@@ -310,7 +310,8 @@ export function setupEventListeners() {
             middleName: formData.get("middleName"),
             lastName: formData.get("lastName"),
             email: formData.get("email"),
-            password: formData.get("password")
+            password: formData.get("password"),
+            category: formData.get("category")
           })
         });
         await refreshDashboard();
@@ -1013,8 +1014,35 @@ export function setupEventListeners() {
       }
 
       state.managerPage = nextPage;
+      state.notificationPanelOpen = false;
       window.scrollTo({ top: 0, behavior: "smooth" });
       render();
+      return;
+    }
+
+    const notificationBellButton = event.target.closest("#notification-bell-button");
+
+    if (notificationBellButton) {
+      const willOpen = !state.notificationPanelOpen;
+      const unreadCount = Number(state.dashboard?.notifications?.unreadCount ?? 0);
+      state.notificationPanelOpen = willOpen;
+      render();
+
+      if (willOpen && unreadCount > 0) {
+        try {
+          await api("/api/notifications/read", {
+            method: "POST",
+            body: JSON.stringify({})
+          });
+          await refreshDashboard();
+          state.notificationPanelOpen = true;
+        } catch (error) {
+          setMessage("profile", "error", error.message);
+        }
+
+        render();
+      }
+
       return;
     }
 
@@ -1422,7 +1450,8 @@ export function setupEventListeners() {
           await refreshDashboard();
           setMessage("directory", "success", "User account deleted.");
         } else if (action === "approve-identity" || action === "reject-identity") {
-          const reviewCell = actionButton.closest("td");
+          const reviewCell =
+            actionButton.closest(".identity-review-actions") ?? actionButton.closest("td");
           const comment = String(
             reviewCell?.querySelector("[name='identityReviewComment']")?.value ?? ""
           ).trim();
