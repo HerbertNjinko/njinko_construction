@@ -2718,7 +2718,7 @@ export async function createDealAllocation(input) {
 
   const deal = await queryOne(
     `
-      SELECT id, name, investment_close_on AS "investmentCloseOn"
+      SELECT id, name, status, investment_close_on AS "investmentCloseOn"
       FROM deals
       WHERE id = $1
     `,
@@ -2727,6 +2727,10 @@ export async function createDealAllocation(input) {
 
   if (!deal) {
     throw new Error("Deal not found.");
+  }
+
+  if (deal.status === "sold") {
+    throw new Error("Sold projects are closed and cannot accept new allocations.");
   }
 
   if (isInvestmentWindowClosed(deal.investmentCloseOn)) {
@@ -3992,7 +3996,7 @@ export async function updateDeal(dealId, input) {
 
   const existingDeal = await queryOne(
     `
-      SELECT id
+      SELECT id, status
       FROM deals
       WHERE id = $1
     `,
@@ -4001,6 +4005,12 @@ export async function updateDeal(dealId, input) {
 
   if (!existingDeal) {
     throw new Error("Deal not found.");
+  }
+
+  if (existingDeal.status === "sold") {
+    throw new Error(
+      "Sold projects are locked and cannot be edited. Archive the sold project instead."
+    );
   }
 
   const deal = normalizeDealInput(input);
@@ -5890,6 +5900,10 @@ export async function deleteDeal(dealId, actingUserId = null) {
       throw new Error("Deal not found.");
     }
 
+    if (existingDeal.deal?.status === "sold") {
+      throw new Error("Sold projects cannot be deleted. Archive the sold project instead.");
+    }
+
     const archiveRecord = await insertArchivedRecord(client, {
       entityType: "deal",
       entityId: id,
@@ -5914,6 +5928,54 @@ export async function deleteDeal(dealId, actingUserId = null) {
   return {
     ok: true,
     deletedDealId: id,
+    archivedRecordId: archive.id
+  };
+}
+
+export async function archiveDeal(dealId, actingUserId = null) {
+  const id = String(dealId ?? "").trim();
+
+  if (!id) {
+    throw new Error("Deal id is required.");
+  }
+
+  const archive = await withTransaction(async (client) => {
+    const existingDeal = await buildDealArchivePayload(id, client);
+
+    if (!existingDeal) {
+      throw new Error("Deal not found.");
+    }
+
+    if (existingDeal.deal?.status !== "sold") {
+      throw new Error(
+        "Only sold projects can be archived. Active projects can still be edited or deleted."
+      );
+    }
+
+    const archiveRecord = await insertArchivedRecord(client, {
+      entityType: "deal",
+      entityId: id,
+      sourceTable: "deals",
+      displayName: existingDeal.deal?.name ?? id,
+      relatedDealId: id,
+      deletedByUserId: actingUserId,
+      payload: existingDeal
+    });
+
+    await client.query(
+      `
+        DELETE FROM deals
+        WHERE id = $1
+      `,
+      [id]
+    );
+
+    return archiveRecord;
+  });
+
+  return {
+    ok: true,
+    archivedDealId: id,
     archivedRecordId: archive.id
   };
 }

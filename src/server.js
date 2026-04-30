@@ -7,6 +7,7 @@ import { buildDashboardForUser, calculateScenarioForDeal } from "./calculations.
 import { assertDatabaseReady } from "./migrations.js";
 import { closeDatabasePool } from "./postgres.js";
 import {
+  archiveDeal,
   castDealIssueVote,
   castInvestorPoolVote,
   createCompanyResource,
@@ -599,6 +600,7 @@ const server = createServer(async (request, response) => {
     const method = request.method ?? "GET";
     enforceTrustedOrigin(request);
     const url = getRequestUrl(request);
+    const dealArchiveMatch = url.pathname.match(/^\/api\/admin\/deals\/([^/]+)\/archive$/);
     const dealUpdateMatch = url.pathname.match(/^\/api\/admin\/deals\/([^/]+)$/);
     const issueVoteMatch = url.pathname.match(/^\/api\/issues\/([^/]+)\/vote$/);
     const userStatusMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)\/status$/);
@@ -1286,6 +1288,23 @@ const server = createServer(async (request, response) => {
 
       try {
         await deleteDeal(decodeURIComponent(dealUpdateMatch[1]), manager.id);
+        sendJson(response, 200, { ok: true });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "POST" && dealArchiveMatch) {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      try {
+        await archiveDeal(decodeURIComponent(dealArchiveMatch[1]), manager.id);
         sendJson(response, 200, { ok: true });
       } catch (error) {
         sendJson(response, 400, { error: error.message });

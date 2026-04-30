@@ -33,7 +33,7 @@ import {
   recordSessionActivity,
   refreshDashboard
 } from "./session.js?v=20260430-frontend-8";
-import { render } from "./renderers.js?v=20260430-frontend-8";
+import { render } from "./renderers.js?v=20260430-frontend-9";
 
 let listenersBound = false;
 
@@ -1094,7 +1094,7 @@ export function setupEventListeners() {
       if (action === "delete-deal") {
         const deal = getDealById(dealId);
         const confirmed = window.confirm(
-          `Delete ${deal?.name ?? "this deal"}? All allocations, expenses, interest rows, timeline items, contractor entries, and tiers tied to it will be removed.`
+          `Delete ${deal?.name ?? "this deal"}? All allocations, expenses, interest rows, timeline items, contractor entries, and tiers tied to it will be removed. Sold projects must be archived instead.`
         );
 
         if (!confirmed) {
@@ -1108,6 +1108,33 @@ export function setupEventListeners() {
           delete state.dealEditorDrafts[dealId];
           await refreshDashboard();
           setMessage("deal", "success", "Project deleted.");
+        } catch (error) {
+          setMessage("deal", "error", error.message);
+        }
+
+        render();
+        return;
+      }
+
+      if (action === "archive-deal") {
+        const deal = getDealById(dealId);
+        const confirmed = window.confirm(
+          `Archive ${deal?.name ?? "this project"}? The sold project will be removed from active screens and preserved in archive history.`
+        );
+
+        if (!confirmed) {
+          return;
+        }
+
+        try {
+          await api(`/api/admin/deals/${encodeURIComponent(dealId)}/archive`, {
+            method: "POST",
+            body: JSON.stringify({})
+          });
+          delete state.dealEditorDrafts[dealId];
+          state.adminDealId = null;
+          await refreshDashboard();
+          setMessage("deal", "success", "Sold project archived.");
         } catch (error) {
           setMessage("deal", "error", error.message);
         }

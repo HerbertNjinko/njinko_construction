@@ -175,6 +175,11 @@ function renderLogin() {
   `;
 }
 
+function clampTimelineProgress(value) {
+  const parsed = Number.parseFloat(value);
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(100, parsed)) : 0;
+}
+
 function renderPasswordResetGate() {
   return `
     <div class="shell">
@@ -856,6 +861,41 @@ function payoutMethodLabel(method) {
   return labels[method] ?? "No payout method saved";
 }
 
+function renderPayoutInstructionMeta(details = {}) {
+  const method = String(details.payoutMethod ?? "");
+  const rows = [
+    {
+      label: "Payout method",
+      value: payoutMethodLabel(method)
+    }
+  ];
+
+  if (method === "bank") {
+    rows.push(
+      { label: "Bank name", value: details.bankName || "Not provided" },
+      { label: "Account name", value: details.bankAccountName || "Not provided" },
+      { label: "Routing number", value: details.bankRoutingNumber || "Not provided" },
+      { label: "Account number", value: details.bankAccountNumber || "Not provided" }
+    );
+  } else if (method === "zelle") {
+    rows.push({ label: "Zelle details", value: details.zelleDetails || "Not provided" });
+  } else if (method === "cash_app") {
+    rows.push({ label: "Cash App handle", value: details.cashAppHandle || "Not provided" });
+  }
+
+  if (details.payoutNotes || method === "other") {
+    rows.push({ label: "Payment notes", value: details.payoutNotes || "Not provided" });
+  }
+
+  return rows
+    .map(
+      (row) => `
+        <p><strong>${escapeHtml(row.label)}:</strong> ${escapeHtml(row.value)}</p>
+      `
+    )
+    .join("");
+}
+
 function distributionApprovalStatusLabel(status) {
   const labels = {
     none: "No election submitted",
@@ -1251,6 +1291,7 @@ function renderManagerDistributionReviewCard(review) {
                 <p><strong>Expected payout date:</strong> ${escapeHtml(
                   review.payoutExpectedOn ? formatDate(review.payoutExpectedOn) : "Not scheduled"
                 )}</p>
+                ${renderPayoutInstructionMeta(review)}
                 <p><strong>Investor notes:</strong> ${escapeHtml(review.notes || "None provided.")}</p>
                 <p><strong>Manager notes:</strong> ${escapeHtml(review.overrideNotes || "None recorded.")}</p>
               </div>
@@ -1429,6 +1470,7 @@ function renderManagerEarlyWithdrawalReviewCard(review) {
                 <p><strong>Status:</strong> ${escapeHtml(
                   earlyWithdrawalStatusLabel(review.requestStatus)
                 )}</p>
+                ${renderPayoutInstructionMeta(review)}
                 <p><strong>Participant notes:</strong> ${escapeHtml(
                   review.investorNotes || "None provided."
                 )}</p>
@@ -1620,6 +1662,7 @@ function renderDistributionReviewSection() {
 function renderInvestorProject(project) {
   const sectionId = `investor-project-${project.id}`;
   const collapsed = Boolean(state.collapsedSections?.[sectionId]);
+  const timelineProgress = clampTimelineProgress(project.timelineProgress);
 
   return `
     <article class="deal-card">
@@ -1638,7 +1681,7 @@ function renderInvestorProject(project) {
         </div>
         <div>
           <p class="metric-label">Timeline</p>
-          <p class="metric-value">${escapeHtml(`${project.timelineProgress}%`)}</p>
+          <p class="metric-value">${escapeHtml(`${timelineProgress}%`)}</p>
           <div class="button-row deal-card-actions">
             ${renderSectionToggle(sectionId)}
           </div>
@@ -1648,9 +1691,7 @@ function renderInvestorProject(project) {
         collapsed
           ? '<div class="deal-card-collapsed-note">Project minimized. Use Maximize to reopen this breakdown.</div>'
           : `<div class="deal-body">
-        <div class="progress-shell">
-          <div class="progress-fill" style="width:${project.timelineProgress}%"></div>
-        </div>
+        <progress class="progress-shell" value="${timelineProgress}" max="100" aria-label="Timeline progress"></progress>
         <div>
           <div class="section-head">
             <div>
@@ -1663,7 +1704,18 @@ function renderInvestorProject(project) {
           <div class="summary-grid">
             ${summaryItem("Amount invested", formatCurrency(project.personalPosition.amountInvested))}
             ${summaryItem("Ownership", formatPercent(project.personalPosition.ownershipPct))}
-            ${summaryItem("Pref earned", formatCurrency(project.personalPosition.prefEarned))}
+            ${summaryItem(
+              project.status === "sold" ? "Pref earned" : "Accrued pref to date",
+              formatCurrency(project.personalPosition.prefEarned)
+            )}
+            ${
+              project.status === "sold"
+                ? ""
+                : summaryItem(
+                    "Projected pref at exit",
+                    formatCurrency(project.personalPosition.projectedPrefEarned)
+                  )
+            }
             ${summaryItem(
               "Estimated total return",
               formatCurrency(project.personalPosition.estimatedTotalReturn)
@@ -1822,7 +1874,8 @@ function renderInvestorDashboard() {
             ${metricCard("Total returned", formatCurrency(portfolio.totalReturned))}
             ${metricCard("Total amount payout", formatCurrency(portfolio.totalAmountPayout))}
             ${metricCard("Current active investments", String(portfolio.activeInvestments))}
-            ${metricCard("Current pref earned", formatCurrency(portfolio.currentPrefEarned))}
+            ${metricCard("Accrued pref to date", formatCurrency(portfolio.currentPrefEarned))}
+            ${metricCard("Projected pref at exit", formatCurrency(portfolio.projectedPrefEarned))}
           </div>
         `
       })}
@@ -2121,8 +2174,12 @@ function renderPoolMemberProjectCard(pool) {
                   formatCurrency(pool.myPosition.profitReturned)
                 )}
                 ${summaryItem(
-                  "My current pref",
+                  "My accrued pref",
                   formatCurrency(pool.myPosition.currentPrefEarned)
+                )}
+                ${summaryItem(
+                  "My projected pref",
+                  formatCurrency(pool.myPosition.projectedPrefEarned)
                 )}
               </div>
               ${
@@ -2233,7 +2290,8 @@ function renderPoolMemberDashboard() {
             ${metricCard("Total invested", formatCurrency(poolPortfolio.totalInvested))}
             ${metricCard("Total returned", formatCurrency(poolPortfolio.totalReturned))}
             ${metricCard("Total amount payout", formatCurrency(poolPortfolio.totalAmountPayout))}
-            ${metricCard("Current pref earned", formatCurrency(poolPortfolio.currentPrefEarned))}
+            ${metricCard("Accrued pref to date", formatCurrency(poolPortfolio.currentPrefEarned))}
+            ${metricCard("Projected pref at exit", formatCurrency(poolPortfolio.projectedPrefEarned))}
           </div>
         `
       })}
@@ -2519,6 +2577,14 @@ function renderCalculator() {
                   ${metricCard(
                     "Total project cost",
                     formatCurrency(result.outputs.totalProjectCost)
+                  )}
+                  ${metricCard(
+                    "Tracked equity",
+                    formatCurrency(result.outputs.totalEquity)
+                  )}
+                  ${metricCard(
+                    "Total debt",
+                    formatCurrency(result.outputs.totalDebt)
                   )}
                   ${metricCard(
                     "Interest paid",
@@ -3504,7 +3570,6 @@ function renderPromoteTierEditorRows(draft) {
 
 function renderDealEditorPanel() {
   const deal = getManagerEditableDeal();
-  const draft = deal ? getDealEditorDraft(deal) : null;
   const defaultVoteCloseDate = getDefaultVoteCloseDate();
 
   if (!deal) {
@@ -3517,6 +3582,64 @@ function renderDealEditorPanel() {
       body: '<div class="empty-state">No deals are available to edit.</div>'
     });
   }
+
+  const dealOptions = state.dashboard.deals
+    .map(
+      (item) => `
+        <option value="${escapeHtml(item.id)}" ${item.id === deal.id ? "selected" : ""}>
+          ${escapeHtml(`${item.name}${item.status === "sold" ? " · sold" : ""}`)}
+        </option>
+      `
+    )
+    .join("");
+
+  if (deal.status === "sold") {
+    return renderCollapsibleSection({
+      sectionId: "admin-edit-deal",
+      title: "Update Project",
+      copy:
+        "Sold projects are locked against edits and deletion. Archive a sold project when it no longer needs to appear in active manager workflows.",
+      message: renderMessage(state.messages.deal),
+      panelClass: "admin-card admin-card-wide",
+      body: `
+        <p class="eyebrow">Sold Project Lock</p>
+        <label>
+          Deal
+          <select name="dealId" id="deal-editor-select">
+            ${dealOptions}
+          </select>
+        </label>
+        <div class="summary-grid">
+          ${summaryItem("Status", deal.statusLabel || "Sold")}
+          ${summaryItem("Tracked equity", formatCurrency(deal.totalEquity))}
+          ${summaryItem("Gross project IRR", formatPercent(deal.projectIrr))}
+          ${summaryItem("Sponsor promote", formatCurrency(deal.sponsorPromote))}
+          ${summaryItem("Sale price", formatCurrency(deal.salePrice))}
+          ${summaryItem("Total project cost", formatCurrency(deal.totalProjectCost))}
+          ${summaryItem("Actual exit", deal.actualExitOn ? formatDate(deal.actualExitOn) : "Not set")}
+          ${summaryItem("Timeline progress", `${deal.timelineProgress}%`)}
+        </div>
+        <div class="distribution-review-meta">
+          <p><strong>Project:</strong> ${escapeHtml(deal.name)}</p>
+          <p><strong>Location:</strong> ${escapeHtml(deal.location)}</p>
+          <p><strong>Current phase:</strong> ${escapeHtml(deal.currentPhase)}</p>
+          <p><strong>Lock rule:</strong> Sold projects cannot be edited or deleted. Archiving removes the project from active screens and preserves an archived payload for audit history.</p>
+        </div>
+        <div class="button-row">
+          <button
+            class="button-danger"
+            type="button"
+            data-deal-editor-action="archive-deal"
+            data-deal-id="${escapeHtml(deal.id)}"
+          >
+            Archive project
+          </button>
+        </div>
+      `
+    });
+  }
+
+  const draft = getDealEditorDraft(deal);
 
   return renderCollapsibleSection({
     sectionId: "admin-edit-deal",
@@ -3531,17 +3654,7 @@ function renderDealEditorPanel() {
         <label>
           Deal
           <select name="dealId" id="deal-editor-select">
-            ${state.dashboard.deals
-              .map(
-                (item) => `
-                  <option value="${escapeHtml(item.id)}" ${
-                    item.id === deal.id ? "selected" : ""
-                  }>
-                    ${escapeHtml(item.name)}
-                  </option>
-                `
-              )
-              .join("")}
+            ${dealOptions}
           </select>
         </label>
         <div class="summary-grid">

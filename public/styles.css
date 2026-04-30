@@ -807,14 +807,28 @@ button:disabled {
 
 .progress-shell {
   overflow: hidden;
+  display: block;
   width: 100%;
   height: 10px;
+  border: 0;
   border-radius: 999px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: rgba(31, 26, 23, 0.08);
+  color: var(--accent);
+}
+
+.progress-shell::-webkit-progress-bar {
+  border-radius: inherit;
   background: rgba(31, 26, 23, 0.08);
 }
 
-.progress-fill {
-  height: 100%;
+.progress-shell::-webkit-progress-value {
+  border-radius: inherit;
+  background: linear-gradient(135deg, var(--accent), var(--gold));
+}
+
+.progress-shell::-moz-progress-bar {
   border-radius: inherit;
   background: linear-gradient(135deg, var(--accent), var(--gold));
 }

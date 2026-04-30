@@ -40,7 +40,7 @@ function currentMonthStamp() {
 
 export function isDealOpenForAllocation(deal) {
   const investmentCloseOn = String(deal?.investmentCloseOn ?? "").trim();
-  return !investmentCloseOn || investmentCloseOn >= todayStamp();
+  return deal?.status !== "sold" && (!investmentCloseOn || investmentCloseOn >= todayStamp());
 }
 
 export function getAllocatableDeals(deals = state.dashboard?.deals ?? []) {

@@ -119,6 +119,12 @@ function summarizeDealFinancing(deal, overrides = {}) {
       )
     )
   );
+  const derivedTotalDebt = roundCurrency(
+    debtServiceEntries.reduce((sum, entry) => sum + resolveNumber(entry?.drawBalance, 0), 0)
+  );
+  const totalDebt = roundCurrency(
+    Math.max(0, debtServiceEntries.length ? derivedTotalDebt : resolveNumber(deal.debt, 0))
+  );
   const latestDebtServiceEntry = debtServiceEntries.at(-1) ?? null;
   const latestDrawBalance = roundCurrency(
     Math.max(0, resolveNumber(overrides.latestDrawBalance, latestDebtServiceEntry?.drawBalance ?? 0))
@@ -139,6 +145,7 @@ function summarizeDealFinancing(deal, overrides = {}) {
     projectCostVariance,
     projectCostVariancePct,
     totalInterestPaid,
+    totalDebt,
     expenseEntries,
     debtServiceEntries,
     latestDebtServiceEntry,
@@ -175,13 +182,11 @@ export function calculateWaterfall({ deal, positions, overrides = {} }) {
   const totalEquity = roundCurrency(
     positions.reduce((sum, position) => sum + position.contributionAmount, 0)
   );
-  const distributableEquity = roundCurrency(
-    Math.max(0, salePrice - debt - taxExpense - totalInterestPaid)
-  );
   const projectCostBasis = roundCurrency(
     financing.effectiveProjectCost + taxExpense + totalInterestPaid
   );
   const netProjectProfit = roundCurrency(salePrice - projectCostBasis);
+  const distributableEquity = roundCurrency(Math.max(0, totalEquity + netProjectProfit));
   const costRecoveryShortfall = roundCurrency(Math.max(0, -netProjectProfit));
   const hasClearedCostRecovery = netProjectProfit > 0;
   const capitalPool = roundCurrency(Math.min(distributableEquity, totalEquity));
@@ -263,6 +268,7 @@ export function calculateWaterfall({ deal, positions, overrides = {} }) {
     holdMonths,
     prefRate,
     totalEquity,
+    totalDebt: financing.totalDebt,
     distributableEquity,
     grossIrrProceeds,
     projectProfit: netProjectProfit,
@@ -355,6 +361,10 @@ function calculateCurrentPref(position, deal, asOfDate) {
   return roundCurrency(position.contributionAmount * deal.prefRate * (monthsAccrued / 12));
 }
 
+function calculateProjectedPref(position, deal) {
+  return roundCurrency(position.contributionAmount * deal.prefRate * (deal.holdMonths / 12));
+}
+
 function buildProfilePayload(user, participant) {
   return {
     firstName: participant?.firstName ?? "",
@@ -368,6 +378,19 @@ function buildProfilePayload(user, participant) {
     driverLicenseNumber: participant?.driverLicenseNumber ?? "",
     idCardFileName: participant?.idCardFileName ?? "",
     hasIdCard: Boolean(participant?.hasIdCard),
+    payoutMethod: participant?.payoutMethod ?? "",
+    bankAccountName: participant?.bankAccountName ?? "",
+    bankName: participant?.bankName ?? "",
+    bankRoutingNumber: participant?.bankRoutingNumber ?? "",
+    bankAccountNumber: participant?.bankAccountNumber ?? "",
+    zelleDetails: participant?.zelleDetails ?? "",
+    cashAppHandle: participant?.cashAppHandle ?? "",
+    payoutNotes: participant?.payoutNotes ?? ""
+  };
+}
+
+function buildPayoutInstructionPayload(participant) {
+  return {
     payoutMethod: participant?.payoutMethod ?? "",
     bankAccountName: participant?.bankAccountName ?? "",
     bankName: participant?.bankName ?? "",
@@ -815,6 +838,14 @@ function buildInvestorPoolViews(data, viewerParticipantId = null) {
       poolPosition && selectedDeal
         ? roundCurrency(calculateCurrentPref(poolPosition, selectedDeal, asOfDate) * mySharePct)
         : 0;
+    const projectedPrefEarned =
+      poolPosition && selectedDeal
+        ? roundCurrency(
+            (selectedDeal.status === "sold"
+              ? poolResult?.prefEarned ?? 0
+              : calculateProjectedPref(poolPosition, selectedDeal)) * mySharePct
+          )
+        : 0;
     const myEstimatedTotalReturn = roundCurrency((poolResult?.totalPayout ?? 0) * mySharePct);
     const myCapitalReturned = roundCurrency((poolResult?.capitalReturned ?? 0) * mySharePct);
     const myProfitReturned = roundCurrency(
@@ -933,6 +964,7 @@ function buildInvestorPoolViews(data, viewerParticipantId = null) {
         pendingCommittedAmount: selectedDeal ? 0 : myCommitmentAmount,
         sharePct: mySharePct,
         currentPrefEarned,
+        projectedPrefEarned,
         estimatedTotalReturn: myEstimatedTotalReturn,
         capitalReturned: myCapitalReturned,
         profitReturned: myProfitReturned,
@@ -981,7 +1013,14 @@ export function buildPoolMemberDashboard(user, data = seedData) {
     pools.reduce((sum, investmentPool) => sum + investmentPool.myPosition.totalAmountPayout, 0)
   );
   const currentPrefEarned = roundCurrency(
-    pools.reduce((sum, investmentPool) => sum + investmentPool.myPosition.currentPrefEarned, 0)
+    pools
+      .filter((investmentPool) => investmentPool.selectedDealStatus !== "sold")
+      .reduce((sum, investmentPool) => sum + investmentPool.myPosition.currentPrefEarned, 0)
+  );
+  const projectedPrefEarned = roundCurrency(
+    pools
+      .filter((investmentPool) => investmentPool.selectedDealStatus !== "sold")
+      .reduce((sum, investmentPool) => sum + investmentPool.myPosition.projectedPrefEarned, 0)
   );
   const activePools = pools.filter(
     (investmentPool) =>
@@ -1008,6 +1047,7 @@ export function buildPoolMemberDashboard(user, data = seedData) {
       totalReturned,
       totalAmountPayout,
       currentPrefEarned,
+      projectedPrefEarned,
       activePools,
       pendingPools,
       jointCapitalDeployed
@@ -1099,14 +1139,15 @@ export function buildPoolDistributionContexts(
       const key = `${investmentPool.selectedDealId}:${commitment.participantId}`;
 
       if (!groupedContexts.has(key)) {
+        const participant = participantMap.get(commitment.participantId);
+
         groupedContexts.set(key, {
           dealId: investmentPool.selectedDealId,
           dealName: deal.name,
           participantId: commitment.participantId,
-          participantName: participantMap.get(commitment.participantId)?.name ?? "Pooled member",
+          participantName: participant?.name ?? "Pooled member",
           participantEmail: userMapByParticipantId.get(commitment.participantId)?.email ?? "",
-          payoutMethod:
-            participantMap.get(commitment.participantId)?.payoutMethod ?? "",
+          payoutInstructions: buildPayoutInstructionPayload(participant),
           sourcePoolNames: new Set()
         });
       }
@@ -1154,7 +1195,7 @@ export function buildPoolDistributionContexts(
         participantId: context.participantId,
         participantName: context.participantName,
         participantEmail: context.participantEmail,
-        payoutMethod: context.payoutMethod,
+        ...context.payoutInstructions,
         sourcePoolNames: [...context.sourcePoolNames].sort((left, right) =>
           left.localeCompare(right)
         ),
@@ -1240,7 +1281,12 @@ export function buildInvestorDashboard(user, data = seedData) {
         contributionType: position.contributionType,
         amountInvested: position.contributionAmount,
         ownershipPct: result.ownershipPct,
-        prefEarned: calculateCurrentPref(position, deal, data.asOfDate),
+        prefEarned:
+          deal.status === "sold"
+            ? result.prefEarned
+            : calculateCurrentPref(position, deal, data.asOfDate),
+        projectedPrefEarned:
+          deal.status === "sold" ? result.prefEarned : calculateProjectedPref(position, deal),
         estimatedTotalReturn: result.totalPayout,
         capitalReturned: result.capitalReturned,
         profitEarned: roundCurrency(result.prefEarned + result.profitShare),
@@ -1260,6 +1306,7 @@ export function buildInvestorDashboard(user, data = seedData) {
         salePrice: waterfall.salePrice,
         salePriceLabel: exitLabel,
         totalEquity: waterfall.totalEquity,
+        totalDebt: waterfall.totalDebt,
         debt: deal.debt,
         taxExpense: deal.taxExpense ?? 0,
         debtInterestRate: deal.debtInterestRate ?? 0,
@@ -1352,7 +1399,14 @@ export function buildInvestorDashboard(user, data = seedData) {
   );
   const activeInvestments = projects.filter((project) => project.status !== "sold").length;
   const currentPrefEarned = roundCurrency(
-    projects.reduce((sum, project) => sum + project.personalPosition.prefEarned, 0)
+    projects
+      .filter((project) => project.status !== "sold")
+      .reduce((sum, project) => sum + project.personalPosition.prefEarned, 0)
+  );
+  const projectedPrefEarned = roundCurrency(
+    projects
+      .filter((project) => project.status !== "sold")
+      .reduce((sum, project) => sum + project.personalPosition.projectedPrefEarned, 0)
   );
   const totalAmountPayout = roundCurrency(
     visiblePositions.reduce((sum, position) => sum + (position.distributionsToDate ?? 0), 0)
@@ -1388,7 +1442,8 @@ export function buildInvestorDashboard(user, data = seedData) {
       totalReturned,
       totalAmountPayout,
       activeInvestments,
-      currentPrefEarned
+      currentPrefEarned,
+      projectedPrefEarned
     },
     governance: {
       issues: governanceIssues
@@ -1434,6 +1489,7 @@ export function buildManagerDashboard(user, data = seedData) {
       status: deal.status,
       statusLabel: statusLabel(deal.status),
       totalEquity: waterfall.totalEquity,
+      totalDebt: waterfall.totalDebt,
       debt: deal.debt,
       taxExpense: deal.taxExpense ?? 0,
       debtInterestRate: deal.debtInterestRate ?? 0,
@@ -1651,7 +1707,7 @@ export function buildManagerDashboard(user, data = seedData) {
         participantId: position.participantId,
         participantName: participantRecord?.name ?? "Investor",
         participantEmail: linkedUser?.email ?? "",
-        payoutMethod: participantRecord?.payoutMethod ?? "",
+        ...buildPayoutInstructionPayload(participantRecord),
         totalPayout: result.totalPayout,
         capitalReturned: result.capitalReturned,
         profitReturned: roundCurrency(result.prefEarned + result.profitShare),
@@ -1724,7 +1780,7 @@ export function buildManagerDashboard(user, data = seedData) {
       participantId: context.participantId,
       participantName: context.participantName,
       participantEmail: context.participantEmail,
-      payoutMethod: context.payoutMethod,
+      ...buildPayoutInstructionPayload(participantMap.get(context.participantId)),
       sourcePoolNames: context.sourcePoolNames,
       totalPayout: context.totalPayout,
       capitalReturned: context.capitalReturned,
@@ -1806,7 +1862,7 @@ export function buildManagerDashboard(user, data = seedData) {
         participantId: request.participantId,
         participantName: participantRecord?.name ?? "Investor",
         participantEmail: linkedUser?.email ?? "",
-        payoutMethod: participantRecord?.payoutMethod ?? "",
+        ...buildPayoutInstructionPayload(participantRecord),
         requestStatus: request.requestStatus,
         reviewStatus,
         needsReview: request.requestStatus === "pending",
@@ -1934,6 +1990,8 @@ export function calculateScenarioForDeal(dealId, overrides = {}, data = seedData
       projectIrr: waterfall.projectIrr,
       distributableEquity: waterfall.distributableEquity,
       grossIrrProceeds: waterfall.grossIrrProceeds,
+      totalEquity: waterfall.totalEquity,
+      totalDebt: waterfall.totalDebt,
       totalInterestPaid: waterfall.totalInterestPaid,
       budgetedProjectCost: waterfall.budgetedProjectCost,
       totalProjectCost: waterfall.totalProjectCost,
