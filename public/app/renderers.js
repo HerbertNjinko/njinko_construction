@@ -5,7 +5,7 @@ import {
   LOGIN_PAGE_TITLE,
   app,
   state
-} from "./state.js?v=20260501-frontend-09";
+} from "./state.js?v=20260501-frontend-10";
 import {
   breakdownItem,
   escapeHtml,
@@ -21,7 +21,7 @@ import {
   renderSectionToggle,
   summaryItem,
   titleCase
-} from "./helpers.js?v=20260501-frontend-09";
+} from "./helpers.js?v=20260501-frontend-10";
 import {
   applyAllocationFilters,
   applyArchivedProjectFilters,
@@ -44,7 +44,7 @@ import {
   getInvestorProjectFilterOptions,
   getManagerEditableDeal,
   getUserFilterOptions
-} from "./data.js?v=20260501-frontend-09";
+} from "./data.js?v=20260501-frontend-10";
 
 function renderLogin() {
   const errorMarkup = state.loginError
@@ -2247,7 +2247,11 @@ function renderProjectPoolVoteCell(request) {
     return "—";
   }
 
-  if (!["pending", "approved"].includes(request.status)) {
+  if (request.status === "pending") {
+    return '<div class="table-note">Awaiting manager approval before voting opens.</div>';
+  }
+
+  if (request.status !== "approved") {
     return "—";
   }
 
@@ -2281,6 +2285,104 @@ function renderProjectPoolVoteCell(request) {
         }.
       </p>
     </form>
+  `;
+}
+
+function renderInvestorProjectPoolCard(pool) {
+  const sectionId = `investor-project-pool-${pool.id}`;
+  const collapsed = Boolean(state.collapsedSections?.[sectionId]);
+
+  return `
+    <article class="distribution-review-card">
+      <div class="distribution-review-head">
+        <div>
+          <p class="eyebrow">Project Pooled Capital Group</p>
+          <h4>${escapeHtml(pool.name)}</h4>
+          <p class="deal-location">${escapeHtml(pool.location || pool.dealName)}</p>
+          <div class="mini-head">
+            <span class="class-pill">${escapeHtml(pool.statusLabel)}</span>
+            <span class="read-only-tag">My amount ${escapeHtml(
+              formatCurrency(pool.myCommitmentAmount)
+            )}</span>
+            <span class="read-only-tag">My share ${escapeHtml(formatPercent(pool.mySharePct))}</span>
+          </div>
+        </div>
+        <div class="distribution-review-toolbar">
+          <div>
+            <p class="metric-label">Approved pool capital</p>
+            <p class="metric-value">${escapeHtml(formatCurrency(pool.totalCommitted))}</p>
+          </div>
+          ${renderSectionToggle(sectionId)}
+        </div>
+      </div>
+      ${
+        collapsed
+          ? '<div class="deal-card-collapsed-note">Project pool minimized. Use Maximize to reopen it.</div>'
+          : `
+            <div class="distribution-review-body">
+              <div class="summary-grid">
+                ${summaryItem("Pool target", formatCurrency(pool.minimumCapitalAmount))}
+                ${summaryItem("Still needed", formatCurrency(pool.amountRemaining))}
+                ${summaryItem("Vote threshold", formatPercent(pool.voteThreshold || 0.5))}
+                ${summaryItem("Effective yes vote", formatPercent(pool.effectiveYesPct || 0))}
+                ${summaryItem(
+                  "Vote closes",
+                  pool.voteClosesOn ? formatDate(pool.voteClosesOn) : "Not scheduled"
+                )}
+                ${summaryItem("Pool status", pool.statusLabel)}
+              </div>
+              ${
+                pool.canVote
+                  ? `
+                    <form class="distribution-form" data-project-pool-vote-form="true" data-deal-id="${escapeHtml(
+                      pool.dealId
+                    )}">
+                      <label>
+                        Vote to fund this project pool
+                        <select name="voteChoice" required>
+                          <option value="">Select vote</option>
+                          <option value="yes" ${pool.myVoteChoice === "yes" ? "selected" : ""}>Yes</option>
+                          <option value="no" ${pool.myVoteChoice === "no" ? "selected" : ""}>No</option>
+                        </select>
+                      </label>
+                      <p class="helper-copy">
+                        Your vote is weighted by your approved amount in this pool. Unvoted shares count as yes after the deadline.
+                      </p>
+                      <button class="button-primary" type="submit">Save vote</button>
+                    </form>
+                  `
+                  : `
+                    <p class="helper-copy">
+                      ${
+                        pool.status === "pending_approval"
+                          ? "This pool request is waiting for manager approval before voting opens."
+                          : pool.status === "funded"
+                            ? "This pool has been funded into the project cap table."
+                            : pool.status === "rejected"
+                              ? "This pool request was not funded."
+                              : "Voting is closed or no approved vote is required right now."
+                      }
+                    </p>
+                  `
+              }
+              ${
+                pool.project
+                  ? `
+                    <div class="summary-grid">
+                      ${summaryItem("My funded amount", formatCurrency(pool.myPosition.amountInvested))}
+                      ${summaryItem("My projected payout", formatCurrency(pool.myPosition.estimatedTotalReturn))}
+                      ${summaryItem("My accrued pref", formatCurrency(pool.myPosition.currentPrefEarned))}
+                      ${summaryItem("My projected pref", formatCurrency(pool.myPosition.projectedPrefEarned))}
+                      ${summaryItem(pool.project.salePriceLabel, formatCurrency(pool.project.salePrice))}
+                      ${summaryItem("Project status", pool.project.statusLabel)}
+                    </div>
+                  `
+                  : ""
+              }
+            </div>
+          `
+      }
+    </article>
   `;
 }
 
@@ -2321,7 +2423,7 @@ function renderUserCapitalAccountPanel() {
         }
       </div>
       <form id="allocation-request-form">
-        <div class="form-grid-2">
+        <div class="${isContractor ? "form-grid-2" : "form-grid-3"}">
           <label>
             Open project
             <select name="dealId" required>
@@ -2356,6 +2458,20 @@ function renderUserCapitalAccountPanel() {
             ${isContractor ? "Deferred amount" : "Amount to allocate"}
             <input type="number" name="amount" min="0" step="0.01" required />
           </label>
+          ${
+            isContractor
+              ? ""
+              : `
+                <label>
+                  Allocation path
+                  <select name="allocationMode">
+                    <option value="">Use project rule</option>
+                    <option value="direct">Direct investor</option>
+                    <option value="pooled">Project pool</option>
+                  </select>
+                </label>
+              `
+          }
         </div>
         ${
           isContractor
@@ -2378,7 +2494,7 @@ function renderUserCapitalAccountPanel() {
           ? ""
           : `
             <p class="helper-copy">
-              Amounts at or above a project&apos;s direct minimum request a direct investor position. Smaller amounts request pooled placement when that project allows pooling.
+              Each project has its own pooled capital group. Amounts below the direct minimum can request that project pool, then vote after manager approval.
             </p>
           `
       }
@@ -2509,6 +2625,7 @@ function renderInvestorDashboard() {
     portfolio,
     projects,
     archivedProjects = [],
+    projectPoolGroups = [],
     pooledDistributionProjects = [],
     withdrawalRequests = []
   } = state.dashboard;
@@ -2562,6 +2679,23 @@ function renderInvestorDashboard() {
           ${renderInvestorArchivedProjectHistory(archivedProjects)}
         `
       })}
+
+      ${
+        projectPoolGroups.length
+          ? renderCollapsibleSection({
+              sectionId: "investor-project-pools",
+              title: "Project Pool Groups",
+              copy:
+                "Pooled requests tied to your investor account. Manager-approved pool requests can vote, and passing pools fund as one project-facing position.",
+              message: renderMessage(state.messages.capital),
+              body: `
+                <div class="distribution-review-list">
+                  ${projectPoolGroups.map((pool) => renderInvestorProjectPoolCard(pool)).join("")}
+                </div>
+              `
+            })
+          : ""
+      }
 
       ${renderCollapsibleSection({
         sectionId: "investor-distribution-elections",
@@ -3777,7 +3911,7 @@ function renderManagerAllocationRequestsPanel() {
     sectionId: "manager-allocation-requests",
     title: "Project Allocation Requests",
     copy:
-      "Direct investor and contractor requests can be approved by the manager. Pooled requests fund only after the weighted investor vote passes.",
+      "Direct investor and contractor approvals create project positions. Pooled approvals admit investors into that project's pool; the cap-table position is created only after the weighted vote or deadline funding rule passes.",
     message: renderMessage(state.messages.allocation),
     body: `
       <div class="table-wrap">
@@ -3785,7 +3919,8 @@ function renderManagerAllocationRequestsPanel() {
           <thead>
             <tr>
               <th>Project pooled bucket</th>
-              <th>Committed</th>
+              <th>Approved</th>
+              <th>Pending</th>
               <th>Vote</th>
               <th>Target</th>
               <th>Remaining</th>
@@ -3801,7 +3936,8 @@ function renderManagerAllocationRequestsPanel() {
                       (bucket) => `
                         <tr>
                           <td>${escapeHtml(bucket.dealName)}</td>
-                          <td>${escapeHtml(formatCurrency(bucket.committedAmount ?? bucket.approvedAmount))}</td>
+                          <td>${escapeHtml(formatCurrency(bucket.approvedAmount ?? bucket.committedAmount))}</td>
+                          <td>${escapeHtml(formatCurrency(bucket.pendingAmount || 0))}</td>
                           <td>${escapeHtml(
                             `${formatPercent(bucket.effectiveYesPct || 0)} yes · threshold ${formatPercent(
                               bucket.voteThreshold || 0.5
@@ -3823,7 +3959,7 @@ function renderManagerAllocationRequestsPanel() {
                       `
                     )
                     .join("")
-                : '<tr><td colspan="7">No pooled requests are waiting for project funding.</td></tr>'
+                : '<tr><td colspan="8">No pooled project groups are open.</td></tr>'
             }
           </tbody>
         </table>
@@ -3867,9 +4003,12 @@ function renderManagerAllocationRequestsPanel() {
                                   <form data-allocation-request-review-form="true" data-request-id="${escapeHtml(
                                     request.id
                                   )}">
-                                    <textarea name="managerNotes" rows="2" placeholder="Reason if rejecting"></textarea>
-                                    <p class="table-note">Pooled requests can only be funded after the investor vote passes.</p>
-                                    <button class="button-danger button-inline" type="submit" name="decision" value="rejected">Reject</button>
+                                    <textarea name="managerNotes" rows="2" placeholder="Manager note"></textarea>
+                                    <p class="table-note">Approval admits this investor to the project pool. Funding still waits for the pool vote or deadline rule.</p>
+                                    <div class="button-row">
+                                      <button class="button-primary button-inline" type="submit" name="decision" value="approved">Approve</button>
+                                      <button class="button-danger button-inline" type="submit" name="decision" value="rejected">Reject</button>
+                                    </div>
                                   </form>
                                 `
                                 : `
@@ -4320,7 +4459,7 @@ function renderCreateDealPanel() {
             />
           </label>
           <label>
-            Pooled investment target
+            Pool minimum capital target
             <input
               type="number"
               name="pooledInvestmentTarget"
@@ -4364,7 +4503,7 @@ function renderCreateDealPanel() {
           </label>
         </div>
         <p class="helper-copy">
-          Investor requests below the direct minimum enter this project&apos;s pool. Funding requires the weighted yes vote to meet the threshold; unvoted shares count as yes after the deadline.
+          Creating the project also opens its pooled capital group. Investor requests below the direct minimum enter this project pool after manager approval. Funding requires the weighted yes vote to meet the threshold; unvoted shares count as yes after the deadline.
         </p>
         <div class="form-grid-2">
           <label>
@@ -5055,7 +5194,7 @@ function renderDealEditorPanel() {
             />
           </label>
           <label>
-            Pooled investment target
+            Pool minimum capital target
             <input
               type="number"
               name="pooledInvestmentTarget"
@@ -5099,7 +5238,7 @@ function renderDealEditorPanel() {
           </label>
         </div>
         <p class="helper-copy">
-          Investor requests below the direct minimum enter this project&apos;s pool. Funding requires the weighted yes vote to meet the threshold; unvoted shares count as yes after the deadline.
+          This project owns its pooled capital group. Investor requests below the direct minimum enter this project pool after manager approval. Funding requires the weighted yes vote to meet the threshold; unvoted shares count as yes after the deadline.
         </p>
         <div class="form-grid-2">
           <label>
@@ -6559,8 +6698,8 @@ const MANAGER_PAGE_ITEMS = [
   },
   {
     id: "pooled-investors",
-    label: "Pooled Investors",
-    copy: "Create pooled groups, assign commitments, and fund the weighted vote winner."
+    label: "Project Pools",
+    copy: "Review project-owned pooled capital groups and fund groups that pass the investor vote."
   },
   {
     id: "allocations",
@@ -6985,6 +7124,7 @@ function renderManagerInvestorPoolCard(pool, { defaultCollapsed = false } = {}) 
 
 function renderManagerInvestorPoolsPage() {
   const pools = state.dashboard.admin.investorPools ?? [];
+  const projectPooledRequests = state.dashboard.admin.projectPooledRequests ?? [];
   const defaultPoolCollapsed = pools.length > 1;
   const missingCollapseDefaults = defaultPoolCollapsed
     ? pools.filter(
@@ -7006,14 +7146,74 @@ function renderManagerInvestorPoolsPage() {
   }
 
   return `
-    <div class="admin-grid">
-      ${renderCreatePoolPanel()}
-    </div>
+    ${renderCollapsibleSection({
+      sectionId: "manager-project-pools",
+      title: "Project Pooled Capital Groups",
+      copy:
+        "Each open project now owns its pooled capital group. Investors request the pool from Account Details, the manager admits them here, and funding waits for the weighted vote or deadline rule.",
+      message: renderMessage(state.messages.pool),
+      body: `
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Project pool</th>
+                <th>Approved</th>
+                <th>Pending</th>
+                <th>Vote</th>
+                <th>Target</th>
+                <th>Remaining</th>
+                <th>Members</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${
+                projectPooledRequests.length
+                  ? projectPooledRequests
+                      .map(
+                        (bucket) => `
+                          <tr>
+                            <td>${escapeHtml(bucket.dealName)}</td>
+                            <td>${escapeHtml(formatCurrency(bucket.approvedAmount ?? bucket.committedAmount))}</td>
+                            <td>${escapeHtml(formatCurrency(bucket.pendingAmount || 0))}</td>
+                            <td>${escapeHtml(
+                              `${formatPercent(bucket.effectiveYesPct || 0)} yes · threshold ${formatPercent(
+                                bucket.voteThreshold || 0.5
+                              )}${bucket.votingClosed ? " · closed" : ""}`
+                            )}</td>
+                            <td>${escapeHtml(formatCurrency(bucket.pooledInvestmentTarget || 0))}</td>
+                            <td>${escapeHtml(formatCurrency(bucket.amountRemaining || 0))}</td>
+                            <td>${escapeHtml(
+                              `${bucket.approvedRequestCount || 0} approved · ${
+                                bucket.pendingRequestCount || 0
+                              } pending`
+                            )}</td>
+                            <td>
+                              <form data-project-pool-funding-form="true" data-deal-id="${escapeHtml(
+                                bucket.dealId
+                              )}">
+                                <button class="button-primary button-inline" type="submit" ${
+                                  bucket.canFund ? "" : "disabled"
+                                }>Fund pooled bucket</button>
+                              </form>
+                            </td>
+                          </tr>
+                        `
+                      )
+                      .join("")
+                  : '<tr><td colspan="8">No open projects currently allow pooled investment.</td></tr>'
+              }
+            </tbody>
+          </table>
+        </div>
+      `
+    })}
     ${renderCollapsibleSection({
       sectionId: "manager-investor-pools",
-      title: "Pooled Capital Groups",
+      title: "Legacy Pooled Capital Groups",
       copy:
-        "Track sub-minimum investors, their weighted project votes, and the pooled positions that eventually land in the deal ledger as one investor.",
+        "Older standalone pool groups remain visible for records. New pooled investing is handled from Create Project and Project Allocation Requests.",
       message: renderMessage(state.messages.pool),
       headerActions: pools.length
         ? `
@@ -7034,7 +7234,7 @@ function renderManagerInvestorPoolsPage() {
                     renderManagerInvestorPoolCard(pool, { defaultCollapsed: defaultPoolCollapsed })
                   )
                   .join("")
-              : '<div class="empty-state">No pooled capital groups have been created yet.</div>'
+              : '<div class="empty-state">No legacy pooled capital groups are on file.</div>'
           }
         </div>
       `

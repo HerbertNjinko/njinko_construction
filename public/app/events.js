@@ -1,4 +1,4 @@
-import { state } from "./state.js?v=20260501-frontend-09";
+import { state } from "./state.js?v=20260501-frontend-10";
 import {
   clearAuthFeedback,
   clearMessages,
@@ -14,7 +14,7 @@ import {
   setMessage,
   titleCase,
   toggleSectionCollapsed
-} from "./helpers.js?v=20260501-frontend-09";
+} from "./helpers.js?v=20260501-frontend-10";
 import {
   applyArchivedProjectFilters,
   applyQuestionnaireFilters,
@@ -30,7 +30,7 @@ import {
   syncDealEditorField,
   updateCreateDealDraft,
   updateDealEditorDraft
-} from "./data.js?v=20260501-frontend-09";
+} from "./data.js?v=20260501-frontend-10";
 import {
   api,
   applyLoggedOutState,
@@ -38,8 +38,8 @@ import {
   loadSession,
   recordSessionActivity,
   refreshDashboard
-} from "./session.js?v=20260501-frontend-09";
-import { render } from "./renderers.js?v=20260501-frontend-09";
+} from "./session.js?v=20260501-frontend-10";
+import { render } from "./renderers.js?v=20260501-frontend-10";
 
 let listenersBound = false;
 
@@ -1034,6 +1034,7 @@ export function setupEventListeners() {
           body: JSON.stringify({
             dealId: formData.get("dealId"),
             amount: Number(formData.get("amount")),
+            allocationMode: formData.get("allocationMode"),
             trade: formData.get("trade"),
             notes: formData.get("notes")
           })

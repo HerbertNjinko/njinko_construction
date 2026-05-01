@@ -515,7 +515,7 @@ function buildParticipantAllocationRequests(data, participantId) {
       continue;
     }
 
-    if (!["pending", "approved"].includes(request.status)) {
+    if (request.status !== "approved") {
       continue;
     }
 
@@ -556,7 +556,7 @@ function buildParticipantAllocationRequests(data, participantId) {
         poolVoteEffectiveYesPct: voteSummary.effectiveYesPct,
         poolVoteCanFund: voteSummary.canFund,
         poolVoteCanVote:
-          ["pending", "approved"].includes(request.status) &&
+          request.status === "approved" &&
           !voteSummary.votingClosed &&
           !request.createdPositionId,
         poolVoteVotingClosed: voteSummary.votingClosed
@@ -668,12 +668,17 @@ function buildProjectPooledRequestBuckets(data, asOfDate) {
         .sort((left, right) =>
           String(left.createdAt ?? "").localeCompare(String(right.createdAt ?? ""))
         );
+      const approvedRequests = pooledRequests.filter((request) => request.status === "approved");
+      const pendingRequests = pooledRequests.filter((request) => request.status === "pending");
       const voteSummary = buildProjectPoolVoteSummaryForRequests({
         deal,
-        requests: pooledRequests,
+        requests: approvedRequests,
         votes: data.projectPoolVotes ?? [],
         asOfDate
       });
+      const pendingAmount = roundCurrency(
+        pendingRequests.reduce((sum, request) => sum + Number(request.amount ?? 0), 0)
+      );
 
       return {
         dealId: deal.id,
@@ -683,8 +688,11 @@ function buildProjectPooledRequestBuckets(data, asOfDate) {
         pooledInvestmentTarget: voteSummary.pooledInvestmentTarget,
         approvedAmount: voteSummary.totalCommitted,
         committedAmount: voteSummary.totalCommitted,
+        pendingAmount,
         amountRemaining: voteSummary.amountRemaining,
         requestCount: pooledRequests.length,
+        approvedRequestCount: approvedRequests.length,
+        pendingRequestCount: pendingRequests.length,
         memberCount: voteSummary.memberCount,
         voteCount: voteSummary.voteCount,
         voteThreshold: voteSummary.voteThreshold,
@@ -696,7 +704,7 @@ function buildProjectPooledRequestBuckets(data, asOfDate) {
         effectiveYesPct: voteSummary.effectiveYesPct,
         targetMet: voteSummary.targetMet,
         votePassed: voteSummary.votePassed,
-        canFund: pooledRequests.length > 0 && voteSummary.canFund,
+        canFund: approvedRequests.length > 0 && voteSummary.canFund,
         requests: pooledRequests.map((request) => {
           const participant = participantMap.get(request.participantId);
           const user = userMap.get(request.participantId);
@@ -710,6 +718,7 @@ function buildProjectPooledRequestBuckets(data, asOfDate) {
             participantName: participant?.name ?? request.participantName,
             participantEmail: user?.email ?? request.participantEmail,
             amount: Number(request.amount ?? 0),
+            status: request.status,
             voteChoice: member?.voteChoice ?? "",
             ownershipPct: member?.ownershipPct ?? 0,
             submittedAt: request.submittedAt ?? request.createdAt
@@ -717,10 +726,212 @@ function buildProjectPooledRequestBuckets(data, asOfDate) {
         })
       };
     })
-    .filter((bucket) => bucket.requestCount > 0)
     .sort((left, right) => {
       if (left.canFund !== right.canFund) {
         return left.canFund ? -1 : 1;
+      }
+
+      if (left.requestCount !== right.requestCount) {
+        return right.requestCount - left.requestCount;
+      }
+
+      return left.dealName.localeCompare(right.dealName);
+    });
+}
+
+function buildParticipantProjectPoolViews(data, participantId) {
+  const dealMap = new Map((data.deals ?? []).map((deal) => [deal.id, deal]));
+  const positionMap = new Map((data.positions ?? []).map((position) => [position.id, position]));
+  const requestsByDeal = new Map();
+  const voteMap = new Map(
+    (data.projectPoolVotes ?? []).map((vote) => [`${vote.dealId}:${vote.participantId}`, vote])
+  );
+  const waterfallCache = new Map();
+
+  for (const request of data.userAllocationRequests ?? []) {
+    if (request.allocationMode !== "pooled") {
+      continue;
+    }
+
+    if (!requestsByDeal.has(request.dealId)) {
+      requestsByDeal.set(request.dealId, []);
+    }
+
+    requestsByDeal.get(request.dealId).push(request);
+  }
+
+  function getWaterfallForDeal(dealId) {
+    if (!waterfallCache.has(dealId)) {
+      const deal = dealMap.get(dealId);
+      const dealPositions = (data.positions ?? []).filter((position) => position.dealId === dealId);
+      waterfallCache.set(dealId, deal ? calculateWaterfall({ deal, positions: dealPositions }) : null);
+    }
+
+    return waterfallCache.get(dealId);
+  }
+
+  return [...requestsByDeal.entries()]
+    .map(([dealId, dealRequests]) => {
+      const deal = dealMap.get(dealId);
+
+      if (!deal) {
+        return null;
+      }
+
+      const myRequests = dealRequests.filter((request) => request.participantId === participantId);
+
+      if (!myRequests.length) {
+        return null;
+      }
+
+      const activeApprovedRequests = dealRequests.filter(
+        (request) => request.status === "approved" && !request.createdPositionId
+      );
+      const activePendingRequests = dealRequests.filter(
+        (request) => request.status === "pending" && !request.createdPositionId
+      );
+      const voteSummary = buildProjectPoolVoteSummaryForRequests({
+        deal,
+        requests: activeApprovedRequests,
+        votes: data.projectPoolVotes ?? [],
+        asOfDate: data.asOfDate
+      });
+      const myActiveApprovedAmount = roundCurrency(
+        myRequests
+          .filter((request) => request.status === "approved" && !request.createdPositionId)
+          .reduce((sum, request) => sum + Number(request.amount ?? 0), 0)
+      );
+      const myPendingAmount = roundCurrency(
+        myRequests
+          .filter((request) => request.status === "pending" && !request.createdPositionId)
+          .reduce((sum, request) => sum + Number(request.amount ?? 0), 0)
+      );
+      const myRejectedAmount = roundCurrency(
+        myRequests
+          .filter((request) => request.status === "rejected")
+          .reduce((sum, request) => sum + Number(request.amount ?? 0), 0)
+      );
+      const fundedRequest = myRequests.find(
+        (request) => request.status === "approved" && request.createdPositionId
+      );
+      const fundedPositionId = fundedRequest?.createdPositionId ?? null;
+      const fundedGroupRequests = fundedPositionId
+        ? dealRequests.filter(
+            (request) =>
+              request.status === "approved" && request.createdPositionId === fundedPositionId
+          )
+        : [];
+      const fundedGroupTotal = roundCurrency(
+        fundedGroupRequests.reduce((sum, request) => sum + Number(request.amount ?? 0), 0)
+      );
+      const myFundedAmount = roundCurrency(
+        fundedGroupRequests
+          .filter((request) => request.participantId === participantId)
+          .reduce((sum, request) => sum + Number(request.amount ?? 0), 0)
+      );
+      const poolPosition = fundedPositionId ? positionMap.get(fundedPositionId) ?? null : null;
+      const waterfall = poolPosition ? getWaterfallForDeal(deal.id) : null;
+      const poolResult = poolPosition
+        ? getPositionResultMap(waterfall?.participantResults ?? []).get(poolPosition.id) ?? null
+        : null;
+      const fundedSharePct = fundedGroupTotal > 0 ? myFundedAmount / fundedGroupTotal : 0;
+      const activeMember = voteSummary.members.find((member) => member.participantId === participantId);
+      const activeSharePct = activeMember?.ownershipPct ?? 0;
+      const vote = voteMap.get(`${deal.id}:${participantId}`);
+      const status = fundedPositionId
+        ? "funded"
+        : myActiveApprovedAmount > 0
+          ? "voting"
+          : myPendingAmount > 0
+            ? "pending_approval"
+            : "rejected";
+      const sharePct = fundedPositionId ? fundedSharePct : activeSharePct;
+      const currentPrefEarned =
+        poolPosition && deal.status !== "sold"
+          ? roundCurrency(calculateCurrentPref(poolPosition, deal, data.asOfDate) * sharePct)
+          : 0;
+      const projectedPrefEarned = poolPosition
+        ? roundCurrency(
+            (deal.status === "sold"
+              ? poolResult?.prefEarned ?? 0
+              : calculateProjectedPref(poolPosition, deal)) * sharePct
+          )
+        : 0;
+
+      return {
+        id: `project-pool-${deal.id}`,
+        dealId: deal.id,
+        dealName: deal.name,
+        name: `${deal.name} Project Pool`,
+        location: deal.location,
+        status,
+        statusLabel:
+          status === "pending_approval"
+            ? "Pending approval"
+            : status === "funded"
+              ? "Funded"
+              : status === "voting"
+                ? "Voting"
+                : "Rejected",
+        minimumCapitalAmount: roundCurrency(deal.pooledInvestmentTarget ?? 0),
+        totalCommitted: fundedPositionId ? fundedGroupTotal : voteSummary.totalCommitted,
+        amountRemaining: fundedPositionId ? 0 : voteSummary.amountRemaining,
+        memberCount: fundedPositionId ? fundedGroupRequests.length : voteSummary.memberCount,
+        voteThreshold: voteSummary.voteThreshold,
+        voteClosesOn: voteSummary.voteClosesOn,
+        votingClosed: voteSummary.votingClosed,
+        votePassed: voteSummary.votePassed,
+        effectiveYesPct: voteSummary.effectiveYesPct,
+        myCommitmentAmount:
+          myFundedAmount || myActiveApprovedAmount || myPendingAmount || myRejectedAmount,
+        mySharePct: sharePct,
+        myVoteChoice: vote?.voteChoice ?? "",
+        canVote: myActiveApprovedAmount > 0 && !voteSummary.votingClosed && !fundedPositionId,
+        project: poolPosition
+          ? {
+              id: deal.id,
+              name: deal.name,
+              location: deal.location,
+              status: deal.status,
+              statusLabel: statusLabel(deal.status),
+              currentPhase: deal.currentPhase,
+              timelineProgress: resolveTimelineProgress(deal.status, deal.timelineProgress),
+              timeline: deal.timeline,
+              totalEquity: waterfall?.totalEquity ?? deal.totalEquity ?? 0,
+              totalDebt: waterfall?.totalDebt ?? 0,
+              totalProjectCost: waterfall?.totalProjectCost ?? deal.actualProjectCost ?? 0,
+              salePrice: waterfall?.salePrice ?? deal.salePrice ?? 0,
+              salePriceLabel: deal.status === "sold" ? "Sale price" : "Projected sale price"
+            }
+          : null,
+        myPosition: {
+          amountInvested: myFundedAmount,
+          pendingCommittedAmount: myPendingAmount + myActiveApprovedAmount,
+          sharePct,
+          currentPrefEarned,
+          projectedPrefEarned,
+          estimatedTotalReturn: roundCurrency((poolResult?.totalPayout ?? 0) * sharePct),
+          capitalReturned: roundCurrency((poolResult?.capitalReturned ?? 0) * sharePct),
+          profitReturned: roundCurrency(
+            ((poolResult?.prefEarned ?? 0) + (poolResult?.profitShare ?? 0)) * sharePct
+          ),
+          totalAmountPayout: roundCurrency((poolPosition?.distributionsToDate ?? 0) * sharePct)
+        }
+      };
+    })
+    .filter(Boolean)
+    .sort((left, right) => {
+      const statusOrder = {
+        voting: 0,
+        pending_approval: 1,
+        funded: 2,
+        rejected: 3
+      };
+      const leftOrder = statusOrder[left.status] ?? 9;
+      const rightOrder = statusOrder[right.status] ?? 9;
+
+      if (leftOrder !== rightOrder) {
+        return leftOrder - rightOrder;
       }
 
       return left.dealName.localeCompare(right.dealName);
@@ -1100,6 +1311,29 @@ function buildArchivedProjectSnapshots(data) {
         archivedPoolCommitmentsByPoolId.get(poolId).push(commitment);
       }
 
+      const archivedProjectPoolRequestsByPositionId = new Map();
+
+      for (const request of payload.userAllocationRequests ?? []) {
+        const allocationMode = archivedValue(request, "allocationMode", "allocation_mode", "");
+        const status = archivedValue(request, "status", "status", "");
+        const createdPositionId = archivedValue(
+          request,
+          "createdPositionId",
+          "created_position_id",
+          null
+        );
+
+        if (allocationMode !== "pooled" || status !== "approved" || !createdPositionId) {
+          continue;
+        }
+
+        if (!archivedProjectPoolRequestsByPositionId.has(createdPositionId)) {
+          archivedProjectPoolRequestsByPositionId.set(createdPositionId, []);
+        }
+
+        archivedProjectPoolRequestsByPositionId.get(createdPositionId).push(request);
+      }
+
       const electionMap = new Map(
         elections.map((election) => [`${election.dealId}:${election.participantId}`, election])
       );
@@ -1263,7 +1497,100 @@ function buildArchivedProjectSnapshots(data) {
             };
           });
         });
-      investorRows.push(...pooledMemberRows);
+      const projectPooledMemberRows = positions
+        .filter((position) => {
+          const participantCategory =
+            participantMap.get(position.participantId)?.category ?? position.participantCategory;
+          return participantCategory === "pool";
+        })
+        .flatMap((position) => {
+          const requests = archivedProjectPoolRequestsByPositionId.get(position.id) ?? [];
+          const normalizedRequests = requests
+            .map((request) => ({
+              participantId: archivedValue(request, "participantId", "participant_id"),
+              participantName: archivedValue(
+                request,
+                "participantName",
+                "participant_name",
+                "Investor"
+              ),
+              amount: archivedNumber(request, "amount", "amount")
+            }))
+            .filter((request) => request.participantId && request.amount > 0);
+          const totalCommitted = roundCurrency(
+            normalizedRequests.reduce((sum, request) => sum + request.amount, 0)
+          );
+
+          if (totalCommitted <= 0) {
+            return [];
+          }
+
+          const poolResult =
+            waterfall.participantResults.find((row) => row.positionId === position.id) ?? {};
+          const poolName = `${deal.name} Project Pool`;
+
+          return normalizedRequests.map((request) => {
+            const sharePct = request.amount / totalCommitted;
+            const participant = participantMap.get(request.participantId) ?? {
+              id: request.participantId,
+              name: request.participantName
+            };
+            const election = electionMap.get(`${deal.id}:${request.participantId}`) ?? null;
+            const result = {
+              positionId: `${position.id}:${request.participantId}`,
+              participantId: request.participantId,
+              classType: position.classType,
+              contributionAmount: request.amount,
+              ownershipPct: (poolResult.ownershipPct ?? 0) * sharePct,
+              capitalReturned: roundCurrency((poolResult.capitalReturned ?? 0) * sharePct),
+              prefEarned: roundCurrency((poolResult.prefEarned ?? 0) * sharePct),
+              profitShare: roundCurrency((poolResult.profitShare ?? 0) * sharePct),
+              totalPayout: roundCurrency((poolResult.totalPayout ?? 0) * sharePct)
+            };
+            const distributionPlan = buildDistributionPlan({
+              deal,
+              position: {
+                id: result.positionId,
+                dealId: deal.id,
+                participantId: request.participantId,
+                classType: position.classType,
+                contributionType: "Project pooled commitment",
+                contributionAmount: request.amount,
+                distributionsToDate: roundCurrency(position.distributionsToDate * sharePct)
+              },
+              participant,
+              result,
+              election,
+              dealMap: archivedDealMap
+            });
+            const totalAmountPayout =
+              distributionPlan.approvalStatus === "approved"
+                ? distributionPlan.approvedCashPayoutAmount
+                : roundCurrency(position.distributionsToDate * sharePct);
+
+            return {
+              participantId: request.participantId,
+              participantName: `${participant?.name ?? request.participantName} (via ${poolName})`,
+              classType: `${position.classType} pooled`,
+              totalInvested: roundCurrency(request.amount),
+              totalReturned: roundCurrency(result.prefEarned + result.profitShare),
+              totalPayout: result.totalPayout,
+              totalAmountPayout: roundCurrency(totalAmountPayout),
+              electionMode: distributionPlan.electionMode,
+              electionStatus: distributionPlan.approvalStatus,
+              reinvestedAmount: distributionPlan.approvedReinvestedAmount,
+              cashPayoutAmount: distributionPlan.approvedCashPayoutAmount,
+              rolloverTargetDealName:
+                election?.rolloverTargetDealName ?? distributionPlan.rolloverTargetDealName ?? null,
+              notes: distributionPlan.notes,
+              reviewedAt: distributionPlan.reviewedAt,
+              payoutExpectedOn: distributionPlan.payoutExpectedOn,
+              isPooledMember: true,
+              sourcePoolName: poolName
+            };
+          });
+        });
+      investorRows.push(...pooledMemberRows, ...projectPooledMemberRows);
 
       return {
         id: record.id,
@@ -2016,6 +2343,7 @@ export function buildPoolDistributionContexts(
   const positionMap = new Map(
     data.positions.map((position) => [`${position.dealId}:${position.participantId}`, position])
   );
+  const positionById = new Map(data.positions.map((position) => [position.id, position]));
   const groupedContexts = new Map();
   const dealWaterfallCache = new Map();
 
@@ -2114,6 +2442,95 @@ export function buildPoolDistributionContexts(
     }
   }
 
+  const projectPoolRequestsByPositionId = new Map();
+
+  for (const request of data.userAllocationRequests ?? []) {
+    if (
+      request.allocationMode !== "pooled" ||
+      request.status !== "approved" ||
+      !request.createdPositionId
+    ) {
+      continue;
+    }
+
+    if (!projectPoolRequestsByPositionId.has(request.createdPositionId)) {
+      projectPoolRequestsByPositionId.set(request.createdPositionId, []);
+    }
+
+    projectPoolRequestsByPositionId.get(request.createdPositionId).push(request);
+  }
+
+  for (const [positionId, requests] of projectPoolRequestsByPositionId) {
+    const poolPosition = positionById.get(positionId);
+
+    if (!poolPosition) {
+      continue;
+    }
+
+    if (targetDealId && poolPosition.dealId !== targetDealId) {
+      continue;
+    }
+
+    const deal = dealMap.get(poolPosition.dealId);
+
+    if (!deal || deal.status !== "sold") {
+      continue;
+    }
+
+    const totalCommitted = roundCurrency(
+      requests.reduce((sum, request) => sum + Number(request.amount ?? 0), 0)
+    );
+
+    if (totalCommitted <= 0) {
+      continue;
+    }
+
+    const dealWaterfall = getWaterfallContext(poolPosition.dealId);
+    const poolResult =
+      getPositionResultMap(dealWaterfall?.waterfall?.participantResults ?? []).get(poolPosition.id) ??
+      null;
+
+    if (!poolResult || poolResult.totalPayout <= 0) {
+      continue;
+    }
+
+    for (const request of requests) {
+      if (targetParticipantId && request.participantId !== targetParticipantId) {
+        continue;
+      }
+
+      const memberSharePct = Number(request.amount ?? 0) / totalCommitted;
+      const key = `${poolPosition.dealId}:${request.participantId}`;
+
+      if (!groupedContexts.has(key)) {
+        const participant = participantMap.get(request.participantId);
+
+        groupedContexts.set(key, {
+          dealId: poolPosition.dealId,
+          dealName: deal.name,
+          participantId: request.participantId,
+          participantName: participant?.name ?? "Investor",
+          participantEmail: userMapByParticipantId.get(request.participantId)?.email ?? "",
+          payoutInstructions: buildPayoutInstructionPayload(participant),
+          sourcePoolNames: new Set()
+        });
+      }
+
+      const context = groupedContexts.get(key);
+      context.sourcePoolNames.add(`${deal.name} Project Pool`);
+      context.totalPayout = roundCurrency(
+        (context.totalPayout ?? 0) + poolResult.totalPayout * memberSharePct
+      );
+      context.capitalReturned = roundCurrency(
+        (context.capitalReturned ?? 0) + poolResult.capitalReturned * memberSharePct
+      );
+      context.profitReturned = roundCurrency(
+        (context.profitReturned ?? 0) +
+          (poolResult.prefEarned + poolResult.profitShare) * memberSharePct
+      );
+    }
+  }
+
   return [...groupedContexts.values()]
     .map((context) => {
       const deal = dealMap.get(context.dealId);
@@ -2172,6 +2589,7 @@ export function buildInvestorDashboard(user, data = seedData) {
   const pooledDistributionContexts = buildPoolDistributionContexts(data, {
     participantId: user.participantId
   });
+  const projectPoolGroups = buildParticipantProjectPoolViews(data, user.participantId);
   const governanceIssues = buildGovernanceIssues(data, user.participantId);
   const issuesByDeal = new Map();
   const reinvestmentTargets = data.deals
@@ -2340,26 +2758,47 @@ export function buildInvestorDashboard(user, data = seedData) {
       : [];
 
   const totalInvested = roundCurrency(
-    visiblePositions.reduce((sum, position) => sum + position.contributionAmount, 0)
+    visiblePositions.reduce((sum, position) => sum + position.contributionAmount, 0) +
+      projectPoolGroups.reduce(
+        (sum, projectPool) => sum + Number(projectPool.myPosition.amountInvested ?? 0),
+        0
+      )
   );
   const totalReturned = roundCurrency(
     projects
       .filter((project) => project.status === "sold")
-      .reduce((sum, project) => sum + project.personalPosition.profitEarned, 0)
+      .reduce((sum, project) => sum + project.personalPosition.profitEarned, 0) +
+      projectPoolGroups
+        .filter((projectPool) => projectPool.project?.status === "sold")
+        .reduce((sum, projectPool) => sum + projectPool.myPosition.profitReturned, 0)
   );
-  const activeInvestments = projects.filter((project) => project.status !== "sold").length;
+  const activeInvestments =
+    projects.filter((project) => project.status !== "sold").length +
+    projectPoolGroups.filter(
+      (projectPool) => projectPool.project && projectPool.project.status !== "sold"
+    ).length;
   const currentPrefEarned = roundCurrency(
     projects
       .filter((project) => project.status !== "sold")
-      .reduce((sum, project) => sum + project.personalPosition.prefEarned, 0)
+      .reduce((sum, project) => sum + project.personalPosition.prefEarned, 0) +
+      projectPoolGroups
+        .filter((projectPool) => projectPool.project?.status !== "sold")
+        .reduce((sum, projectPool) => sum + projectPool.myPosition.currentPrefEarned, 0)
   );
   const projectedPrefEarned = roundCurrency(
     projects
       .filter((project) => project.status !== "sold")
-      .reduce((sum, project) => sum + project.personalPosition.projectedPrefEarned, 0)
+      .reduce((sum, project) => sum + project.personalPosition.projectedPrefEarned, 0) +
+      projectPoolGroups
+        .filter((projectPool) => projectPool.project?.status !== "sold")
+        .reduce((sum, projectPool) => sum + projectPool.myPosition.projectedPrefEarned, 0)
   );
   const totalAmountPayout = roundCurrency(
-    visiblePositions.reduce((sum, position) => sum + (position.distributionsToDate ?? 0), 0)
+    visiblePositions.reduce((sum, position) => sum + (position.distributionsToDate ?? 0), 0) +
+      projectPoolGroups.reduce(
+        (sum, projectPool) => sum + Number(projectPool.myPosition.totalAmountPayout ?? 0),
+        0
+      )
   );
   const pooledDistributionProjects = pooledDistributionContexts.map((context) => ({
     id: context.dealId,
@@ -2420,6 +2859,7 @@ export function buildInvestorDashboard(user, data = seedData) {
     allocationTargets,
     pooledDistributionProjects,
     archivedProjects,
+    projectPoolGroups,
     projects,
     withdrawalRequests: withdrawalProjects
   };
@@ -3111,9 +3551,13 @@ export function buildManagerDashboard(user, data = seedData) {
       totalTrackedEquity,
       projectedSponsorPromote,
       archivedDeals: archivedProjects.length,
-      totalInvestorPools: investorPools.length,
+      totalInvestorPools: investorPools.length + projectPooledRequests.length,
       totalPooledCapital: roundCurrency(
-        investorPools.reduce((sum, investmentPool) => sum + investmentPool.totalCommitted, 0)
+        investorPools.reduce((sum, investmentPool) => sum + investmentPool.totalCommitted, 0) +
+          projectPooledRequests.reduce(
+            (sum, projectPool) => sum + Number(projectPool.approvedAmount ?? 0),
+            0
+          )
       )
     },
     deals,
