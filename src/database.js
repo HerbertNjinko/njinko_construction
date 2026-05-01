@@ -734,7 +734,9 @@ async function getEligiblePoolTargetDeal(dealId, executor = pool) {
         investment_close_on AS "investmentCloseOn",
         direct_investment_minimum AS "directInvestmentMinimum",
         pooled_investment_allowed AS "pooledInvestmentAllowed",
-        pooled_investment_target AS "pooledInvestmentTarget"
+        pooled_investment_target AS "pooledInvestmentTarget",
+        pooled_vote_threshold AS "pooledVoteThreshold",
+        pooled_vote_closes_on AS "pooledVoteClosesOn"
       FROM deals
       WHERE id = $1
     `,
@@ -1623,6 +1625,8 @@ async function insertSeedData(executor) {
           direct_investment_minimum,
           pooled_investment_allowed,
           pooled_investment_target,
+          pooled_vote_threshold,
+          pooled_vote_closes_on,
           projected_exit_on,
           actual_exit_on,
           timeline_progress,
@@ -1655,7 +1659,9 @@ async function insertSeedData(executor) {
           $23,
           $24,
           $25,
-          $26
+          $26,
+          $27,
+          $28
         )
       `,
       [
@@ -1680,6 +1686,8 @@ async function insertSeedData(executor) {
         deal.directInvestmentMinimum ?? 0,
         deal.pooledInvestmentAllowed === false ? 0 : 1,
         deal.pooledInvestmentTarget ?? 0,
+        deal.pooledVoteThreshold ?? 0.5,
+        deal.pooledVoteClosesOn ?? deal.investmentCloseOn ?? null,
         deal.projectedExitOn ?? null,
         deal.actualExitOn ?? null,
         deal.timelineProgress,
@@ -2393,6 +2401,8 @@ export async function getAppDataSnapshot({ skipAutomation = false } = {}) {
         direct_investment_minimum AS "directInvestmentMinimum",
         pooled_investment_allowed AS "pooledInvestmentAllowed",
         pooled_investment_target AS "pooledInvestmentTarget",
+        pooled_vote_threshold AS "pooledVoteThreshold",
+        pooled_vote_closes_on AS "pooledVoteClosesOn",
         projected_exit_on AS "projectedExitOn",
         actual_exit_on AS "actualExitOn",
         timeline_progress AS "timelineProgress",
@@ -2420,6 +2430,8 @@ export async function getAppDataSnapshot({ skipAutomation = false } = {}) {
     directInvestmentMinimum: Number(row.directInvestmentMinimum ?? 0),
     pooledInvestmentAllowed: Boolean(Number(row.pooledInvestmentAllowed ?? 0)),
     pooledInvestmentTarget: Number(row.pooledInvestmentTarget ?? 0),
+    pooledVoteThreshold: Number(row.pooledVoteThreshold ?? 0.5),
+    pooledVoteClosesOn: row.pooledVoteClosesOn ?? null,
     timelineProgress: Number(row.timelineProgress),
     promoteTiers: [],
     timeline: [],
@@ -2584,6 +2596,19 @@ export async function getAppDataSnapshot({ skipAutomation = false } = {}) {
         created_at AS "createdAt",
         updated_at AS "updatedAt"
       FROM investor_pool_votes
+      ORDER BY updated_at DESC, id
+    `
+  );
+  const projectPoolVotes = await queryAll(
+    `
+      SELECT
+        id,
+        deal_id AS "dealId",
+        participant_id AS "participantId",
+        vote_choice AS "voteChoice",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM project_pool_votes
       ORDER BY updated_at DESC, id
     `
   );
@@ -2819,6 +2844,7 @@ export async function getAppDataSnapshot({ skipAutomation = false } = {}) {
     investorPools,
     investorPoolCommitments,
     investorPoolVotes,
+    projectPoolVotes,
     contractors,
     distributionElections,
     earlyWithdrawalRequests,
@@ -4650,6 +4676,7 @@ function normalizeDealInput(input) {
   const directInvestmentMinimum = Number(input.directInvestmentMinimum ?? 0);
   const pooledInvestmentAllowed = normalizeBooleanInput(input.pooledInvestmentAllowed ?? true);
   const pooledInvestmentTarget = Number(input.pooledInvestmentTarget ?? 0);
+  const pooledVoteThreshold = Number(input.pooledVoteThreshold ?? 0.5);
   const timelineProgress = Number(input.timelineProgress);
 
   if (!name || !location || !currentPhase || !fundedOn || !investmentCloseOn) {
@@ -4715,9 +4742,17 @@ function normalizeDealInput(input) {
     throw new Error("Pooled investment target must be zero or greater.");
   }
 
+  if (!Number.isFinite(pooledVoteThreshold) || pooledVoteThreshold <= 0 || pooledVoteThreshold > 1) {
+    throw new Error("Pooled vote threshold must be greater than 0 and no more than 1.");
+  }
+
   if (!Number.isFinite(timelineProgress) || timelineProgress < 0 || timelineProgress > 100) {
     throw new Error("Timeline progress must be between 0 and 100.");
   }
+
+  const pooledVoteClosesOn =
+    normalizeOptionalDateInput(input.pooledVoteClosesOn ?? investmentCloseOn, "Pooled vote close date") ??
+    investmentCloseOn;
 
   return {
     name,
@@ -4743,6 +4778,8 @@ function normalizeDealInput(input) {
     directInvestmentMinimum: roundNumber(directInvestmentMinimum),
     pooledInvestmentAllowed,
     pooledInvestmentTarget: roundNumber(pooledInvestmentTarget),
+    pooledVoteThreshold: roundNumber(pooledVoteThreshold),
+    pooledVoteClosesOn,
     timelineProgress: status === "sold" ? 100 : Math.round(timelineProgress)
   };
 }
@@ -5438,6 +5475,8 @@ export async function createDeal(input) {
           direct_investment_minimum,
           pooled_investment_allowed,
           pooled_investment_target,
+          pooled_vote_threshold,
+          pooled_vote_closes_on,
           projected_exit_on,
           actual_exit_on,
           timeline_progress,
@@ -5470,7 +5509,9 @@ export async function createDeal(input) {
           $23,
           $24,
           $25,
-          $26
+          $26,
+          $27,
+          $28
         )
       `,
       [
@@ -5495,6 +5536,8 @@ export async function createDeal(input) {
         deal.directInvestmentMinimum,
         deal.pooledInvestmentAllowed ? 1 : 0,
         deal.pooledInvestmentTarget,
+        deal.pooledVoteThreshold,
+        deal.pooledVoteClosesOn,
         deal.projectedExitOn,
         deal.actualExitOn,
         deal.timelineProgress,
@@ -5651,11 +5694,13 @@ export async function updateDeal(dealId, input) {
           direct_investment_minimum = $17,
           pooled_investment_allowed = $18,
           pooled_investment_target = $19,
-          projected_exit_on = $20,
-          actual_exit_on = $21,
-          timeline_progress = $22,
-          updated_at = $23
-        WHERE id = $24
+          pooled_vote_threshold = $20,
+          pooled_vote_closes_on = $21,
+          projected_exit_on = $22,
+          actual_exit_on = $23,
+          timeline_progress = $24,
+          updated_at = $25
+        WHERE id = $26
       `,
       [
         deal.name,
@@ -5677,6 +5722,8 @@ export async function updateDeal(dealId, input) {
         deal.directInvestmentMinimum,
         deal.pooledInvestmentAllowed ? 1 : 0,
         deal.pooledInvestmentTarget,
+        deal.pooledVoteThreshold,
+        deal.pooledVoteClosesOn,
         deal.projectedExitOn,
         deal.actualExitOn,
         deal.timelineProgress,
@@ -6544,7 +6591,9 @@ async function getOpenDealForUserAllocation(dealId, executor = pool) {
         investment_close_on AS "investmentCloseOn",
         direct_investment_minimum AS "directInvestmentMinimum",
         pooled_investment_allowed AS "pooledInvestmentAllowed",
-        pooled_investment_target AS "pooledInvestmentTarget"
+        pooled_investment_target AS "pooledInvestmentTarget",
+        pooled_vote_threshold AS "pooledVoteThreshold",
+        pooled_vote_closes_on AS "pooledVoteClosesOn"
       FROM deals
       WHERE id = $1
     `,
@@ -6612,6 +6661,185 @@ function resolveAllocationModeForRequest({ category, amount, deal }) {
     `${deal.name} requires at least ${formatCurrencyForError(
       directMinimum
     )} for a direct investor allocation, and pooled investment is not enabled for this project.`
+  );
+}
+
+function normalizeProjectPoolVoteChoice(value) {
+  const voteChoice = String(value ?? "").trim().toLowerCase();
+
+  if (!["yes", "no"].includes(voteChoice)) {
+    throw new Error("Project pool vote must be yes or no.");
+  }
+
+  return voteChoice;
+}
+
+async function getProjectPoolEligibleRequests(dealId, executor = pool, { lock = false } = {}) {
+  return queryAll(
+    `
+      SELECT
+        user_allocation_requests.id,
+        user_allocation_requests.user_id AS "userId",
+        user_allocation_requests.participant_id AS "participantId",
+        participants.name AS "participantName",
+        users.email AS "participantEmail",
+        user_allocation_requests.amount,
+        user_allocation_requests.status,
+        user_allocation_requests.submitted_at AS "submittedAt",
+        user_allocation_requests.created_at AS "createdAt"
+      FROM user_allocation_requests
+      JOIN participants ON participants.id = user_allocation_requests.participant_id
+      JOIN users ON users.id = user_allocation_requests.user_id
+      WHERE user_allocation_requests.deal_id = $1
+        AND user_allocation_requests.allocation_mode = 'pooled'
+        AND user_allocation_requests.status IN ('pending', 'approved')
+        AND user_allocation_requests.created_position_id IS NULL
+      ORDER BY user_allocation_requests.created_at, user_allocation_requests.id
+      ${lock ? "FOR UPDATE OF user_allocation_requests" : ""}
+    `,
+    [dealId],
+    executor
+  );
+}
+
+async function getProjectPoolVoteRows(dealId, executor = pool) {
+  return queryAll(
+    `
+      SELECT
+        id,
+        deal_id AS "dealId",
+        participant_id AS "participantId",
+        vote_choice AS "voteChoice",
+        created_at AS "createdAt",
+        updated_at AS "updatedAt"
+      FROM project_pool_votes
+      WHERE deal_id = $1
+      ORDER BY updated_at DESC, id
+    `,
+    [dealId],
+    executor
+  );
+}
+
+function buildProjectPoolVoteSummary({ deal, requests, votes, asOfDate = todayStamp() }) {
+  const participantWeights = new Map();
+  const participantNames = new Map();
+  const participantEmails = new Map();
+
+  for (const request of requests ?? []) {
+    const participantId = request.participantId;
+    participantWeights.set(
+      participantId,
+      roundNumber((participantWeights.get(participantId) ?? 0) + Number(request.amount ?? 0))
+    );
+    participantNames.set(participantId, request.participantName ?? "Investor");
+    participantEmails.set(participantId, request.participantEmail ?? "");
+  }
+
+  const totalCommitted = roundNumber(
+    [...participantWeights.values()].reduce((sum, amount) => sum + Number(amount ?? 0), 0)
+  );
+  const eligibleParticipantIds = new Set(participantWeights.keys());
+  const voteByParticipant = new Map(
+    (votes ?? [])
+      .filter((vote) => eligibleParticipantIds.has(vote.participantId))
+      .map((vote) => [vote.participantId, vote])
+  );
+  const voteClosesOn = deal.pooledVoteClosesOn ?? deal.investmentCloseOn ?? null;
+  const votingClosed = isPoolVotingClosed(voteClosesOn, asOfDate);
+  const voteThreshold = roundNumber(Number(deal.pooledVoteThreshold ?? 0.5));
+  let yesWeight = 0;
+  let noWeight = 0;
+  let abstainWeight = 0;
+
+  for (const [participantId, amount] of participantWeights) {
+    const vote = voteByParticipant.get(participantId);
+
+    if (vote?.voteChoice === "yes") {
+      yesWeight += amount;
+    } else if (vote?.voteChoice === "no") {
+      noWeight += amount;
+    } else {
+      abstainWeight += amount;
+    }
+  }
+
+  yesWeight = roundNumber(yesWeight);
+  noWeight = roundNumber(noWeight);
+  abstainWeight = roundNumber(abstainWeight);
+
+  const effectiveYesWeight = roundNumber(yesWeight + (votingClosed ? abstainWeight : 0));
+  const yesPct = totalCommitted > 0 ? roundNumber(yesWeight / totalCommitted) : 0;
+  const noPct = totalCommitted > 0 ? roundNumber(noWeight / totalCommitted) : 0;
+  const abstainPct = totalCommitted > 0 ? roundNumber(abstainWeight / totalCommitted) : 0;
+  const effectiveYesPct =
+    totalCommitted > 0 ? roundNumber(effectiveYesWeight / totalCommitted) : 0;
+  const pooledInvestmentTarget = roundNumber(Number(deal.pooledInvestmentTarget ?? 0));
+  const targetMet = pooledInvestmentTarget <= 0 || totalCommitted >= pooledInvestmentTarget;
+  const votePassed = totalCommitted > 0 && effectiveYesPct >= voteThreshold;
+
+  return {
+    voteThreshold,
+    voteClosesOn,
+    votingClosed,
+    memberCount: participantWeights.size,
+    voteCount: voteByParticipant.size,
+    totalCommitted,
+    pooledInvestmentTarget,
+    amountRemaining: roundNumber(Math.max(pooledInvestmentTarget - totalCommitted, 0)),
+    yesWeight,
+    noWeight,
+    abstainWeight,
+    effectiveYesWeight,
+    yesPct,
+    noPct,
+    abstainPct,
+    effectiveYesPct,
+    targetMet,
+    votePassed,
+    canFund: targetMet && votePassed,
+    members: [...participantWeights.entries()].map(([participantId, amount]) => {
+      const vote = voteByParticipant.get(participantId);
+
+      return {
+        participantId,
+        participantName: participantNames.get(participantId) ?? "Investor",
+        participantEmail: participantEmails.get(participantId) ?? "",
+        amount,
+        ownershipPct: totalCommitted > 0 ? roundNumber(amount / totalCommitted) : 0,
+        voteChoice: vote?.voteChoice ?? (votingClosed ? "yes" : ""),
+        voteCountedByDeadline: !vote && votingClosed,
+        votedAt: vote?.updatedAt ?? null
+      };
+    })
+  };
+}
+
+async function notifyManagersAboutProjectPoolVote({ deal, voter, voteChoice, voteSummary }) {
+  const managerRecipients = await getActiveManagerRecipients();
+
+  await Promise.all(
+    managerRecipients.map(async (managerRecipient) => {
+      try {
+        return await sendPoolVoteAlertNotification({
+          userId: managerRecipient.userId,
+          participantId: managerRecipient.participantId,
+          managerName: managerRecipient.fullName,
+          email: managerRecipient.email,
+          voterName: voter.name,
+          voterEmail: voter.email,
+          poolName: `${deal.name} project pool`,
+          dealName: `${deal.name} (${voteChoice.toUpperCase()} vote)`,
+          voteCount: voteSummary.voteCount,
+          memberCount: voteSummary.memberCount,
+          totalCommitted: voteSummary.totalCommitted,
+          readyToFund: voteSummary.canFund,
+          submittedAt: nowTimestamp()
+        });
+      } catch {
+        return null;
+      }
+    })
   );
 }
 
@@ -6786,7 +7014,11 @@ export async function reviewAllocationRequest(requestId, input, actingUserId) {
   if (decision === "approved") {
     await getOpenDealForUserAllocation(existing.dealId);
 
-    if (existing.allocationMode !== "pooled") {
+    if (existing.allocationMode === "pooled") {
+      throw new Error(
+        "Pooled requests are approved only when the project pool is funded after the weighted investor vote passes."
+      );
+    } else {
       allocation = await createDealAllocation({
         allocationRequestId: existing.id,
         participantId: existing.participantId,
@@ -6836,6 +7068,87 @@ export async function reviewAllocationRequest(requestId, input, actingUserId) {
   };
 }
 
+export async function castProjectPoolVote(dealId, userId, voteChoiceInput) {
+  const normalizedDealId = String(dealId ?? "").trim();
+  const normalizedUserId = String(userId ?? "").trim();
+  const voteChoice = normalizeProjectPoolVoteChoice(voteChoiceInput);
+  const user = await getUserAccountById(normalizedUserId);
+
+  if (!user || user.role === "manager") {
+    throw new Error("Only investors with pooled requests can vote on project pool funding.");
+  }
+
+  if (!["investor", "pool_member"].includes(user.category)) {
+    throw new Error("Only investors with pooled requests can vote on project pool funding.");
+  }
+
+  const deal = await getOpenDealForUserAllocation(normalizedDealId);
+
+  if (!Boolean(Number(deal.pooledInvestmentAllowed ?? 0))) {
+    throw new Error("Pooled investment is not enabled for this project.");
+  }
+
+  const requests = await getProjectPoolEligibleRequests(normalizedDealId);
+  const participantAmount = roundNumber(
+    requests
+      .filter((request) => request.participantId === user.participantId)
+      .reduce((sum, request) => sum + Number(request.amount ?? 0), 0)
+  );
+
+  if (participantAmount <= 0) {
+    throw new Error("You must have a pending pooled request for this project before voting.");
+  }
+
+  const voteClosesOn = deal.pooledVoteClosesOn ?? deal.investmentCloseOn ?? null;
+
+  if (isPoolVotingClosed(voteClosesOn)) {
+    throw new Error("Voting for this project pool has closed.");
+  }
+
+  const timestamp = nowTimestamp();
+
+  await pool.query(
+    `
+      INSERT INTO project_pool_votes (
+        id,
+        deal_id,
+        participant_id,
+        vote_choice,
+        created_at,
+        updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $5)
+      ON CONFLICT (deal_id, participant_id) DO UPDATE
+      SET
+        vote_choice = EXCLUDED.vote_choice,
+        updated_at = EXCLUDED.updated_at
+    `,
+    [createId("project-pool-vote"), normalizedDealId, user.participantId, voteChoice, timestamp]
+  );
+
+  const voteSummary = buildProjectPoolVoteSummary({
+    deal,
+    requests,
+    votes: await getProjectPoolVoteRows(normalizedDealId)
+  });
+
+  await notifyManagersAboutProjectPoolVote({
+    deal,
+    voter: user,
+    voteChoice,
+    voteSummary
+  });
+
+  return {
+    vote: {
+      dealId: normalizedDealId,
+      participantId: user.participantId,
+      voteChoice,
+      voteSummary
+    }
+  };
+}
+
 export async function fundProjectPooledAllocationRequests(dealId, actingUserId) {
   const normalizedDealId = String(dealId ?? "").trim();
 
@@ -6856,39 +7169,38 @@ export async function fundProjectPooledAllocationRequests(dealId, actingUserId) 
   let fundedRequestCount = 0;
 
   await withTransaction(async (client) => {
-    const requests = await queryAll(
-      `
-        SELECT id, amount
-        FROM user_allocation_requests
-        WHERE deal_id = $1
-          AND allocation_mode = 'pooled'
-          AND status = 'approved'
-          AND created_position_id IS NULL
-        ORDER BY created_at, id
-        FOR UPDATE
-      `,
-      [normalizedDealId],
-      client
-    );
+    const requests = await getProjectPoolEligibleRequests(normalizedDealId, client, {
+      lock: true
+    });
 
     if (!requests.length) {
-      throw new Error("There are no approved pooled requests waiting to be funded for this project.");
+      throw new Error("There are no pooled requests waiting to be funded for this project.");
     }
 
-    fundedAmount = roundNumber(
-      requests.reduce((sum, request) => sum + Number(request.amount ?? 0), 0)
-    );
+    const voteSummary = buildProjectPoolVoteSummary({
+      deal,
+      requests,
+      votes: await getProjectPoolVoteRows(normalizedDealId, client)
+    });
+
+    fundedAmount = voteSummary.totalCommitted;
     fundedRequestCount = requests.length;
 
-    const pooledTarget = roundNumber(Number(deal.pooledInvestmentTarget ?? 0));
-
-    if (pooledTarget > 0 && fundedAmount < pooledTarget) {
+    if (!voteSummary.targetMet) {
       throw new Error(
-        `Approved pooled requests total ${formatCurrencyForError(
+        `Pooled requests total ${formatCurrencyForError(
           fundedAmount
         )}. This project requires ${formatCurrencyForError(
-          pooledTarget
+          voteSummary.pooledInvestmentTarget
         )} before the pooled group can be funded.`
+      );
+    }
+
+    if (!voteSummary.votePassed) {
+      throw new Error(
+        `This project pool has not passed its weighted investor vote. Current effective yes vote is ${(
+          voteSummary.effectiveYesPct * 100
+        ).toFixed(1)}%; required threshold is ${(voteSummary.voteThreshold * 100).toFixed(1)}%.`
       );
     }
 
@@ -6957,6 +7269,7 @@ export async function fundProjectPooledAllocationRequests(dealId, actingUserId) 
       `
         UPDATE user_allocation_requests
         SET
+          status = 'approved',
           created_position_id = $1,
           reviewed_by_user_id = COALESCE(reviewed_by_user_id, $2),
           reviewed_at = COALESCE(reviewed_at, $3),

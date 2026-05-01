@@ -25,6 +25,7 @@ const REQUIRED_TABLES = [
   "investor_pools",
   "investor_pool_commitments",
   "investor_pool_votes",
+  "project_pool_votes",
   "archived_records",
   "user_legal_acknowledgements",
   "user_capital_deposits",

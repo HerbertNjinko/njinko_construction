@@ -495,6 +495,8 @@ function buildAllocationTargets(data, asOfDate = String(data.asOfDate ?? new Dat
       directInvestmentMinimum: roundCurrency(deal.directInvestmentMinimum ?? 0),
       pooledInvestmentAllowed: Boolean(Number(deal.pooledInvestmentAllowed ?? 0)),
       pooledInvestmentTarget: roundCurrency(deal.pooledInvestmentTarget ?? 0),
+      pooledVoteThreshold: roundCurrency(deal.pooledVoteThreshold ?? 0.5),
+      pooledVoteClosesOn: deal.pooledVoteClosesOn ?? null,
       status: deal.status,
       statusLabel: statusLabel(deal.status)
     }))
@@ -502,9 +504,149 @@ function buildAllocationTargets(data, asOfDate = String(data.asOfDate ?? new Dat
 }
 
 function buildParticipantAllocationRequests(data, participantId) {
+  const dealMap = new Map((data.deals ?? []).map((deal) => [deal.id, deal]));
+  const voteMap = new Map(
+    (data.projectPoolVotes ?? []).map((vote) => [`${vote.dealId}:${vote.participantId}`, vote])
+  );
+  const requestsByDeal = new Map();
+
+  for (const request of data.userAllocationRequests ?? []) {
+    if (request.allocationMode !== "pooled" || request.createdPositionId) {
+      continue;
+    }
+
+    if (!["pending", "approved"].includes(request.status)) {
+      continue;
+    }
+
+    if (!requestsByDeal.has(request.dealId)) {
+      requestsByDeal.set(request.dealId, []);
+    }
+
+    requestsByDeal.get(request.dealId).push(request);
+  }
+
   return (data.userAllocationRequests ?? [])
     .filter((request) => request.participantId === participantId)
+    .map((request) => {
+      if (request.allocationMode !== "pooled" || request.createdPositionId) {
+        return request;
+      }
+
+      const deal = dealMap.get(request.dealId);
+
+      if (!deal) {
+        return request;
+      }
+
+      const voteSummary = buildProjectPoolVoteSummaryForRequests({
+        deal,
+        requests: requestsByDeal.get(request.dealId) ?? [],
+        votes: data.projectPoolVotes ?? [],
+        asOfDate: data.asOfDate
+      });
+      const vote = voteMap.get(`${request.dealId}:${participantId}`);
+
+      return {
+        ...request,
+        poolVoteChoice: vote?.voteChoice ?? "",
+        poolVoteClosesOn: voteSummary.voteClosesOn,
+        poolVoteThreshold: voteSummary.voteThreshold,
+        poolVotePassed: voteSummary.votePassed,
+        poolVoteEffectiveYesPct: voteSummary.effectiveYesPct,
+        poolVoteCanFund: voteSummary.canFund,
+        poolVoteCanVote:
+          ["pending", "approved"].includes(request.status) &&
+          !voteSummary.votingClosed &&
+          !request.createdPositionId,
+        poolVoteVotingClosed: voteSummary.votingClosed
+      };
+    })
     .sort((left, right) => String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? "")));
+}
+
+function buildProjectPoolVoteSummaryForRequests({ deal, requests, votes, asOfDate }) {
+  const weights = new Map();
+  const effectiveAsOfDate = String(asOfDate ?? new Date().toISOString().slice(0, 10));
+
+  for (const request of requests ?? []) {
+    weights.set(
+      request.participantId,
+      roundCurrency((weights.get(request.participantId) ?? 0) + Number(request.amount ?? 0))
+    );
+  }
+
+  const totalCommitted = roundCurrency(
+    [...weights.values()].reduce((sum, amount) => sum + amount, 0)
+  );
+  const eligibleParticipantIds = new Set(weights.keys());
+  const voteMap = new Map(
+    (votes ?? [])
+      .filter((vote) => vote.dealId === deal.id && eligibleParticipantIds.has(vote.participantId))
+      .map((vote) => [vote.participantId, vote])
+  );
+  const voteClosesOn = deal.pooledVoteClosesOn ?? deal.investmentCloseOn ?? null;
+  const votingClosed = isDateClosed(voteClosesOn, effectiveAsOfDate);
+  const voteThreshold = roundCurrency(Number(deal.pooledVoteThreshold ?? 0.5));
+  let yesWeight = 0;
+  let noWeight = 0;
+  let abstainWeight = 0;
+
+  for (const [participantId, amount] of weights) {
+    const vote = voteMap.get(participantId);
+
+    if (vote?.voteChoice === "yes") {
+      yesWeight += amount;
+    } else if (vote?.voteChoice === "no") {
+      noWeight += amount;
+    } else {
+      abstainWeight += amount;
+    }
+  }
+
+  yesWeight = roundCurrency(yesWeight);
+  noWeight = roundCurrency(noWeight);
+  abstainWeight = roundCurrency(abstainWeight);
+
+  const effectiveYesWeight = roundCurrency(yesWeight + (votingClosed ? abstainWeight : 0));
+  const effectiveYesPct = totalCommitted > 0 ? roundCurrency(effectiveYesWeight / totalCommitted) : 0;
+  const pooledInvestmentTarget = roundCurrency(deal.pooledInvestmentTarget ?? 0);
+  const targetMet = pooledInvestmentTarget <= 0 || totalCommitted >= pooledInvestmentTarget;
+  const votePassed = totalCommitted > 0 && effectiveYesPct >= voteThreshold;
+
+  return {
+    voteClosesOn,
+    votingClosed,
+    voteThreshold,
+    memberCount: weights.size,
+    voteCount: voteMap.size,
+    totalCommitted,
+    pooledInvestmentTarget,
+    amountRemaining: roundCurrency(Math.max(pooledInvestmentTarget - totalCommitted, 0)),
+    yesWeight,
+    noWeight,
+    abstainWeight,
+    effectiveYesWeight,
+    yesPct: totalCommitted > 0 ? roundCurrency(yesWeight / totalCommitted) : 0,
+    noPct: totalCommitted > 0 ? roundCurrency(noWeight / totalCommitted) : 0,
+    abstainPct: totalCommitted > 0 ? roundCurrency(abstainWeight / totalCommitted) : 0,
+    effectiveYesPct,
+    targetMet,
+    votePassed,
+    canFund: targetMet && votePassed,
+    members: [...weights.entries()].map(([participantId, amount]) => {
+      const vote = voteMap.get(participantId);
+
+      return {
+        participantId,
+        amount,
+        ownershipPct: totalCommitted > 0 ? roundCurrency(amount / totalCommitted) : 0,
+        voteChoice: vote?.voteChoice ?? (votingClosed ? "yes" : ""),
+        voteCountedByDeadline: !vote && votingClosed,
+        votedAt: vote?.updatedAt ?? null
+      };
+    })
+  };
 }
 
 function buildProjectPooledRequestBuckets(data, asOfDate) {
@@ -515,37 +657,52 @@ function buildProjectPooledRequestBuckets(data, asOfDate) {
     .filter((deal) => deal.status !== "sold" && !isDateClosed(deal.investmentCloseOn, asOfDate))
     .filter((deal) => Boolean(Number(deal.pooledInvestmentAllowed ?? 0)))
     .map((deal) => {
-      const approvedRequests = (data.userAllocationRequests ?? [])
+      const pooledRequests = (data.userAllocationRequests ?? [])
         .filter(
           (request) =>
             request.dealId === deal.id &&
             request.allocationMode === "pooled" &&
-            request.status === "approved" &&
+            ["pending", "approved"].includes(request.status) &&
             !request.createdPositionId
         )
         .sort((left, right) =>
           String(left.createdAt ?? "").localeCompare(String(right.createdAt ?? ""))
         );
-      const approvedAmount = roundCurrency(
-        approvedRequests.reduce((sum, request) => sum + Number(request.amount ?? 0), 0)
-      );
-      const pooledInvestmentTarget = roundCurrency(deal.pooledInvestmentTarget ?? 0);
+      const voteSummary = buildProjectPoolVoteSummaryForRequests({
+        deal,
+        requests: pooledRequests,
+        votes: data.projectPoolVotes ?? [],
+        asOfDate
+      });
 
       return {
         dealId: deal.id,
         dealName: deal.name,
         location: deal.location,
         investmentCloseOn: deal.investmentCloseOn ?? null,
-        pooledInvestmentTarget,
-        approvedAmount,
-        amountRemaining: roundCurrency(Math.max(pooledInvestmentTarget - approvedAmount, 0)),
-        requestCount: approvedRequests.length,
-        canFund:
-          approvedRequests.length > 0 &&
-          (pooledInvestmentTarget <= 0 || approvedAmount >= pooledInvestmentTarget),
-        requests: approvedRequests.map((request) => {
+        pooledInvestmentTarget: voteSummary.pooledInvestmentTarget,
+        approvedAmount: voteSummary.totalCommitted,
+        committedAmount: voteSummary.totalCommitted,
+        amountRemaining: voteSummary.amountRemaining,
+        requestCount: pooledRequests.length,
+        memberCount: voteSummary.memberCount,
+        voteCount: voteSummary.voteCount,
+        voteThreshold: voteSummary.voteThreshold,
+        voteClosesOn: voteSummary.voteClosesOn,
+        votingClosed: voteSummary.votingClosed,
+        yesWeight: voteSummary.yesWeight,
+        noWeight: voteSummary.noWeight,
+        abstainWeight: voteSummary.abstainWeight,
+        effectiveYesPct: voteSummary.effectiveYesPct,
+        targetMet: voteSummary.targetMet,
+        votePassed: voteSummary.votePassed,
+        canFund: pooledRequests.length > 0 && voteSummary.canFund,
+        requests: pooledRequests.map((request) => {
           const participant = participantMap.get(request.participantId);
           const user = userMap.get(request.participantId);
+          const member = voteSummary.members.find(
+            (item) => item.participantId === request.participantId
+          );
 
           return {
             id: request.id,
@@ -553,6 +710,8 @@ function buildProjectPooledRequestBuckets(data, asOfDate) {
             participantName: participant?.name ?? request.participantName,
             participantEmail: user?.email ?? request.participantEmail,
             amount: Number(request.amount ?? 0),
+            voteChoice: member?.voteChoice ?? "",
+            ownershipPct: member?.ownershipPct ?? 0,
             submittedAt: request.submittedAt ?? request.createdAt
           };
         })
@@ -2348,6 +2507,8 @@ export function buildManagerDashboard(user, data = seedData) {
       directInvestmentMinimum: roundCurrency(deal.directInvestmentMinimum ?? 0),
       pooledInvestmentAllowed: Boolean(Number(deal.pooledInvestmentAllowed ?? 0)),
       pooledInvestmentTarget: roundCurrency(deal.pooledInvestmentTarget ?? 0),
+      pooledVoteThreshold: roundCurrency(deal.pooledVoteThreshold ?? 0.5),
+      pooledVoteClosesOn: deal.pooledVoteClosesOn ?? null,
       timelineProgress: resolveTimelineProgress(deal.status, deal.timelineProgress),
       timeline: deal.timeline,
       fundedOn: deal.fundedOn,

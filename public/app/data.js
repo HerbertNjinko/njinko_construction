@@ -1,5 +1,5 @@
-import { state } from "./state.js?v=20260501-frontend-08";
-import { roundMoney } from "./helpers.js?v=20260501-frontend-08";
+import { state } from "./state.js?v=20260501-frontend-09";
+import { roundMoney } from "./helpers.js?v=20260501-frontend-09";
 
 export function getCreateDealDefaults() {
   const investmentCloseOn = new Date();
@@ -24,6 +24,8 @@ export function getCreateDealDefaults() {
     directInvestmentMinimum: "",
     pooledInvestmentAllowed: true,
     pooledInvestmentTarget: "",
+    pooledVoteThreshold: 0.5,
+    pooledVoteClosesOn: investmentCloseOn.toISOString().slice(0, 10),
     projectedExitOn: "",
     actualExitOn: ""
   };
@@ -421,6 +423,8 @@ export function buildDealEditorDraft(deal) {
     directInvestmentMinimum: String(deal.directInvestmentMinimum ?? 0),
     pooledInvestmentAllowed: Boolean(deal.pooledInvestmentAllowed),
     pooledInvestmentTarget: String(deal.pooledInvestmentTarget ?? 0),
+    pooledVoteThreshold: String(deal.pooledVoteThreshold ?? 0.5),
+    pooledVoteClosesOn: String(deal.pooledVoteClosesOn ?? deal.investmentCloseOn ?? ""),
     projectedExitOn: String(deal.projectedExitOn ?? ""),
     actualExitOn: String(deal.actualExitOn ?? ""),
     expenseEntries:

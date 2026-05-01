@@ -1,4 +1,4 @@
-import { state } from "./state.js?v=20260501-frontend-08";
+import { state } from "./state.js?v=20260501-frontend-09";
 import {
   clearAuthFeedback,
   clearMessages,
@@ -14,7 +14,7 @@ import {
   setMessage,
   titleCase,
   toggleSectionCollapsed
-} from "./helpers.js?v=20260501-frontend-08";
+} from "./helpers.js?v=20260501-frontend-09";
 import {
   applyArchivedProjectFilters,
   applyQuestionnaireFilters,
@@ -30,7 +30,7 @@ import {
   syncDealEditorField,
   updateCreateDealDraft,
   updateDealEditorDraft
-} from "./data.js?v=20260501-frontend-08";
+} from "./data.js?v=20260501-frontend-09";
 import {
   api,
   applyLoggedOutState,
@@ -38,8 +38,8 @@ import {
   loadSession,
   recordSessionActivity,
   refreshDashboard
-} from "./session.js?v=20260501-frontend-08";
-import { render } from "./renderers.js?v=20260501-frontend-08";
+} from "./session.js?v=20260501-frontend-09";
+import { render } from "./renderers.js?v=20260501-frontend-09";
 
 let listenersBound = false;
 
@@ -1116,6 +1116,34 @@ export function setupEventListeners() {
       return;
     }
 
+    if (event.target.dataset.projectPoolVoteForm === "true") {
+      event.preventDefault();
+      const formData = new FormData(event.target);
+      const dealId = String(event.target.dataset.dealId ?? "");
+
+      if (!dealId) {
+        setMessage("capital", "error", "A valid project pool is required.");
+        render();
+        return;
+      }
+
+      try {
+        await api(`/api/deals/${encodeURIComponent(dealId)}/project-pool-vote`, {
+          method: "PUT",
+          body: JSON.stringify({
+            voteChoice: formData.get("voteChoice")
+          })
+        });
+        await refreshDashboard();
+        setMessage("capital", "success", "Project pool vote saved.");
+      } catch (error) {
+        setMessage("capital", "error", error.message);
+      }
+
+      render();
+      return;
+    }
+
     if (event.target.dataset.projectPoolFundingForm === "true") {
       event.preventDefault();
       const dealId = String(event.target.dataset.dealId ?? "");
@@ -1212,6 +1240,8 @@ export function setupEventListeners() {
             directInvestmentMinimum: draft.directInvestmentMinimum,
             pooledInvestmentAllowed: draft.pooledInvestmentAllowed,
             pooledInvestmentTarget: draft.pooledInvestmentTarget,
+            pooledVoteThreshold: draft.pooledVoteThreshold,
+            pooledVoteClosesOn: draft.pooledVoteClosesOn,
             projectedExitOn: draft.projectedExitOn,
             actualExitOn: draft.actualExitOn,
             expenseEntries: draft.expenseEntries,
@@ -1265,6 +1295,8 @@ export function setupEventListeners() {
             directInvestmentMinimum: draft.directInvestmentMinimum,
             pooledInvestmentAllowed: draft.pooledInvestmentAllowed,
             pooledInvestmentTarget: draft.pooledInvestmentTarget,
+            pooledVoteThreshold: draft.pooledVoteThreshold,
+            pooledVoteClosesOn: draft.pooledVoteClosesOn,
             projectedExitOn: draft.projectedExitOn,
             actualExitOn: draft.actualExitOn,
             expenseEntries: draft.expenseEntries,

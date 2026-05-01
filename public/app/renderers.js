@@ -5,7 +5,7 @@ import {
   LOGIN_PAGE_TITLE,
   app,
   state
-} from "./state.js?v=20260501-frontend-08";
+} from "./state.js?v=20260501-frontend-09";
 import {
   breakdownItem,
   escapeHtml,
@@ -21,7 +21,7 @@ import {
   renderSectionToggle,
   summaryItem,
   titleCase
-} from "./helpers.js?v=20260501-frontend-08";
+} from "./helpers.js?v=20260501-frontend-09";
 import {
   applyAllocationFilters,
   applyArchivedProjectFilters,
@@ -44,7 +44,7 @@ import {
   getInvestorProjectFilterOptions,
   getManagerEditableDeal,
   getUserFilterOptions
-} from "./data.js?v=20260501-frontend-08";
+} from "./data.js?v=20260501-frontend-09";
 
 function renderLogin() {
   const errorMarkup = state.loginError
@@ -2242,6 +2242,48 @@ function renderInvestorArchivedProjectHistory(archivedProjects = []) {
   `;
 }
 
+function renderProjectPoolVoteCell(request) {
+  if (request.allocationMode !== "pooled" || request.createdPositionId) {
+    return "—";
+  }
+
+  if (!["pending", "approved"].includes(request.status)) {
+    return "—";
+  }
+
+  const statusText = request.poolVotePassed
+    ? "Vote passed"
+    : request.poolVoteVotingClosed
+      ? "Vote closed"
+      : `Needs ${formatPercent(request.poolVoteThreshold || 0.5)} yes`;
+  const currentVote = request.poolVoteChoice || "";
+
+  if (!request.poolVoteCanVote) {
+    return `
+      <div class="table-note">
+        ${escapeHtml(statusText)}
+        ${currentVote ? `<br />Your vote: ${escapeHtml(titleCase(currentVote))}` : ""}
+      </div>
+    `;
+  }
+
+  return `
+    <form data-project-pool-vote-form="true" data-deal-id="${escapeHtml(request.dealId)}">
+      <select name="voteChoice" required>
+        <option value="">Vote</option>
+        <option value="yes" ${currentVote === "yes" ? "selected" : ""}>Yes</option>
+        <option value="no" ${currentVote === "no" ? "selected" : ""}>No</option>
+      </select>
+      <button class="button-secondary button-inline" type="submit">Save vote</button>
+      <p class="table-note">
+        Weighted by your pooled amount. No vote counts as yes after ${
+          request.poolVoteClosesOn ? formatDate(request.poolVoteClosesOn) : "the deadline"
+        }.
+      </p>
+    </form>
+  `;
+}
+
 function renderUserCapitalAccountPanel() {
   const account = state.dashboard.capitalAccount ?? {};
   const deposits = account.deposits ?? [];
@@ -2371,6 +2413,7 @@ function renderUserCapitalAccountPanel() {
               <th>Amount</th>
               <th>Mode</th>
               <th>Status</th>
+              <th>Vote</th>
               <th>Submitted</th>
               <th>Manager note</th>
             </tr>
@@ -2386,13 +2429,14 @@ function renderUserCapitalAccountPanel() {
                           <td>${escapeHtml(formatCurrency(request.amount))}</td>
                           <td>${escapeHtml(titleCase(request.allocationMode || "direct"))}</td>
                           <td>${escapeHtml(titleCase(request.status))}</td>
+                          <td>${renderProjectPoolVoteCell(request)}</td>
                           <td>${escapeHtml(formatDateTime(request.submittedAt || request.createdAt))}</td>
                           <td>${escapeHtml(request.managerNotes || "—")}</td>
                         </tr>
                       `
                     )
                     .join("")
-                : '<tr><td colspan="6">No project allocation requests submitted yet.</td></tr>'
+                : '<tr><td colspan="7">No project allocation requests submitted yet.</td></tr>'
             }
           </tbody>
         </table>
@@ -3733,7 +3777,7 @@ function renderManagerAllocationRequestsPanel() {
     sectionId: "manager-allocation-requests",
     title: "Project Allocation Requests",
     copy:
-      "Review investor, pooled-member, and contractor requests before they become official deal allocations.",
+      "Direct investor and contractor requests can be approved by the manager. Pooled requests fund only after the weighted investor vote passes.",
     message: renderMessage(state.messages.allocation),
     body: `
       <div class="table-wrap">
@@ -3741,7 +3785,8 @@ function renderManagerAllocationRequestsPanel() {
           <thead>
             <tr>
               <th>Project pooled bucket</th>
-              <th>Approved</th>
+              <th>Committed</th>
+              <th>Vote</th>
               <th>Target</th>
               <th>Remaining</th>
               <th>Members</th>
@@ -3756,7 +3801,12 @@ function renderManagerAllocationRequestsPanel() {
                       (bucket) => `
                         <tr>
                           <td>${escapeHtml(bucket.dealName)}</td>
-                          <td>${escapeHtml(formatCurrency(bucket.approvedAmount))}</td>
+                          <td>${escapeHtml(formatCurrency(bucket.committedAmount ?? bucket.approvedAmount))}</td>
+                          <td>${escapeHtml(
+                            `${formatPercent(bucket.effectiveYesPct || 0)} yes · threshold ${formatPercent(
+                              bucket.voteThreshold || 0.5
+                            )}${bucket.votingClosed ? " · closed" : ""}`
+                          )}</td>
                           <td>${escapeHtml(formatCurrency(bucket.pooledInvestmentTarget || 0))}</td>
                           <td>${escapeHtml(formatCurrency(bucket.amountRemaining || 0))}</td>
                           <td>${escapeHtml(String(bucket.requestCount))}</td>
@@ -3773,7 +3823,7 @@ function renderManagerAllocationRequestsPanel() {
                       `
                     )
                     .join("")
-                : '<tr><td colspan="6">No approved pooled requests are waiting for project funding.</td></tr>'
+                : '<tr><td colspan="7">No pooled requests are waiting for project funding.</td></tr>'
             }
           </tbody>
         </table>
@@ -3811,15 +3861,29 @@ function renderManagerAllocationRequestsPanel() {
                           )}</td>
                           <td>${escapeHtml(request.participantNotes || "—")}</td>
                           <td>
-                            <form data-allocation-request-review-form="true" data-request-id="${escapeHtml(
-                              request.id
-                            )}">
-                              <textarea name="managerNotes" rows="2" placeholder="Manager note"></textarea>
-                              <div class="button-row">
-                                <button class="button-primary button-inline" type="submit" name="decision" value="approved">Approve</button>
-                                <button class="button-danger button-inline" type="submit" name="decision" value="rejected">Reject</button>
-                              </div>
-                            </form>
+                            ${
+                              request.allocationMode === "pooled"
+                                ? `
+                                  <form data-allocation-request-review-form="true" data-request-id="${escapeHtml(
+                                    request.id
+                                  )}">
+                                    <textarea name="managerNotes" rows="2" placeholder="Reason if rejecting"></textarea>
+                                    <p class="table-note">Pooled requests can only be funded after the investor vote passes.</p>
+                                    <button class="button-danger button-inline" type="submit" name="decision" value="rejected">Reject</button>
+                                  </form>
+                                `
+                                : `
+                                  <form data-allocation-request-review-form="true" data-request-id="${escapeHtml(
+                                    request.id
+                                  )}">
+                                    <textarea name="managerNotes" rows="2" placeholder="Manager note"></textarea>
+                                    <div class="button-row">
+                                      <button class="button-primary button-inline" type="submit" name="decision" value="approved">Approve</button>
+                                      <button class="button-danger button-inline" type="submit" name="decision" value="rejected">Reject</button>
+                                    </div>
+                                  </form>
+                                `
+                            }
                           </td>
                         </tr>
                       `
@@ -4276,8 +4340,31 @@ function renderCreateDealPanel() {
             Allow pooled investment
           </label>
         </div>
+        <div class="form-grid-2">
+          <label>
+            Pooled vote threshold
+            <input
+              type="number"
+              name="pooledVoteThreshold"
+              min="0.01"
+              max="1"
+              step="0.01"
+              value="${inputValue(draft.pooledVoteThreshold)}"
+              data-create-deal-field="pooledVoteThreshold"
+            />
+          </label>
+          <label>
+            Pooled vote deadline
+            <input
+              type="date"
+              name="pooledVoteClosesOn"
+              value="${inputValue(draft.pooledVoteClosesOn)}"
+              data-create-deal-field="pooledVoteClosesOn"
+            />
+          </label>
+        </div>
         <p class="helper-copy">
-          Investor requests that are below the direct minimum are routed to this project&apos;s pooled bucket when pooling is enabled.
+          Investor requests below the direct minimum enter this project&apos;s pool. Funding requires the weighted yes vote to meet the threshold; unvoted shares count as yes after the deadline.
         </p>
         <div class="form-grid-2">
           <label>
@@ -4707,6 +4794,14 @@ function renderDealEditorPanel() {
             deal.pooledInvestmentAllowed ? formatCurrency(deal.pooledInvestmentTarget || 0) : "Disabled"
           )}
           ${summaryItem(
+            "Pooled vote",
+            deal.pooledInvestmentAllowed
+              ? `${formatPercent(deal.pooledVoteThreshold || 0.5)} by ${
+                  deal.pooledVoteClosesOn ? formatDate(deal.pooledVoteClosesOn) : "deadline not set"
+                }`
+              : "Disabled"
+          )}
+          ${summaryItem(
             "Early withdrawal penalty",
             formatRate(draft.earlyWithdrawalPenaltyRate)
           )}
@@ -4980,8 +5075,31 @@ function renderDealEditorPanel() {
             Allow pooled investment
           </label>
         </div>
+        <div class="form-grid-2">
+          <label>
+            Pooled vote threshold
+            <input
+              type="number"
+              name="pooledVoteThreshold"
+              min="0.01"
+              max="1"
+              step="0.01"
+              value="${inputValue(draft.pooledVoteThreshold)}"
+              data-deal-field="pooledVoteThreshold"
+            />
+          </label>
+          <label>
+            Pooled vote deadline
+            <input
+              type="date"
+              name="pooledVoteClosesOn"
+              value="${inputValue(draft.pooledVoteClosesOn)}"
+              data-deal-field="pooledVoteClosesOn"
+            />
+          </label>
+        </div>
         <p class="helper-copy">
-          Investor requests below the direct minimum are held in a pooled bucket until the project&apos;s pooled target is funded.
+          Investor requests below the direct minimum enter this project&apos;s pool. Funding requires the weighted yes vote to meet the threshold; unvoted shares count as yes after the deadline.
         </p>
         <div class="form-grid-2">
           <label>

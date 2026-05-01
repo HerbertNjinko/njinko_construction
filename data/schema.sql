@@ -166,6 +166,8 @@ CREATE TABLE IF NOT EXISTS deals (
   direct_investment_minimum REAL NOT NULL DEFAULT 0 CHECK (direct_investment_minimum >= 0),
   pooled_investment_allowed INTEGER NOT NULL DEFAULT 1 CHECK (pooled_investment_allowed IN (0, 1)),
   pooled_investment_target REAL NOT NULL DEFAULT 0 CHECK (pooled_investment_target >= 0),
+  pooled_vote_threshold REAL NOT NULL DEFAULT 0.50 CHECK (pooled_vote_threshold > 0 AND pooled_vote_threshold <= 1),
+  pooled_vote_closes_on TEXT,
   projected_exit_on TEXT,
   actual_exit_on TEXT,
   timeline_progress INTEGER NOT NULL DEFAULT 0,
@@ -283,6 +285,18 @@ CREATE TABLE IF NOT EXISTS investor_pool_votes (
   FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE,
   FOREIGN KEY (deal_id) REFERENCES deals(id) ON DELETE CASCADE,
   UNIQUE (pool_id, participant_id)
+);
+
+CREATE TABLE IF NOT EXISTS project_pool_votes (
+  id TEXT PRIMARY KEY,
+  deal_id TEXT NOT NULL,
+  participant_id TEXT NOT NULL,
+  vote_choice TEXT NOT NULL CHECK (vote_choice IN ('yes', 'no')),
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  FOREIGN KEY (deal_id) REFERENCES deals(id) ON DELETE CASCADE,
+  FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE,
+  UNIQUE (deal_id, participant_id)
 );
 
 CREATE TABLE IF NOT EXISTS distribution_elections (
@@ -482,6 +496,8 @@ CREATE INDEX IF NOT EXISTS idx_investor_pool_commitments_pool_id
   ON investor_pool_commitments(pool_id, participant_id);
 CREATE INDEX IF NOT EXISTS idx_investor_pool_votes_pool_id
   ON investor_pool_votes(pool_id, deal_id);
+CREATE INDEX IF NOT EXISTS idx_project_pool_votes_deal_id
+  ON project_pool_votes(deal_id, updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_distribution_elections_deal_id
   ON distribution_elections(deal_id, participant_id);
 CREATE INDEX IF NOT EXISTS idx_early_withdrawal_requests_deal_id

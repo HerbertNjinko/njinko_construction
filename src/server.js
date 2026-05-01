@@ -10,6 +10,7 @@ import {
   archiveDeal,
   castDealIssueVote,
   castInvestorPoolVote,
+  castProjectPoolVote,
   createCapitalDepositForParticipant,
   createCompanyResource,
   createDeal,
@@ -971,6 +972,9 @@ const server = createServer(async (request, response) => {
     );
     const earlyWithdrawalMatch = url.pathname.match(/^\/api\/deals\/([^/]+)\/withdrawal-request$/);
     const poolVoteMatch = url.pathname.match(/^\/api\/pools\/([^/]+)\/vote$/);
+    const projectPoolVoteMatch = url.pathname.match(
+      /^\/api\/deals\/([^/]+)\/project-pool-vote$/
+    );
     const adminPoolCommitmentMatch = url.pathname.match(
       /^\/api\/admin\/pools\/([^/]+)\/commitments$/
     );
@@ -1154,6 +1158,34 @@ const server = createServer(async (request, response) => {
           decodeURIComponent(poolVoteMatch[1]),
           user.id,
           body.dealId
+        );
+        sendJson(response, 200, result);
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "PUT" && projectPoolVoteMatch) {
+      const user = await requireUnlockedUser(request, response);
+
+      if (!user) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body || typeof body.voteChoice !== "string") {
+        sendJson(response, 400, { error: "A yes or no vote is required." });
+        return;
+      }
+
+      try {
+        const result = await castProjectPoolVote(
+          decodeURIComponent(projectPoolVoteMatch[1]),
+          user.id,
+          body.voteChoice
         );
         sendJson(response, 200, result);
       } catch (error) {
