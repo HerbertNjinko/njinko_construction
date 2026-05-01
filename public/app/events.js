@@ -1,4 +1,4 @@
-import { state } from "./state.js?v=20260501-frontend-06";
+import { state } from "./state.js?v=20260501-frontend-07";
 import {
   clearAuthFeedback,
   clearMessages,
@@ -13,7 +13,7 @@ import {
   setMessage,
   titleCase,
   toggleSectionCollapsed
-} from "./helpers.js?v=20260501-frontend-06";
+} from "./helpers.js?v=20260501-frontend-07";
 import {
   applyArchivedProjectFilters,
   applyQuestionnaireFilters,
@@ -29,7 +29,7 @@ import {
   syncDealEditorField,
   updateCreateDealDraft,
   updateDealEditorDraft
-} from "./data.js?v=20260501-frontend-06";
+} from "./data.js?v=20260501-frontend-07";
 import {
   api,
   applyLoggedOutState,
@@ -37,8 +37,8 @@ import {
   loadSession,
   recordSessionActivity,
   refreshDashboard
-} from "./session.js?v=20260501-frontend-06";
-import { render } from "./renderers.js?v=20260501-frontend-06";
+} from "./session.js?v=20260501-frontend-07";
+import { render } from "./renderers.js?v=20260501-frontend-07";
 
 let listenersBound = false;
 
@@ -1023,6 +1023,31 @@ export function setupEventListeners() {
       return;
     }
 
+    if (event.target.id === "allocation-request-form") {
+      event.preventDefault();
+      const formData = new FormData(event.target);
+
+      try {
+        await api("/api/allocation-requests", {
+          method: "POST",
+          body: JSON.stringify({
+            dealId: formData.get("dealId"),
+            amount: Number(formData.get("amount")),
+            trade: formData.get("trade"),
+            notes: formData.get("notes")
+          })
+        });
+        await refreshDashboard();
+        setMessage("capital", "success", "Allocation request submitted for manager review.");
+        event.target.reset();
+      } catch (error) {
+        setMessage("capital", "error", error.message);
+      }
+
+      render();
+      return;
+    }
+
     if (event.target.id === "admin-capital-deposit-form") {
       event.preventDefault();
       const formData = new FormData(event.target);
@@ -1084,6 +1109,42 @@ export function setupEventListeners() {
         );
       } catch (error) {
         setMessage("capital", "error", error.message);
+      }
+
+      render();
+      return;
+    }
+
+    if (event.target.dataset.allocationRequestReviewForm === "true") {
+      event.preventDefault();
+      const formData = new FormData(event.target);
+      const requestId = String(event.target.dataset.requestId ?? "");
+      const decision = event.submitter?.value || formData.get("decision");
+
+      if (!requestId) {
+        setMessage("allocation", "error", "A valid allocation request is required.");
+        render();
+        return;
+      }
+
+      try {
+        const result = await api(`/api/admin/allocation-requests/${encodeURIComponent(requestId)}`, {
+          method: "PUT",
+          body: JSON.stringify({
+            decision,
+            managerNotes: formData.get("managerNotes")
+          })
+        });
+        await refreshDashboard();
+        setMessage(
+          "allocation",
+          "success",
+          `Allocation request ${decision === "approved" ? "approved" : "rejected"}. ${formatNotificationStatus(
+            result.notification
+          )}`
+        );
+      } catch (error) {
+        setMessage("allocation", "error", error.message);
       }
 
       render();

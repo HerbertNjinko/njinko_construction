@@ -5,7 +5,7 @@ import {
   LOGIN_PAGE_TITLE,
   app,
   state
-} from "./state.js?v=20260501-frontend-06";
+} from "./state.js?v=20260501-frontend-07";
 import {
   breakdownItem,
   escapeHtml,
@@ -21,7 +21,7 @@ import {
   renderSectionToggle,
   summaryItem,
   titleCase
-} from "./helpers.js?v=20260501-frontend-06";
+} from "./helpers.js?v=20260501-frontend-07";
 import {
   applyAllocationFilters,
   applyArchivedProjectFilters,
@@ -44,7 +44,7 @@ import {
   getInvestorProjectFilterOptions,
   getManagerEditableDeal,
   getUserFilterOptions
-} from "./data.js?v=20260501-frontend-06";
+} from "./data.js?v=20260501-frontend-07";
 
 function renderLogin() {
   const errorMarkup = state.loginError
@@ -2245,21 +2245,85 @@ function renderInvestorArchivedProjectHistory(archivedProjects = []) {
 function renderUserCapitalAccountPanel() {
   const account = state.dashboard.capitalAccount ?? {};
   const deposits = account.deposits ?? [];
+  const allocationRequests = account.allocationRequests ?? [];
+  const allocationTargets = state.dashboard.allocationTargets ?? [];
+  const viewerCategory = state.dashboard.viewer?.category ?? "investor";
+  const isContractor = viewerCategory === "contractor";
 
   return renderCollapsibleSection({
     sectionId: "investor-account-funds",
-    title: "Account Funds",
+    title: "Account Details",
     copy:
-      "Approved account funds can be assigned later to a project position or pooled-capital commitment.",
+      isContractor
+        ? "Choose where to request placement of your approved deferred contractor amount."
+        : "Choose where to request placement of approved account funds, or submit another deposit for review.",
     message: renderMessage(state.messages.capital),
     body: `
       <div class="metrics-grid">
-        ${metricCard("Total account funds", formatCurrency(account.totalAccountFunds || 0))}
-        ${metricCard("Available to allocate", formatCurrency(account.availableCapital || 0))}
-        ${metricCard("Allocated to projects", formatCurrency(account.allocatedToProjects || 0))}
-        ${metricCard("Committed to pools", formatCurrency(account.committedToPools || 0))}
-        ${metricCard("Pending deposit review", formatCurrency(account.pendingDepositAmount || 0))}
+        ${
+          isContractor
+            ? `
+              ${metricCard("Approved deferred amount", formatCurrency(account.enrollmentDeferredAmount || 0))}
+              ${metricCard("Available to request", formatCurrency(account.availableDeferredAmount || 0))}
+              ${metricCard("Allocated deferred", formatCurrency(account.allocatedDeferredAmount || 0))}
+              ${metricCard("Pending allocation requests", formatCurrency(account.pendingAllocationRequestAmount || 0))}
+            `
+            : `
+              ${metricCard("Total account funds", formatCurrency(account.totalAccountFunds || 0))}
+              ${metricCard("Available to request", formatCurrency(account.availableCapital || 0))}
+              ${metricCard("Allocated to projects", formatCurrency(account.allocatedToProjects || 0))}
+              ${metricCard("Committed to pools", formatCurrency(account.committedToPools || 0))}
+              ${metricCard("Pending deposit review", formatCurrency(account.pendingDepositAmount || 0))}
+              ${metricCard("Pending allocation requests", formatCurrency(account.pendingAllocationRequestAmount || 0))}
+            `
+        }
       </div>
+      <form id="allocation-request-form">
+        <div class="form-grid-2">
+          <label>
+            Open project
+            <select name="dealId" required>
+              <option value="">Select project</option>
+              ${allocationTargets
+                .map(
+                  (deal) => `
+                    <option value="${escapeHtml(deal.id)}">
+                      ${escapeHtml(
+                        deal.investmentCloseOn
+                          ? `${deal.name} · closes ${formatDate(deal.investmentCloseOn)}`
+                          : deal.name
+                      )}
+                    </option>
+                  `
+                )
+                .join("")}
+            </select>
+          </label>
+          <label>
+            ${isContractor ? "Deferred amount" : "Amount to allocate"}
+            <input type="number" name="amount" min="0" step="0.01" required />
+          </label>
+        </div>
+        ${
+          isContractor
+            ? `
+              <label>
+                Trade
+                <input type="text" name="trade" placeholder="Foundation" required />
+              </label>
+            `
+            : ""
+        }
+        <label>
+          Notes
+          <textarea name="notes" rows="3" placeholder="Optional note for manager review"></textarea>
+        </label>
+        <button class="button-primary" type="submit">Submit allocation request</button>
+      </form>
+      ${
+        isContractor
+          ? ""
+          : `
       <form id="capital-deposit-form">
         <div class="form-grid-2">
           <label>
@@ -2277,6 +2341,44 @@ function renderUserCapitalAccountPanel() {
         </label>
         <button class="button-primary" type="submit">Submit deposit for review</button>
       </form>
+          `
+      }
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Project</th>
+              <th>Amount</th>
+              <th>Status</th>
+              <th>Submitted</th>
+              <th>Manager note</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${
+              allocationRequests.length
+                ? allocationRequests
+                    .map(
+                      (request) => `
+                        <tr>
+                          <td>${escapeHtml(request.dealName || "Project")}</td>
+                          <td>${escapeHtml(formatCurrency(request.amount))}</td>
+                          <td>${escapeHtml(titleCase(request.status))}</td>
+                          <td>${escapeHtml(formatDateTime(request.submittedAt || request.createdAt))}</td>
+                          <td>${escapeHtml(request.managerNotes || "—")}</td>
+                        </tr>
+                      `
+                    )
+                    .join("")
+                : '<tr><td colspan="5">No project allocation requests submitted yet.</td></tr>'
+            }
+          </tbody>
+        </table>
+      </div>
+      ${
+        isContractor
+          ? ""
+          : `
       <div class="table-wrap">
         <table>
           <thead>
@@ -2307,6 +2409,8 @@ function renderUserCapitalAccountPanel() {
           </tbody>
         </table>
       </div>
+          `
+      }
     `
   });
 }
@@ -2350,7 +2454,7 @@ function renderInvestorDashboard() {
     ),
     ...pooledDistributionProjects
   ];
-  const canViewAccountDetails = ["investor", "pool_member"].includes(viewer.category);
+  const canViewAccountDetails = ["investor", "pool_member", "contractor"].includes(viewer.category);
 
   return `
     <div class="shell">
@@ -2762,10 +2866,17 @@ function renderPoolMemberDashboard() {
     viewer,
     poolPortfolio,
     pools,
+    directProjects = [],
     pooledDistributionProjects = [],
     archivedProjects = []
   } = state.dashboard;
   const votingPools = pools.filter((pool) => !pool.selectedDealId);
+  const distributionProjects = [
+    ...directProjects.filter(
+      (project) => project.status === "sold" && project.personalPosition.totalPayout > 0
+    ),
+    ...pooledDistributionProjects
+  ];
 
   return `
     <div class="shell">
@@ -2846,8 +2957,8 @@ function renderPoolMemberDashboard() {
         body: `
           <div class="distribution-review-list">
             ${
-              pooledDistributionProjects.length
-                ? pooledDistributionProjects
+              distributionProjects.length
+                ? distributionProjects
                     .map((project) => renderInvestorDistributionElectionCard(project))
                     .join("")
                 : '<div class="empty-state">No sold pooled positions currently require a reinvestment or payout election.</div>'
@@ -2855,6 +2966,22 @@ function renderPoolMemberDashboard() {
           </div>
         `
       })}
+
+      ${
+        directProjects.length
+          ? renderCollapsibleSection({
+              sectionId: "pool-member-direct-projects",
+              title: "Direct Project Breakdown",
+              copy:
+                "Project positions approved from your own account funds are shown separately from pooled capital groups.",
+              body: `
+                <div class="deal-grid">
+                  ${directProjects.map((project) => renderInvestorProject(project)).join("")}
+                </div>
+              `
+            })
+          : ""
+      }
 
       ${renderCollapsibleSection({
         sectionId: "pool-member-projects",
@@ -3568,6 +3695,107 @@ function renderManagerCapitalFundsPanel() {
                     )
                     .join("")
                 : '<tr><td colspan="8">No investor or pooled-member account funds recorded yet.</td></tr>'
+            }
+          </tbody>
+        </table>
+      </div>
+    `
+  });
+}
+
+function renderManagerAllocationRequestsPanel() {
+  const requests = state.dashboard.admin.allocationRequests ?? [];
+  const pendingRequests = requests.filter((request) => request.needsReview);
+
+  return renderCollapsibleSection({
+    sectionId: "manager-allocation-requests",
+    title: "Project Allocation Requests",
+    copy:
+      "Review investor, pooled-member, and contractor requests before they become official deal allocations.",
+    message: renderMessage(state.messages.allocation),
+    body: `
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Participant</th>
+              <th>Project</th>
+              <th>Amount</th>
+              <th>Type</th>
+              <th>Notes</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${
+              pendingRequests.length
+                ? pendingRequests
+                    .map(
+                      (request) => `
+                        <tr>
+                          <td>${escapeHtml(
+                            `${request.participantName} · ${request.participantEmail || "No email"}`
+                          )}</td>
+                          <td>${escapeHtml(request.dealName || "Project")}</td>
+                          <td>${escapeHtml(formatCurrency(request.amount))}</td>
+                          <td>${escapeHtml(
+                            `${titleCase(request.participantCategory)} · ${request.classType}${
+                              request.trade ? ` · ${request.trade}` : ""
+                            }`
+                          )}</td>
+                          <td>${escapeHtml(request.participantNotes || "—")}</td>
+                          <td>
+                            <form data-allocation-request-review-form="true" data-request-id="${escapeHtml(
+                              request.id
+                            )}">
+                              <textarea name="managerNotes" rows="2" placeholder="Manager note"></textarea>
+                              <div class="button-row">
+                                <button class="button-primary button-inline" type="submit" name="decision" value="approved">Approve</button>
+                                <button class="button-danger button-inline" type="submit" name="decision" value="rejected">Reject</button>
+                              </div>
+                            </form>
+                          </td>
+                        </tr>
+                      `
+                    )
+                    .join("")
+                : '<tr><td colspan="6">No pending allocation requests.</td></tr>'
+            }
+          </tbody>
+        </table>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Participant</th>
+              <th>Project</th>
+              <th>Amount</th>
+              <th>Status</th>
+              <th>Reviewed</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${
+              requests.length
+                ? requests
+                    .map(
+                      (request) => `
+                        <tr>
+                          <td>${escapeHtml(request.participantName)}</td>
+                          <td>${escapeHtml(request.dealName || "Project")}</td>
+                          <td>${escapeHtml(formatCurrency(request.amount))}</td>
+                          <td>${escapeHtml(titleCase(request.status))}</td>
+                          <td>${escapeHtml(
+                            request.reviewedAt
+                              ? `${formatDateTime(request.reviewedAt)}${request.reviewedByName ? ` by ${request.reviewedByName}` : ""}`
+                              : "Pending"
+                          )}</td>
+                        </tr>
+                      `
+                    )
+                    .join("")
+                : '<tr><td colspan="5">No allocation requests have been submitted yet.</td></tr>'
             }
           </tbody>
         </table>
@@ -5848,14 +6076,18 @@ function getManagerReviewAlertCounts() {
   const pendingWithdrawals = (admin.earlyWithdrawalReviews ?? []).filter(
     (review) => review.needsReview
   ).length;
+  const pendingAllocations = (admin.allocationRequests ?? []).filter(
+    (request) => request.needsReview
+  ).length;
   const readyPools = (admin.investorPools ?? []).filter((pool) => pool.canFund).length;
 
   return {
     pendingAccounts,
     pendingDistributions,
     pendingWithdrawals,
+    pendingAllocations,
     readyPools,
-    total: pendingAccounts + pendingDistributions + pendingWithdrawals + readyPools
+    total: pendingAccounts + pendingDistributions + pendingWithdrawals + pendingAllocations + readyPools
   };
 }
 
@@ -5872,7 +6104,7 @@ function renderManagerReviewAlertPanel() {
         <p class="eyebrow">Manager Inbox</p>
         <h3>${escapeHtml(String(counts.total))} item${counts.total === 1 ? "" : "s"} need review</h3>
         <p class="section-copy">
-          Pending account approvals, distribution elections, early withdrawal requests, and ready pool funding actions are waiting for manager action.
+          Pending account approvals, allocation requests, distribution elections, early withdrawal requests, and ready pool funding actions are waiting for manager action.
         </p>
       </div>
       <div class="button-row">
@@ -5881,6 +6113,13 @@ function renderManagerReviewAlertPanel() {
             ? `<button class="button-secondary manager-alert-button" type="button" data-manager-page="pending-approvals">! ${escapeHtml(
                 String(counts.pendingAccounts)
               )} account${counts.pendingAccounts === 1 ? "" : "s"}</button>`
+            : ""
+        }
+        ${
+          counts.pendingAllocations
+            ? `<button class="button-secondary manager-alert-button" type="button" data-manager-page="allocations">! ${escapeHtml(
+                String(counts.pendingAllocations)
+              )} allocation${counts.pendingAllocations === 1 ? "" : "s"}</button>`
             : ""
         }
         ${
@@ -6525,6 +6764,7 @@ function renderManagerInvestorPoolsPage() {
 
 function renderManagerAllocationsPage() {
   return `
+    ${renderManagerAllocationRequestsPanel()}
     ${renderManagerCapitalFundsPanel()}
     <div class="admin-grid">
       ${renderAllocationPanel()}

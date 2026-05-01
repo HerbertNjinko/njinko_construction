@@ -28,6 +28,7 @@ const REQUIRED_TABLES = [
   "archived_records",
   "user_legal_acknowledgements",
   "user_capital_deposits",
+  "user_allocation_requests",
   "investor_questionnaires"
 ];
 

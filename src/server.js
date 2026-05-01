@@ -37,12 +37,14 @@ import {
   markUserNotificationsRead,
   markUserLogin,
   requestPasswordReset,
+  reviewAllocationRequest,
   reviewEarlyWithdrawalRequest,
   reviewCapitalDeposit,
   reviewUserIdentity,
   resetPasswordWithToken,
   setUserAccountActive,
   submitIdentityReview,
+  submitAllocationRequest,
   submitCapitalDepositRequest,
   submitRequiredLegalAcknowledgements,
   updateUserCategory,
@@ -947,6 +949,9 @@ const server = createServer(async (request, response) => {
     const adminCapitalDepositReviewMatch = url.pathname.match(
       /^\/api\/admin\/capital-deposits\/([^/]+)$/
     );
+    const adminAllocationRequestReviewMatch = url.pathname.match(
+      /^\/api\/admin\/allocation-requests\/([^/]+)$/
+    );
     const legalDocumentMatch = url.pathname.match(/^\/api\/legal-documents\/([^/]+)$/);
     const userDeleteMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)$/);
     const resourceDeleteMatch = url.pathname.match(/^\/api\/admin\/resources\/([^/]+)$/);
@@ -1481,6 +1486,30 @@ const server = createServer(async (request, response) => {
 
       try {
         const result = await submitCapitalDepositRequest(user.id, body);
+        sendJson(response, 201, result);
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/allocation-requests") {
+      const user = await requireUnlockedUser(request, response);
+
+      if (!user) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const result = await submitAllocationRequest(user.id, body);
         sendJson(response, 201, result);
       } catch (error) {
         sendJson(response, 400, { error: error.message });
@@ -2035,6 +2064,34 @@ const server = createServer(async (request, response) => {
       try {
         const result = await reviewCapitalDeposit(
           decodeURIComponent(adminCapitalDepositReviewMatch[1]),
+          body,
+          manager.id
+        );
+        sendJson(response, 200, result);
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "PUT" && adminAllocationRequestReviewMatch) {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const result = await reviewAllocationRequest(
+          decodeURIComponent(adminAllocationRequestReviewMatch[1]),
           body,
           manager.id
         );

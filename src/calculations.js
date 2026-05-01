@@ -405,8 +405,15 @@ function buildCapitalAccountLedger(data, participantId) {
       .filter((commitment) => commitment.participantId === participantId)
       .reduce((sum, commitment) => sum + Number(commitment.commitmentAmount ?? 0), 0)
   );
+  const pendingAllocationRequestAmount = roundCurrency(
+    (data.userAllocationRequests ?? [])
+      .filter((request) => request.participantId === participantId && request.status === "pending")
+      .reduce((sum, request) => sum + Number(request.amount ?? 0), 0)
+  );
   const totalAccountFunds = roundCurrency(enrollmentInvestmentAmount + approvedDepositAmount);
-  const totalAllocatedFunds = roundCurrency(allocatedToProjects + committedToPools);
+  const totalAllocatedFunds = roundCurrency(
+    allocatedToProjects + committedToPools + pendingAllocationRequestAmount
+  );
   const availableCapital = roundCurrency(Math.max(totalAccountFunds - totalAllocatedFunds, 0));
   const latestApprovedDeposit = approvedDeposits
     .slice()
@@ -430,6 +437,7 @@ function buildCapitalAccountLedger(data, participantId) {
     totalAccountFunds,
     allocatedToProjects,
     committedToPools,
+    pendingAllocationRequestAmount,
     totalAllocatedFunds,
     availableCapital,
     latestApprovedDepositId: latestApprovedDeposit?.id ?? null,
@@ -437,6 +445,52 @@ function buildCapitalAccountLedger(data, participantId) {
     enrollmentProofAcknowledgementId: latestEnrollmentProof?.id ?? null,
     enrollmentProofFileName: latestEnrollmentProof?.proofOfPaymentFileName ?? ""
   };
+}
+
+function buildDeferredAccountLedger(data, participantId) {
+  const enrollmentDeferredAmount = getEnrollmentDeferredAmount(data, participantId);
+  const allocatedDeferredAmount = roundCurrency(
+    (data.contractors ?? [])
+      .filter((contractor) => contractor.participantId === participantId)
+      .reduce((sum, contractor) => sum + Number(contractor.deferredAmount ?? 0), 0)
+  );
+  const pendingAllocationRequestAmount = roundCurrency(
+    (data.userAllocationRequests ?? [])
+      .filter((request) => request.participantId === participantId && request.status === "pending")
+      .reduce((sum, request) => sum + Number(request.amount ?? 0), 0)
+  );
+  const availableDeferredAmount = roundCurrency(
+    Math.max(enrollmentDeferredAmount - allocatedDeferredAmount - pendingAllocationRequestAmount, 0)
+  );
+
+  return {
+    participantId,
+    accountType: "contractor_deferred",
+    enrollmentDeferredAmount,
+    allocatedDeferredAmount,
+    pendingAllocationRequestAmount,
+    availableDeferredAmount
+  };
+}
+
+function buildAllocationTargets(data, asOfDate = String(data.asOfDate ?? new Date().toISOString().slice(0, 10))) {
+  return (data.deals ?? [])
+    .filter((deal) => deal.status !== "sold" && !isDateClosed(deal.investmentCloseOn, asOfDate))
+    .map((deal) => ({
+      id: deal.id,
+      name: deal.name,
+      location: deal.location,
+      investmentCloseOn: deal.investmentCloseOn ?? null,
+      status: deal.status,
+      statusLabel: statusLabel(deal.status)
+    }))
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function buildParticipantAllocationRequests(data, participantId) {
+  return (data.userAllocationRequests ?? [])
+    .filter((request) => request.participantId === participantId)
+    .sort((left, right) => String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? "")));
 }
 
 function calculateCurrentPref(position, deal, asOfDate) {
@@ -480,6 +534,7 @@ function buildNotificationCenter(user, data = seedData) {
   const managerActionSubjects = [
     "Account approval requested:",
     "Account funds deposit submitted:",
+    "Project allocation request submitted:",
     "Investor distribution election submitted",
     "Early withdrawal request submitted",
     "Pool vote submitted:"
@@ -1509,10 +1564,112 @@ function buildInvestorPoolViews(data, viewerParticipantId = null) {
 
 export function buildPoolMemberDashboard(user, data = seedData) {
   const participantMap = getParticipantMap(data);
+  const dealMap = new Map(data.deals.map((deal) => [deal.id, deal]));
+  const distributionElectionMap = getDistributionElectionMap(data);
   const participant = participantMap.get(user.participantId);
   const pools = buildInvestorPoolViews(data, user.participantId).filter(
     (pool) => pool.myCommitmentAmount > 0
   );
+  const reinvestmentTargets = data.deals
+    .filter((deal) => deal.status !== "sold")
+    .map((deal) => ({
+      id: deal.id,
+      name: deal.name
+    }));
+  const directProjects = data.positions
+    .filter((position) => position.participantId === user.participantId)
+    .filter((position) => position.contributionAmount > 0 || position.distributionsToDate > 0)
+    .map((position) => {
+      const deal = dealMap.get(position.dealId);
+
+      if (!deal) {
+        return null;
+      }
+
+      const dealPositions = data.positions.filter((item) => item.dealId === deal.id);
+      const waterfall = calculateWaterfall({ deal, positions: dealPositions });
+      const result = getPositionResultMap(waterfall.participantResults).get(position.id);
+
+      if (!result) {
+        return null;
+      }
+
+      const distributionPlan = buildDistributionPlan({
+        deal,
+        position,
+        participant,
+        result,
+        election: distributionElectionMap.get(`${position.dealId}:${position.participantId}`) ?? null,
+        dealMap
+      });
+      const exitLabel = deal.status === "sold" ? "Sale price" : "Projected sale price";
+
+      return {
+        id: deal.id,
+        name: deal.name,
+        location: deal.location,
+        status: deal.status,
+        statusLabel: statusLabel(deal.status),
+        currentPhase: deal.currentPhase,
+        investmentCloseOn: deal.investmentCloseOn ?? null,
+        distributionElectionDueOn: deal.distributionElectionDueOn ?? null,
+        earlyWithdrawalPenaltyRate: deal.earlyWithdrawalPenaltyRate ?? 0.3,
+        timelineProgress: resolveTimelineProgress(deal.status, deal.timelineProgress),
+        timeline: deal.timeline,
+        projectionLabel: deal.status === "sold" ? "Actual at exit" : "Projected at exit",
+        issues: [],
+        personalPosition: {
+          classType: position.classType,
+          contributionType: position.contributionType,
+          amountInvested: position.contributionAmount,
+          ownershipPct: result.ownershipPct,
+          prefEarned:
+            deal.status === "sold"
+              ? result.prefEarned
+              : calculateCurrentPref(position, deal, data.asOfDate),
+          projectedPrefEarned:
+            deal.status === "sold" ? result.prefEarned : calculateProjectedPref(position, deal),
+          estimatedTotalReturn: result.totalPayout,
+          capitalReturned: result.capitalReturned,
+          profitEarned: roundCurrency(result.prefEarned + result.profitShare),
+          totalPayout: result.totalPayout,
+          actualPayoutAmount: distributionPlan.actualPayoutAmount,
+          reinvestedAmount: distributionPlan.reinvestedAmount,
+          pendingDistributionAmount: distributionPlan.pendingDistributionAmount,
+          distributionElection: distributionPlan
+        },
+        projectSummary: {
+          budgetedProjectCost: waterfall.budgetedProjectCost,
+          totalProjectCost: waterfall.totalProjectCost,
+          hasTrackedProjectCost: waterfall.hasTrackedProjectCost,
+          effectiveProjectCost: waterfall.effectiveProjectCost,
+          projectCostVariance: waterfall.projectCostVariance,
+          projectCostVariancePct: waterfall.projectCostVariancePct,
+          salePrice: waterfall.salePrice,
+          salePriceLabel: exitLabel,
+          totalEquity: waterfall.totalEquity,
+          totalDebt: waterfall.totalDebt,
+          debt: deal.debt,
+          taxExpense: deal.taxExpense ?? 0,
+          debtInterestRate: deal.debtInterestRate ?? 0,
+          totalInterestPaid: waterfall.totalInterestPaid,
+          expenseEntries: waterfall.expenseEntries,
+          latestDrawBalance: waterfall.latestDrawBalance,
+          debtServiceEntries: waterfall.debtServiceEntries,
+          projectCostBasis: waterfall.projectCostBasis,
+          netProjectProfit: waterfall.netProjectProfit,
+          returnOnCost: waterfall.returnOnCost,
+          holdMonths: deal.holdMonths,
+          projectIrr: waterfall.projectIrr,
+          fundedOn: deal.fundedOn,
+          exitOn: deal.actualExitOn ?? deal.projectedExitOn
+        },
+        reinvestmentTargets: reinvestmentTargets.filter((item) => item.id !== deal.id),
+        privacyNote:
+          "Other investor contributions, bank balances, and the detailed monthly financing ledger remain hidden."
+      };
+    })
+    .filter(Boolean);
   const distributionProjects = buildPoolDistributionContexts(data, {
     participantId: user.participantId
   }).map((context) => ({
@@ -1565,12 +1722,21 @@ export function buildPoolMemberDashboard(user, data = seedData) {
   const jointCapitalDeployed = roundCurrency(
     pools.reduce((sum, investmentPool) => sum + (investmentPool.jointPosition?.amountInvested ?? 0), 0)
   );
+  const isContractorAccount = participant?.category === "contractor";
   const capitalAccount = {
-    ...buildCapitalAccountLedger(data, user.participantId),
-    deposits: (data.userCapitalDeposits ?? [])
-      .filter((deposit) => deposit.participantId === user.participantId)
-      .sort((left, right) => String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? "")))
+    ...(isContractorAccount
+      ? buildDeferredAccountLedger(data, user.participantId)
+      : buildCapitalAccountLedger(data, user.participantId)),
+    deposits: isContractorAccount
+      ? []
+      : (data.userCapitalDeposits ?? [])
+          .filter((deposit) => deposit.participantId === user.participantId)
+          .sort((left, right) =>
+            String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? ""))
+          ),
+    allocationRequests: buildParticipantAllocationRequests(data, user.participantId)
   };
+  const allocationTargets = buildAllocationTargets(data);
 
   return {
     role: user.role,
@@ -1584,6 +1750,7 @@ export function buildPoolMemberDashboard(user, data = seedData) {
     notifications: buildNotificationCenter(user, data),
     companyResources: data.companyResources ?? [],
     capitalAccount,
+    allocationTargets,
     poolPortfolio: {
       totalCommitted,
       totalInvested,
@@ -1598,6 +1765,7 @@ export function buildPoolMemberDashboard(user, data = seedData) {
     },
     pooledDistributionProjects: distributionProjects,
     archivedProjects,
+    directProjects,
     pools
   };
 }
@@ -1975,12 +2143,21 @@ export function buildInvestorDashboard(user, data = seedData) {
     },
     reinvestmentTargets: context.reinvestmentTargets
   }));
+  const isContractorAccount = participant?.category === "contractor";
   const capitalAccount = {
-    ...buildCapitalAccountLedger(data, user.participantId),
-    deposits: (data.userCapitalDeposits ?? [])
-      .filter((deposit) => deposit.participantId === user.participantId)
-      .sort((left, right) => String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? "")))
+    ...(isContractorAccount
+      ? buildDeferredAccountLedger(data, user.participantId)
+      : buildCapitalAccountLedger(data, user.participantId)),
+    deposits: isContractorAccount
+      ? []
+      : (data.userCapitalDeposits ?? [])
+          .filter((deposit) => deposit.participantId === user.participantId)
+          .sort((left, right) =>
+            String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? ""))
+          ),
+    allocationRequests: buildParticipantAllocationRequests(data, user.participantId)
   };
+  const allocationTargets = buildAllocationTargets(data);
 
   return {
     role: user.role,
@@ -2006,6 +2183,7 @@ export function buildInvestorDashboard(user, data = seedData) {
       issues: governanceIssues
     },
     companyResources: data.companyResources ?? [],
+    allocationTargets,
     pooledDistributionProjects,
     archivedProjects,
     projects,
@@ -2015,6 +2193,7 @@ export function buildInvestorDashboard(user, data = seedData) {
 
 export function buildManagerDashboard(user, data = seedData) {
   const participantMap = getParticipantMap(data);
+  const dealMap = new Map(data.deals.map((deal) => [deal.id, deal]));
   const userMap = new Map(data.users.map((item) => [item.participantId, item]));
   const userMapById = getUserMapById(data);
   const legalAcknowledgementsByUserId = new Map();
@@ -2159,6 +2338,7 @@ export function buildManagerDashboard(user, data = seedData) {
     const investmentAmount = getEnrollmentInvestmentAmount(data, participantId);
     const deferredAmount = getEnrollmentDeferredAmount(data, participantId);
     const capitalLedger = buildCapitalAccountLedger(data, participantId);
+    const deferredLedger = buildDeferredAccountLedger(data, participantId);
     const enrollmentFundingAmount =
       participantCategory === "contractor" ? deferredAmount : investmentAmount;
     const allocatedAmount = roundCurrency(
@@ -2173,7 +2353,7 @@ export function buildManagerDashboard(user, data = seedData) {
     const remainingAmount =
       participantCategory === "contractor"
         ? enrollmentFundingAmount > 0
-          ? roundCurrency(Math.max(enrollmentFundingAmount - allocatedAmount, 0))
+          ? deferredLedger.availableDeferredAmount
           : null
         : capitalLedger.availableCapital;
     const fundingLabel =
@@ -2181,6 +2361,10 @@ export function buildManagerDashboard(user, data = seedData) {
         ? deferredAmount > 0
           ? `Deferred Amount: ${formatCurrencyLabel(deferredAmount)}${
               remainingAmount !== null ? `; Remaining: ${formatCurrencyLabel(remainingAmount)}` : ""
+            }${
+              deferredLedger.pendingAllocationRequestAmount > 0
+                ? `; Pending requests: ${formatCurrencyLabel(deferredLedger.pendingAllocationRequestAmount)}`
+                : ""
             }`
           : ""
         : capitalLedger.totalAccountFunds > 0 || capitalLedger.pendingDepositAmount > 0
@@ -2323,6 +2507,24 @@ export function buildManagerDashboard(user, data = seedData) {
 
       return String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? ""));
     });
+  const allocationRequests = (data.userAllocationRequests ?? [])
+    .map((request) => ({
+      ...request,
+      participantName: participantMap.get(request.participantId)?.name ?? request.participantName,
+      participantEmail: userMap.get(request.participantId)?.email ?? request.participantEmail,
+      participantCategory:
+        participantMap.get(request.participantId)?.category ?? request.participantCategory,
+      dealName: dealMap.get(request.dealId)?.name ?? request.dealName,
+      needsReview: request.status === "pending",
+      canReview: request.status === "pending"
+    }))
+    .sort((left, right) => {
+      if (left.needsReview !== right.needsReview) {
+        return left.needsReview ? -1 : 1;
+      }
+
+      return String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? ""));
+    });
 
   function resolveAllocationStatus({ deal, position, participant: allocationParticipant, contractorRecord }) {
     if (!deal) {
@@ -2333,7 +2535,7 @@ export function buildManagerDashboard(user, data = seedData) {
       return contractorRecord?.status ?? "Active";
     }
 
-    if (allocationParticipant?.category === "investor") {
+    if (["investor", "pool_member"].includes(allocationParticipant?.category ?? "")) {
       const positionResult = deals
         .find((item) => item.id === position.dealId)
         ?.participantResults.find((result) => result.positionId === position.id);
@@ -2411,7 +2613,11 @@ export function buildManagerDashboard(user, data = seedData) {
       const deal = data.deals.find((item) => item.id === position.dealId);
       const participantRecord = participantMap.get(position.participantId);
 
-      if (!deal || deal.status !== "sold" || participantRecord?.category !== "investor") {
+      if (
+        !deal ||
+        deal.status !== "sold" ||
+        !["investor", "pool_member"].includes(participantRecord?.category ?? "")
+      ) {
         return null;
       }
 
@@ -2680,6 +2886,7 @@ export function buildManagerDashboard(user, data = seedData) {
       poolMembers,
       capitalAccounts,
       capitalDeposits,
+      allocationRequests,
       investorPools,
       allocations: adminAllocations,
       archivedProjects,

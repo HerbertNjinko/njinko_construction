@@ -8,6 +8,8 @@ import { assertDatabaseReady } from "./migrations.js";
 import {
   sendAccountApprovedNotification,
   sendAccountRejectedNotification,
+  sendAllocationRequestReviewedNotification,
+  sendAllocationRequestSubmittedAlertNotification,
   sendCapitalDepositReviewedNotification,
   sendCapitalDepositSubmittedAlertNotification,
   sendCredentialNotification,
@@ -1324,6 +1326,37 @@ function mapCapitalDepositRow(row) {
   };
 }
 
+function mapAllocationRequestRow(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    userId: row.userId,
+    participantId: row.participantId,
+    participantName: row.participantName ?? "",
+    participantEmail: row.participantEmail ?? "",
+    participantCategory: row.participantCategory,
+    dealId: row.dealId,
+    dealName: row.dealName ?? "",
+    amount: Number(row.amount ?? 0),
+    classType: row.classType,
+    contributionType: row.contributionType,
+    trade: row.trade ?? "",
+    participantNotes: row.participantNotes ?? "",
+    managerNotes: row.managerNotes ?? "",
+    status: row.status,
+    createdPositionId: row.createdPositionId ?? null,
+    submittedAt: row.submittedAt,
+    reviewedByUserId: row.reviewedByUserId ?? null,
+    reviewedByName: row.reviewedByName ?? null,
+    reviewedAt: row.reviewedAt ?? null,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  };
+}
+
 function mapInvestorQuestionnaireRow(row) {
   if (!row) {
     return null;
@@ -2256,6 +2289,42 @@ export async function getAppDataSnapshot({ skipAutomation = false } = {}) {
       ORDER BY user_capital_deposits.created_at DESC, user_capital_deposits.id
     `
   )).map((row) => mapCapitalDepositRow(row));
+  const userAllocationRequests = (await queryAll(
+    `
+      SELECT
+        user_allocation_requests.id AS id,
+        user_allocation_requests.user_id AS "userId",
+        user_allocation_requests.participant_id AS "participantId",
+        participants.name AS "participantName",
+        users.email AS "participantEmail",
+        user_allocation_requests.participant_category AS "participantCategory",
+        user_allocation_requests.deal_id AS "dealId",
+        deals.name AS "dealName",
+        user_allocation_requests.amount AS amount,
+        user_allocation_requests.class_type AS "classType",
+        user_allocation_requests.contribution_type AS "contributionType",
+        user_allocation_requests.trade AS trade,
+        user_allocation_requests.participant_notes AS "participantNotes",
+        user_allocation_requests.manager_notes AS "managerNotes",
+        user_allocation_requests.status AS status,
+        user_allocation_requests.created_position_id AS "createdPositionId",
+        user_allocation_requests.submitted_at AS "submittedAt",
+        user_allocation_requests.reviewed_by_user_id AS "reviewedByUserId",
+        reviewed_by_participants.name AS "reviewedByName",
+        user_allocation_requests.reviewed_at AS "reviewedAt",
+        user_allocation_requests.created_at AS "createdAt",
+        user_allocation_requests.updated_at AS "updatedAt"
+      FROM user_allocation_requests
+      JOIN participants ON participants.id = user_allocation_requests.participant_id
+      JOIN users ON users.id = user_allocation_requests.user_id
+      JOIN deals ON deals.id = user_allocation_requests.deal_id
+      LEFT JOIN users AS reviewed_by_users
+        ON reviewed_by_users.id = user_allocation_requests.reviewed_by_user_id
+      LEFT JOIN participants AS reviewed_by_participants
+        ON reviewed_by_participants.id = reviewed_by_users.participant_id
+      ORDER BY user_allocation_requests.created_at DESC, user_allocation_requests.id
+    `
+  )).map((row) => mapAllocationRequestRow(row));
   const investorQuestionnaires = (await queryAll(
     `
       SELECT
@@ -2715,6 +2784,7 @@ export async function getAppDataSnapshot({ skipAutomation = false } = {}) {
     users,
     userLegalAcknowledgements,
     userCapitalDeposits,
+    userAllocationRequests,
     investorQuestionnaires,
     deals,
     positions,
@@ -4170,15 +4240,16 @@ export async function createDealAllocation(input) {
     throw new Error("Participant not found.");
   }
 
-  if (!["investor", "contractor"].includes(participant.category)) {
-    throw new Error("Only investor and contractor participants can be allocated to deals.");
+  if (!["investor", "pool_member", "contractor"].includes(participant.category)) {
+    throw new Error("Only investor, pooled-member, and contractor participants can be allocated to deals.");
   }
 
-  if (participant.category === "investor") {
+  if (["investor", "pool_member"].includes(participant.category)) {
     await assertSufficientAccountFunds({
       participantId,
       amount: contributionAmount,
-      fieldLabel: "Contribution amount"
+      fieldLabel: "Contribution amount",
+      excludeAllocationRequestId: input.allocationRequestId
     });
   }
 
@@ -4200,7 +4271,18 @@ export async function createDealAllocation(input) {
     throw new Error("Contractor participants must be assigned as Class C.");
   }
 
+  if (participant.category === "pool_member" && classType !== "Class A") {
+    throw new Error("Pooled members must be assigned as Class A for direct project allocations.");
+  }
+
   if (participant.category === "contractor") {
+    await assertSufficientDeferredAmount({
+      participantId,
+      amount: contributionAmount,
+      fieldLabel: "Deferred amount",
+      excludeAllocationRequestId: input.allocationRequestId
+    });
+
     if (!trade) {
       throw new Error("Trade is required for contractor participants.");
     }
@@ -5826,8 +5908,13 @@ async function getCapitalAccountParticipant(participantId, executor = pool) {
   );
 }
 
-async function getParticipantCapitalLedger(participantId, executor = pool) {
+async function getParticipantCapitalLedger(
+  participantId,
+  executor = pool,
+  { excludeAllocationRequestId = null } = {}
+) {
   const normalizedParticipantId = String(participantId ?? "").trim();
+  const normalizedExcludeRequestId = normalizeOptionalText(excludeAllocationRequestId);
 
   if (!normalizedParticipantId) {
     throw new Error("A valid participant is required.");
@@ -5880,9 +5967,19 @@ async function getParticipantCapitalLedger(participantId, executor = pool) {
             WHERE participant_id = $1
           ),
           0
-        )::float AS "committedToPools"
+        )::float AS "committedToPools",
+        COALESCE(
+          (
+            SELECT SUM(amount)
+            FROM user_allocation_requests
+            WHERE participant_id = $1
+              AND status = 'pending'
+              AND ($2::text IS NULL OR id <> $2)
+          ),
+          0
+        )::float AS "pendingAllocationRequestAmount"
     `,
-    [normalizedParticipantId],
+    [normalizedParticipantId, normalizedExcludeRequestId],
     executor
   );
   const enrollmentInvestmentAmount = roundNumber(row?.enrollmentInvestmentAmount ?? 0);
@@ -5890,8 +5987,11 @@ async function getParticipantCapitalLedger(participantId, executor = pool) {
   const pendingDepositAmount = roundNumber(row?.pendingDepositAmount ?? 0);
   const allocatedToProjects = roundNumber(row?.allocatedToProjects ?? 0);
   const committedToPools = roundNumber(row?.committedToPools ?? 0);
+  const pendingAllocationRequestAmount = roundNumber(row?.pendingAllocationRequestAmount ?? 0);
   const totalAccountFunds = roundNumber(enrollmentInvestmentAmount + approvedDepositAmount);
-  const totalAllocatedFunds = roundNumber(allocatedToProjects + committedToPools);
+  const totalAllocatedFunds = roundNumber(
+    allocatedToProjects + committedToPools + pendingAllocationRequestAmount
+  );
   const availableCapital = roundNumber(Math.max(totalAccountFunds - totalAllocatedFunds, 0));
 
   return {
@@ -5902,8 +6002,72 @@ async function getParticipantCapitalLedger(participantId, executor = pool) {
     totalAccountFunds,
     allocatedToProjects,
     committedToPools,
+    pendingAllocationRequestAmount,
     totalAllocatedFunds,
     availableCapital
+  };
+}
+
+async function getParticipantDeferredLedger(
+  participantId,
+  executor = pool,
+  { excludeAllocationRequestId = null } = {}
+) {
+  const normalizedParticipantId = String(participantId ?? "").trim();
+  const normalizedExcludeRequestId = normalizeOptionalText(excludeAllocationRequestId);
+
+  if (!normalizedParticipantId) {
+    throw new Error("A valid participant is required.");
+  }
+
+  const row = await queryOne(
+    `
+      SELECT
+        COALESCE(
+          (
+            SELECT MAX(deferred_amount)
+            FROM user_legal_acknowledgements
+            WHERE participant_id = $1
+              AND deferred_amount IS NOT NULL
+              AND deferred_amount > 0
+          ),
+          0
+        )::float AS "enrollmentDeferredAmount",
+        COALESCE(
+          (
+            SELECT SUM(deferred_amount)
+            FROM contractor_participation
+            WHERE participant_id = $1
+          ),
+          0
+        )::float AS "allocatedDeferredAmount",
+        COALESCE(
+          (
+            SELECT SUM(amount)
+            FROM user_allocation_requests
+            WHERE participant_id = $1
+              AND status = 'pending'
+              AND ($2::text IS NULL OR id <> $2)
+          ),
+          0
+        )::float AS "pendingAllocationRequestAmount"
+    `,
+    [normalizedParticipantId, normalizedExcludeRequestId],
+    executor
+  );
+  const enrollmentDeferredAmount = roundNumber(row?.enrollmentDeferredAmount ?? 0);
+  const allocatedDeferredAmount = roundNumber(row?.allocatedDeferredAmount ?? 0);
+  const pendingAllocationRequestAmount = roundNumber(row?.pendingAllocationRequestAmount ?? 0);
+  const availableDeferredAmount = roundNumber(
+    Math.max(enrollmentDeferredAmount - allocatedDeferredAmount - pendingAllocationRequestAmount, 0)
+  );
+
+  return {
+    participantId: normalizedParticipantId,
+    enrollmentDeferredAmount,
+    allocatedDeferredAmount,
+    pendingAllocationRequestAmount,
+    availableDeferredAmount
   };
 }
 
@@ -5912,9 +6076,12 @@ async function assertSufficientAccountFunds({
   amount,
   fieldLabel,
   availableOverride = null,
-  executor = pool
+  executor = pool,
+  excludeAllocationRequestId = null
 }) {
-  const ledger = await getParticipantCapitalLedger(participantId, executor);
+  const ledger = await getParticipantCapitalLedger(participantId, executor, {
+    excludeAllocationRequestId
+  });
   const requestedAmount = roundNumber(Number(amount ?? 0));
   const availableCapital =
     availableOverride === null || availableOverride === undefined
@@ -5936,6 +6103,32 @@ async function assertSufficientAccountFunds({
     ...ledger,
     availableCapital
   };
+}
+
+async function assertSufficientDeferredAmount({
+  participantId,
+  amount,
+  fieldLabel,
+  executor = pool,
+  excludeAllocationRequestId = null
+}) {
+  const ledger = await getParticipantDeferredLedger(participantId, executor, {
+    excludeAllocationRequestId
+  });
+  const requestedAmount = roundNumber(Number(amount ?? 0));
+
+  if (
+    (ledger.enrollmentDeferredAmount > 0 || ledger.pendingAllocationRequestAmount > 0) &&
+    requestedAmount > ledger.availableDeferredAmount
+  ) {
+    throw new Error(
+      `${fieldLabel} exceeds this contractor's available deferred amount. Available deferred amount: ${ledger.availableDeferredAmount.toFixed(
+        2
+      )}.`
+    );
+  }
+
+  return ledger;
 }
 
 async function notifyManagersAboutCapitalDeposit(deposit) {
@@ -6213,6 +6406,328 @@ export async function getCapitalDepositProofDownload(depositId) {
   }
 
   return document;
+}
+
+async function getAllocationRequestById(requestId, executor = pool) {
+  const normalizedRequestId = String(requestId ?? "").trim();
+
+  if (!normalizedRequestId) {
+    return null;
+  }
+
+  const row = await queryOne(
+    `
+      SELECT
+        user_allocation_requests.id AS id,
+        user_allocation_requests.user_id AS "userId",
+        user_allocation_requests.participant_id AS "participantId",
+        participants.name AS "participantName",
+        users.email AS "participantEmail",
+        user_allocation_requests.participant_category AS "participantCategory",
+        user_allocation_requests.deal_id AS "dealId",
+        deals.name AS "dealName",
+        user_allocation_requests.amount AS amount,
+        user_allocation_requests.class_type AS "classType",
+        user_allocation_requests.contribution_type AS "contributionType",
+        user_allocation_requests.trade AS trade,
+        user_allocation_requests.participant_notes AS "participantNotes",
+        user_allocation_requests.manager_notes AS "managerNotes",
+        user_allocation_requests.status AS status,
+        user_allocation_requests.created_position_id AS "createdPositionId",
+        user_allocation_requests.submitted_at AS "submittedAt",
+        user_allocation_requests.reviewed_by_user_id AS "reviewedByUserId",
+        reviewed_by_participants.name AS "reviewedByName",
+        user_allocation_requests.reviewed_at AS "reviewedAt",
+        user_allocation_requests.created_at AS "createdAt",
+        user_allocation_requests.updated_at AS "updatedAt"
+      FROM user_allocation_requests
+      JOIN participants ON participants.id = user_allocation_requests.participant_id
+      JOIN users ON users.id = user_allocation_requests.user_id
+      JOIN deals ON deals.id = user_allocation_requests.deal_id
+      LEFT JOIN users AS reviewed_by_users
+        ON reviewed_by_users.id = user_allocation_requests.reviewed_by_user_id
+      LEFT JOIN participants AS reviewed_by_participants
+        ON reviewed_by_participants.id = reviewed_by_users.participant_id
+      WHERE user_allocation_requests.id = $1
+    `,
+    [normalizedRequestId],
+    executor
+  );
+
+  return mapAllocationRequestRow(row);
+}
+
+async function getOpenDealForUserAllocation(dealId, executor = pool) {
+  const normalizedDealId = String(dealId ?? "").trim();
+
+  if (!normalizedDealId) {
+    throw new Error("Select an open project.");
+  }
+
+  const deal = await queryOne(
+    `
+      SELECT
+        id,
+        name,
+        status,
+        investment_close_on AS "investmentCloseOn"
+      FROM deals
+      WHERE id = $1
+    `,
+    [normalizedDealId],
+    executor
+  );
+
+  if (!deal) {
+    throw new Error("Project not found.");
+  }
+
+  if (deal.status === "sold") {
+    throw new Error("Sold projects cannot receive new allocation requests.");
+  }
+
+  if (isInvestmentWindowClosed(deal.investmentCloseOn)) {
+    throw new Error(
+      `Investments for ${deal.name} closed on ${deal.investmentCloseOn}. Select another open project.`
+    );
+  }
+
+  return deal;
+}
+
+function normalizeAllocationRequestDecision(value) {
+  const decision = String(value ?? "").trim().toLowerCase();
+
+  if (!["approved", "rejected"].includes(decision)) {
+    throw new Error("Allocation request decision must be approved or rejected.");
+  }
+
+  return decision;
+}
+
+function getAllocationRequestDefaultsForCategory(category) {
+  if (category === "contractor") {
+    return {
+      classType: "Class C",
+      contributionType: "Deferred compensation"
+    };
+  }
+
+  return {
+    classType: "Class A",
+    contributionType: "Cash equity"
+  };
+}
+
+async function notifyManagersAboutAllocationRequest(allocationRequest) {
+  const managerRecipients = await getActiveManagerRecipients();
+
+  await Promise.all(
+    managerRecipients.map(async (managerRecipient) => {
+      try {
+        return await sendAllocationRequestSubmittedAlertNotification({
+          userId: managerRecipient.userId,
+          participantId: managerRecipient.participantId,
+          managerName: managerRecipient.fullName,
+          email: managerRecipient.email,
+          participantName: allocationRequest.participantName,
+          participantEmail: allocationRequest.participantEmail,
+          participantCategory: allocationRequest.participantCategory,
+          dealName: allocationRequest.dealName,
+          amount: allocationRequest.amount,
+          submittedAt: allocationRequest.submittedAt
+        });
+      } catch {
+        return null;
+      }
+    })
+  );
+}
+
+async function notifyAllocationRequestReview(allocationRequest) {
+  if (!allocationRequest?.userId || !allocationRequest?.participantEmail) {
+    return null;
+  }
+
+  try {
+    return await sendAllocationRequestReviewedNotification({
+      userId: allocationRequest.userId,
+      participantId: allocationRequest.participantId,
+      fullName: allocationRequest.participantName,
+      email: allocationRequest.participantEmail,
+      dealName: allocationRequest.dealName,
+      amount: allocationRequest.amount,
+      status: allocationRequest.status,
+      managerNotes: allocationRequest.managerNotes
+    });
+  } catch (error) {
+    return {
+      status: "failed",
+      provider: "notification_error",
+      localPath: null,
+      errorMessage: error.message
+    };
+  }
+}
+
+export async function submitAllocationRequest(userId, input) {
+  const normalizedUserId = String(userId ?? "").trim();
+  const dealId = String(input?.dealId ?? "").trim();
+  const amount = normalizePositiveCurrencyAmount(input?.amount, "Allocation amount");
+  const participantNotes = normalizeOptionalText(input?.notes ?? input?.participantNotes);
+  const trade = normalizeOptionalText(input?.trade);
+  const user = await getUserAccountById(normalizedUserId);
+
+  if (!user || user.role === "manager") {
+    throw new Error("Only investor, pooled-member, and contractor accounts can submit allocation requests.");
+  }
+
+  if (!["investor", "pool_member", "contractor"].includes(user.category)) {
+    throw new Error("This account category cannot submit project allocation requests.");
+  }
+
+  const deal = await getOpenDealForUserAllocation(dealId);
+  const defaults = getAllocationRequestDefaultsForCategory(user.category);
+
+  if (user.category === "contractor") {
+    if (!trade) {
+      throw new Error("Trade is required for contractor deferred allocation requests.");
+    }
+
+    await assertSufficientDeferredAmount({
+      participantId: user.participantId,
+      amount,
+      fieldLabel: "Deferred amount"
+    });
+  } else {
+    await assertSufficientAccountFunds({
+      participantId: user.participantId,
+      amount,
+      fieldLabel: "Allocation amount"
+    });
+  }
+
+  const timestamp = nowTimestamp();
+  const requestId = createId("allocation-request");
+
+  await pool.query(
+    `
+      INSERT INTO user_allocation_requests (
+        id,
+        user_id,
+        participant_id,
+        deal_id,
+        participant_category,
+        amount,
+        class_type,
+        contribution_type,
+        trade,
+        participant_notes,
+        manager_notes,
+        status,
+        created_position_id,
+        submitted_at,
+        reviewed_by_user_id,
+        reviewed_at,
+        created_at,
+        updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, 'pending', NULL, $11, NULL, NULL, $11, $11)
+    `,
+    [
+      requestId,
+      user.id,
+      user.participantId,
+      deal.id,
+      user.category,
+      amount,
+      defaults.classType,
+      defaults.contributionType,
+      trade,
+      participantNotes,
+      timestamp
+    ]
+  );
+
+  const allocationRequest = await getAllocationRequestById(requestId);
+  await notifyManagersAboutAllocationRequest(allocationRequest);
+
+  return {
+    allocationRequest
+  };
+}
+
+export async function reviewAllocationRequest(requestId, input, actingUserId) {
+  const normalizedRequestId = String(requestId ?? "").trim();
+  const decision = normalizeAllocationRequestDecision(input?.decision ?? input?.status);
+  const managerNotes = normalizeOptionalText(input?.managerNotes);
+  const timestamp = nowTimestamp();
+
+  if (!normalizedRequestId) {
+    throw new Error("A valid allocation request is required.");
+  }
+
+  const existing = await getAllocationRequestById(normalizedRequestId);
+
+  if (!existing) {
+    throw new Error("Allocation request not found.");
+  }
+
+  if (existing.status !== "pending") {
+    throw new Error("Only pending allocation requests can be reviewed.");
+  }
+
+  let allocation = null;
+  let createdPositionId = null;
+
+  if (decision === "approved") {
+    await getOpenDealForUserAllocation(existing.dealId);
+    allocation = await createDealAllocation({
+      allocationRequestId: existing.id,
+      participantId: existing.participantId,
+      dealId: existing.dealId,
+      classType: existing.classType,
+      contributionAmount: existing.amount,
+      contributionType: existing.contributionType,
+      trade: existing.trade,
+      totalContractValue:
+        existing.participantCategory === "contractor" ? existing.amount : undefined,
+      cashPaid: 0,
+      contractorStatus: "Active"
+    });
+    createdPositionId = allocation.positionId;
+  }
+
+  await pool.query(
+    `
+      UPDATE user_allocation_requests
+      SET
+        status = $1,
+        manager_notes = $2,
+        reviewed_by_user_id = $3,
+        reviewed_at = $4,
+        created_position_id = $5,
+        updated_at = $4
+      WHERE id = $6
+    `,
+    [
+      decision,
+      managerNotes,
+      String(actingUserId ?? "").trim() || null,
+      timestamp,
+      createdPositionId,
+      normalizedRequestId
+    ]
+  );
+
+  const allocationRequest = await getAllocationRequestById(normalizedRequestId);
+  const notification = await notifyAllocationRequestReview(allocationRequest);
+
+  return {
+    allocationRequest,
+    allocation,
+    notification
+  };
 }
 
 async function insertArchivedRecord(client, archiveInput) {
