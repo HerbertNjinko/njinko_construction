@@ -5,7 +5,7 @@ import {
   LOGIN_PAGE_TITLE,
   app,
   state
-} from "./state.js?v=20260501-frontend-04";
+} from "./state.js?v=20260501-frontend-06";
 import {
   breakdownItem,
   escapeHtml,
@@ -21,7 +21,7 @@ import {
   renderSectionToggle,
   summaryItem,
   titleCase
-} from "./helpers.js?v=20260501-frontend-04";
+} from "./helpers.js?v=20260501-frontend-06";
 import {
   applyAllocationFilters,
   applyArchivedProjectFilters,
@@ -44,7 +44,7 @@ import {
   getInvestorProjectFilterOptions,
   getManagerEditableDeal,
   getUserFilterOptions
-} from "./data.js?v=20260501-frontend-04";
+} from "./data.js?v=20260501-frontend-06";
 
 function renderLogin() {
   const errorMarkup = state.loginError
@@ -2327,8 +2327,8 @@ function renderAccountActionStack(showAccountDetails = false) {
 
   return `
     <div class="account-action-stack">
-      <button class="button-secondary" id="logout-button" type="button">Log out</button>
       ${accountDetailsButton}
+      <button class="button-secondary" id="logout-button" type="button">Log out</button>
     </div>
   `;
 }
@@ -2362,10 +2362,12 @@ function renderInvestorDashboard() {
             titleCase(viewer.category)
           )}</p>
         </div>
-        <div class="button-row">
-          <span class="read-only-tag">Deal data remains read only</span>
-          ${renderNotificationBell()}
-          ${renderAccountActionStack(canViewAccountDetails)}
+        <div class="app-header-actions">
+          <span class="read-only-tag app-header-status">Read-only deal data</span>
+          <div class="app-header-controls">
+            ${renderNotificationBell()}
+            ${renderAccountActionStack(canViewAccountDetails)}
+          </div>
         </div>
       </section>
 
@@ -2773,10 +2775,12 @@ function renderPoolMemberDashboard() {
           <h2>${escapeHtml(viewer.name)}</h2>
           <p class="meta-line">${escapeHtml(viewer.email)} · Joint-capital investor portal</p>
         </div>
-        <div class="button-row">
-          <span class="read-only-tag">Project allocations remain pooled</span>
-          ${renderNotificationBell()}
-          ${renderAccountActionStack(true)}
+        <div class="app-header-actions">
+          <span class="read-only-tag app-header-status">Pooled capital account</span>
+          <div class="app-header-controls">
+            ${renderNotificationBell()}
+            ${renderAccountActionStack(true)}
+          </div>
         </div>
       </section>
 
