@@ -5,7 +5,7 @@ import {
   LOGIN_PAGE_TITLE,
   app,
   state
-} from "./state.js?v=20260501-frontend-01";
+} from "./state.js?v=20260501-frontend-02";
 import {
   breakdownItem,
   escapeHtml,
@@ -21,7 +21,7 @@ import {
   renderSectionToggle,
   summaryItem,
   titleCase
-} from "./helpers.js?v=20260501-frontend-01";
+} from "./helpers.js?v=20260501-frontend-02";
 import {
   applyAllocationFilters,
   applyArchivedProjectFilters,
@@ -44,7 +44,7 @@ import {
   getInvestorProjectFilterOptions,
   getManagerEditableDeal,
   getUserFilterOptions
-} from "./data.js?v=20260501-frontend-01";
+} from "./data.js?v=20260501-frontend-02";
 
 function renderLogin() {
   const errorMarkup = state.loginError
@@ -5140,6 +5140,7 @@ function renderDocumentAcknowledgementsSection() {
                     <th>ID dates</th>
                     <th>Legal documents</th>
                     <th>Account approval</th>
+                    <th>Audit report</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -5167,6 +5168,25 @@ function renderDocumentAcknowledgementsSection() {
                           )}</td>
                           <td>${renderLegalAcknowledgementStatus(row)}</td>
                           <td>${escapeHtml(accountApprovalStatusLabel(row.accountApprovalStatus))}</td>
+                          <td>
+                            <div class="table-actions">
+                              <a
+                                class="button-secondary button-inline"
+                                href="/api/admin/users/${encodeURIComponent(row.id)}/document-acknowledgement-report"
+                                target="_blank"
+                                rel="noopener"
+                              >
+                                View report
+                              </a>
+                              <a
+                                class="button-secondary button-inline"
+                                href="/api/admin/users/${encodeURIComponent(row.id)}/document-acknowledgement-report?format=txt"
+                                download="${escapeHtml(`document-acknowledgement-${row.name}.txt`)}"
+                              >
+                                Download report
+                              </a>
+                            </div>
+                          </td>
                         </tr>
                       `
                     )

@@ -1373,6 +1373,56 @@ export async function getPendingLegalAcknowledgementDocuments(userId, category, 
   );
 }
 
+export async function getUserDocumentAcknowledgementReport(userId) {
+  const normalizedUserId = String(userId ?? "").trim();
+
+  if (!normalizedUserId) {
+    throw new Error("A valid user is required.");
+  }
+
+  const user = await getUserAccountById(normalizedUserId, { includeInactive: true });
+
+  if (!user) {
+    throw new Error("User not found.");
+  }
+
+  if (user.role === "manager") {
+    throw new Error("Manager accounts do not require document acknowledgement reports.");
+  }
+
+  const requiredDocuments = getRequiredLegalDocumentsForCategory(user.category);
+  const signedDocuments = await getLegalAcknowledgementsForUser(user.id);
+  const signedDocumentVersions = new Set(
+    signedDocuments.map(
+      (acknowledgement) =>
+        `${acknowledgement.documentKey}:${acknowledgement.documentVersion}`
+    )
+  );
+  const missingDocuments = requiredDocuments.filter(
+    (document) => !signedDocumentVersions.has(`${document.key}:${document.version}`)
+  );
+
+  return {
+    generatedAt: nowTimestamp(),
+    user: {
+      id: user.id,
+      participantId: user.participantId,
+      name: user.name,
+      email: user.email,
+      category: user.category,
+      accountApprovalStatus: user.accountApprovalStatus,
+      accountReviewedAt: user.accountReviewedAt,
+      onboardingSubmittedAt: user.onboardingSubmittedAt,
+      idCardFileName: user.idCardFileName,
+      idDocumentIssueDate: user.idDocumentIssueDate,
+      idDocumentExpirationDate: user.idDocumentExpirationDate
+    },
+    requiredDocuments,
+    signedDocuments,
+    missingDocuments
+  };
+}
+
 async function getInvestorQuestionnaireForUser(userId, executor = pool) {
   const normalizedUserId = String(userId ?? "").trim();
 

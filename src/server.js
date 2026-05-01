@@ -27,6 +27,7 @@ import {
   getLegalDocumentDefinition,
   getPendingLegalAcknowledgementDocuments,
   getRequiredLegalDocumentsForCategory,
+  getUserDocumentAcknowledgementReport,
   isInvestorQuestionnaireRequired,
   getUserByEmail,
   getUserById,
@@ -419,6 +420,271 @@ function buildInlineDisposition(fileName) {
   return `inline; filename="${safeFileName}"`;
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function titleCase(value) {
+  return String(value ?? "")
+    .replaceAll("_", " ")
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function formatReportDateTime(value) {
+  if (!value) {
+    return "Not recorded";
+  }
+
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString("en-US");
+}
+
+function formatReportDate(value) {
+  if (!value) {
+    return "Not recorded";
+  }
+
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleDateString("en-US");
+}
+
+function formatReportCurrency(value) {
+  if (value === null || value === undefined || value === "") {
+    return "";
+  }
+
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 0
+  }).format(Number(value));
+}
+
+function buildDocumentAcknowledgementReportText(report) {
+  const lines = [
+    "DOCUMENT ACKNOWLEDGEMENT AUDIT REPORT",
+    `Generated: ${formatReportDateTime(report.generatedAt)}`,
+    "",
+    "USER",
+    `Name: ${report.user.name}`,
+    `Email: ${report.user.email}`,
+    `Category: ${titleCase(report.user.category)}`,
+    `Account approval: ${titleCase(report.user.accountApprovalStatus)}`,
+    `Onboarding submitted: ${formatReportDateTime(report.user.onboardingSubmittedAt)}`,
+    `Account reviewed: ${formatReportDateTime(report.user.accountReviewedAt)}`,
+    `ID document: ${report.user.idCardFileName || "Not uploaded"}`,
+    `ID issue date: ${formatReportDate(report.user.idDocumentIssueDate)}`,
+    `ID expiration date: ${formatReportDate(report.user.idDocumentExpirationDate)}`,
+    "",
+    "SIGNED DOCUMENTS"
+  ];
+
+  if (report.signedDocuments.length) {
+    for (const acknowledgement of report.signedDocuments) {
+      lines.push(`- ${acknowledgement.documentTitle}`);
+      lines.push(`  Version: ${acknowledgement.documentVersion}`);
+      lines.push(`  File: ${acknowledgement.documentFileName || "Not recorded"}`);
+      lines.push(`  Signature: ${acknowledgement.signerName}`);
+      lines.push(`  Acknowledged at: ${formatReportDateTime(acknowledgement.acknowledgedAt)}`);
+
+      if (Number(acknowledgement.investmentAmount) > 0) {
+        lines.push(`  Investment amount: ${formatReportCurrency(acknowledgement.investmentAmount)}`);
+      }
+
+      if (Number(acknowledgement.deferredAmount) > 0) {
+        lines.push(`  Deferred amount: ${formatReportCurrency(acknowledgement.deferredAmount)}`);
+      }
+
+      if (acknowledgement.proofOfPaymentFileName) {
+        lines.push(`  Proof of payment: ${acknowledgement.proofOfPaymentFileName}`);
+      }
+    }
+  } else {
+    lines.push("No signed documents recorded.");
+  }
+
+  lines.push("", "MISSING REQUIRED DOCUMENTS");
+
+  if (report.missingDocuments.length) {
+    for (const document of report.missingDocuments) {
+      lines.push(`- ${document.title} (${document.version})`);
+    }
+  } else {
+    lines.push("None.");
+  }
+
+  lines.push("", "CERTIFICATION");
+  lines.push(
+    "This report was generated from the portal database and records the document acknowledgement events stored for this user."
+  );
+
+  return `${lines.join("\n")}\n`;
+}
+
+function buildDocumentAcknowledgementReportHtml(report) {
+  const signedRows = report.signedDocuments.length
+    ? report.signedDocuments
+        .map(
+          (acknowledgement) => `
+            <tr>
+              <td>${escapeHtml(acknowledgement.documentTitle)}</td>
+              <td>${escapeHtml(acknowledgement.documentVersion)}</td>
+              <td>${escapeHtml(acknowledgement.signerName)}</td>
+              <td>${escapeHtml(formatReportDateTime(acknowledgement.acknowledgedAt))}</td>
+              <td>${escapeHtml(formatReportCurrency(acknowledgement.investmentAmount))}</td>
+              <td>${escapeHtml(formatReportCurrency(acknowledgement.deferredAmount))}</td>
+              <td>${escapeHtml(acknowledgement.proofOfPaymentFileName || "")}</td>
+            </tr>
+          `
+        )
+        .join("")
+    : '<tr><td colspan="7">No signed documents recorded.</td></tr>';
+  const missingRows = report.missingDocuments.length
+    ? report.missingDocuments
+        .map(
+          (document) => `
+            <li>${escapeHtml(document.title)} <span>Version ${escapeHtml(document.version)}</span></li>
+          `
+        )
+        .join("")
+    : "<li>None.</li>";
+
+  return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Document Acknowledgement Audit Report</title>
+    <style>
+      body {
+        color: #1f1a17;
+        font-family: Arial, sans-serif;
+        line-height: 1.45;
+        margin: 32px;
+      }
+
+      h1,
+      h2 {
+        margin: 0 0 10px;
+      }
+
+      .meta,
+      span {
+        color: #5f554d;
+      }
+
+      .panel {
+        border-top: 1px solid #d8d0c7;
+        margin-top: 24px;
+        padding-top: 18px;
+      }
+
+      dl {
+        display: grid;
+        gap: 8px 16px;
+        grid-template-columns: 180px 1fr;
+      }
+
+      dt {
+        font-weight: 700;
+      }
+
+      dd {
+        margin: 0;
+      }
+
+      table {
+        border-collapse: collapse;
+        width: 100%;
+      }
+
+      th,
+      td {
+        border: 1px solid #d8d0c7;
+        padding: 8px;
+        text-align: left;
+        vertical-align: top;
+      }
+
+      th {
+        background: #f5f0ea;
+      }
+
+      @media print {
+        body {
+          margin: 0.6in;
+        }
+
+        button {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <button type="button" onclick="window.print()">Print / Save PDF</button>
+    <h1>Document Acknowledgement Audit Report</h1>
+    <p class="meta">Generated ${escapeHtml(formatReportDateTime(report.generatedAt))}</p>
+    <section class="panel">
+      <h2>User</h2>
+      <dl>
+        <dt>Name</dt>
+        <dd>${escapeHtml(report.user.name)}</dd>
+        <dt>Email</dt>
+        <dd>${escapeHtml(report.user.email)}</dd>
+        <dt>Category</dt>
+        <dd>${escapeHtml(titleCase(report.user.category))}</dd>
+        <dt>Account approval</dt>
+        <dd>${escapeHtml(titleCase(report.user.accountApprovalStatus))}</dd>
+        <dt>Onboarding submitted</dt>
+        <dd>${escapeHtml(formatReportDateTime(report.user.onboardingSubmittedAt))}</dd>
+        <dt>Account reviewed</dt>
+        <dd>${escapeHtml(formatReportDateTime(report.user.accountReviewedAt))}</dd>
+        <dt>ID document</dt>
+        <dd>${escapeHtml(report.user.idCardFileName || "Not uploaded")}</dd>
+        <dt>ID dates</dt>
+        <dd>${escapeHtml(
+          `${formatReportDate(report.user.idDocumentIssueDate)} to ${formatReportDate(
+            report.user.idDocumentExpirationDate
+          )}`
+        )}</dd>
+      </dl>
+    </section>
+    <section class="panel">
+      <h2>Signed Documents</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Document</th>
+            <th>Version</th>
+            <th>Signature</th>
+            <th>Acknowledged</th>
+            <th>Investment</th>
+            <th>Deferred</th>
+            <th>Proof file</th>
+          </tr>
+        </thead>
+        <tbody>${signedRows}</tbody>
+      </table>
+    </section>
+    <section class="panel">
+      <h2>Missing Required Documents</h2>
+      <ul>${missingRows}</ul>
+    </section>
+    <section class="panel">
+      <h2>Certification</h2>
+      <p>
+        This report was generated from the portal database and records the document acknowledgement events stored for this user.
+      </p>
+    </section>
+  </body>
+</html>`;
+}
+
 function sanitizeContentType(contentType) {
   const normalized = String(contentType ?? "").replace(/[\r\n]/g, "").trim();
 
@@ -664,6 +930,9 @@ const server = createServer(async (request, response) => {
     );
     const userIdentityDocumentMatch = url.pathname.match(
       /^\/api\/admin\/users\/([^/]+)\/id-card$/
+    );
+    const userDocumentReportMatch = url.pathname.match(
+      /^\/api\/admin\/users\/([^/]+)\/document-acknowledgement-report$/
     );
     const legalPaymentProofMatch = url.pathname.match(
       /^\/api\/admin\/legal-acknowledgements\/([^/]+)\/proof$/
@@ -1237,6 +1506,46 @@ const server = createServer(async (request, response) => {
           ...getSecurityHeaders()
         });
         response.end(decoded.buffer);
+      } catch (error) {
+        sendJson(response, 404, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "GET" && userDocumentReportMatch) {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      try {
+        const report = await getUserDocumentAcknowledgementReport(
+          decodeURIComponent(userDocumentReportMatch[1])
+        );
+        const reportBaseName = `document-acknowledgement-${report.user.name
+          .replace(/[^\w.-]+/g, "-")
+          .replace(/^-+|-+$/g, "")
+          .toLowerCase() || "user"}`;
+
+        if (url.searchParams.get("format") === "txt") {
+          response.writeHead(200, {
+            "Content-Type": "text/plain; charset=utf-8",
+            "Content-Disposition": buildAttachmentDisposition(`${reportBaseName}.txt`),
+            "Cache-Control": "private, max-age=0, must-revalidate",
+            ...getSecurityHeaders()
+          });
+          response.end(buildDocumentAcknowledgementReportText(report));
+        } else {
+          response.writeHead(200, {
+            "Content-Type": "text/html; charset=utf-8",
+            "Content-Disposition": buildInlineDisposition(`${reportBaseName}.html`),
+            "Cache-Control": "private, max-age=0, must-revalidate",
+            ...getSecurityHeaders()
+          });
+          response.end(buildDocumentAcknowledgementReportHtml(report));
+        }
       } catch (error) {
         sendJson(response, 404, { error: error.message });
       }
