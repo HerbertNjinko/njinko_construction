@@ -405,6 +405,16 @@ function buildCapitalAccountLedger(data, participantId) {
       .filter((commitment) => commitment.participantId === participantId)
       .reduce((sum, commitment) => sum + Number(commitment.commitmentAmount ?? 0), 0)
   );
+  const committedToProjectPools = roundCurrency(
+    (data.userAllocationRequests ?? [])
+      .filter(
+        (request) =>
+          request.participantId === participantId &&
+          request.allocationMode === "pooled" &&
+          request.status === "approved"
+      )
+      .reduce((sum, request) => sum + Number(request.amount ?? 0), 0)
+  );
   const pendingAllocationRequestAmount = roundCurrency(
     (data.userAllocationRequests ?? [])
       .filter((request) => request.participantId === participantId && request.status === "pending")
@@ -412,7 +422,7 @@ function buildCapitalAccountLedger(data, participantId) {
   );
   const totalAccountFunds = roundCurrency(enrollmentInvestmentAmount + approvedDepositAmount);
   const totalAllocatedFunds = roundCurrency(
-    allocatedToProjects + committedToPools + pendingAllocationRequestAmount
+    allocatedToProjects + committedToPools + committedToProjectPools + pendingAllocationRequestAmount
   );
   const availableCapital = roundCurrency(Math.max(totalAccountFunds - totalAllocatedFunds, 0));
   const latestApprovedDeposit = approvedDeposits
@@ -436,7 +446,8 @@ function buildCapitalAccountLedger(data, participantId) {
     pendingDepositAmount,
     totalAccountFunds,
     allocatedToProjects,
-    committedToPools,
+    committedToPools: roundCurrency(committedToPools + committedToProjectPools),
+    committedToProjectPools,
     pendingAllocationRequestAmount,
     totalAllocatedFunds,
     availableCapital,
@@ -481,6 +492,9 @@ function buildAllocationTargets(data, asOfDate = String(data.asOfDate ?? new Dat
       name: deal.name,
       location: deal.location,
       investmentCloseOn: deal.investmentCloseOn ?? null,
+      directInvestmentMinimum: roundCurrency(deal.directInvestmentMinimum ?? 0),
+      pooledInvestmentAllowed: Boolean(Number(deal.pooledInvestmentAllowed ?? 0)),
+      pooledInvestmentTarget: roundCurrency(deal.pooledInvestmentTarget ?? 0),
       status: deal.status,
       statusLabel: statusLabel(deal.status)
     }))
@@ -491,6 +505,67 @@ function buildParticipantAllocationRequests(data, participantId) {
   return (data.userAllocationRequests ?? [])
     .filter((request) => request.participantId === participantId)
     .sort((left, right) => String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? "")));
+}
+
+function buildProjectPooledRequestBuckets(data, asOfDate) {
+  const participantMap = getParticipantMap(data);
+  const userMap = getUserMapByParticipantId(data);
+
+  return (data.deals ?? [])
+    .filter((deal) => deal.status !== "sold" && !isDateClosed(deal.investmentCloseOn, asOfDate))
+    .filter((deal) => Boolean(Number(deal.pooledInvestmentAllowed ?? 0)))
+    .map((deal) => {
+      const approvedRequests = (data.userAllocationRequests ?? [])
+        .filter(
+          (request) =>
+            request.dealId === deal.id &&
+            request.allocationMode === "pooled" &&
+            request.status === "approved" &&
+            !request.createdPositionId
+        )
+        .sort((left, right) =>
+          String(left.createdAt ?? "").localeCompare(String(right.createdAt ?? ""))
+        );
+      const approvedAmount = roundCurrency(
+        approvedRequests.reduce((sum, request) => sum + Number(request.amount ?? 0), 0)
+      );
+      const pooledInvestmentTarget = roundCurrency(deal.pooledInvestmentTarget ?? 0);
+
+      return {
+        dealId: deal.id,
+        dealName: deal.name,
+        location: deal.location,
+        investmentCloseOn: deal.investmentCloseOn ?? null,
+        pooledInvestmentTarget,
+        approvedAmount,
+        amountRemaining: roundCurrency(Math.max(pooledInvestmentTarget - approvedAmount, 0)),
+        requestCount: approvedRequests.length,
+        canFund:
+          approvedRequests.length > 0 &&
+          (pooledInvestmentTarget <= 0 || approvedAmount >= pooledInvestmentTarget),
+        requests: approvedRequests.map((request) => {
+          const participant = participantMap.get(request.participantId);
+          const user = userMap.get(request.participantId);
+
+          return {
+            id: request.id,
+            participantId: request.participantId,
+            participantName: participant?.name ?? request.participantName,
+            participantEmail: user?.email ?? request.participantEmail,
+            amount: Number(request.amount ?? 0),
+            submittedAt: request.submittedAt ?? request.createdAt
+          };
+        })
+      };
+    })
+    .filter((bucket) => bucket.requestCount > 0)
+    .sort((left, right) => {
+      if (left.canFund !== right.canFund) {
+        return left.canFund ? -1 : 1;
+      }
+
+      return left.dealName.localeCompare(right.dealName);
+    });
 }
 
 function calculateCurrentPref(position, deal, asOfDate) {
@@ -2270,6 +2345,9 @@ export function buildManagerDashboard(user, data = seedData) {
       prefRate: deal.prefRate,
       currentPhase: deal.currentPhase,
       investmentCloseOn: deal.investmentCloseOn ?? null,
+      directInvestmentMinimum: roundCurrency(deal.directInvestmentMinimum ?? 0),
+      pooledInvestmentAllowed: Boolean(Number(deal.pooledInvestmentAllowed ?? 0)),
+      pooledInvestmentTarget: roundCurrency(deal.pooledInvestmentTarget ?? 0),
       timelineProgress: resolveTimelineProgress(deal.status, deal.timelineProgress),
       timeline: deal.timeline,
       fundedOn: deal.fundedOn,
@@ -2854,6 +2932,7 @@ export function buildManagerDashboard(user, data = seedData) {
       return String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? ""));
     });
   const archivedProjects = buildArchivedProjectSnapshots(data);
+  const projectPooledRequests = buildProjectPooledRequestBuckets(data, data.asOfDate);
 
   return {
     role: user.role,
@@ -2887,6 +2966,7 @@ export function buildManagerDashboard(user, data = seedData) {
       capitalAccounts,
       capitalDeposits,
       allocationRequests,
+      projectPooledRequests,
       investorPools,
       allocations: adminAllocations,
       archivedProjects,

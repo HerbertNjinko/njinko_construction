@@ -1,5 +1,5 @@
-import { state } from "./state.js?v=20260501-frontend-07";
-import { roundMoney } from "./helpers.js?v=20260501-frontend-07";
+import { state } from "./state.js?v=20260501-frontend-08";
+import { roundMoney } from "./helpers.js?v=20260501-frontend-08";
 
 export function getCreateDealDefaults() {
   const investmentCloseOn = new Date();
@@ -21,6 +21,9 @@ export function getCreateDealDefaults() {
     timelineProgress: 0,
     fundedOn: new Date().toISOString().slice(0, 10),
     investmentCloseOn: investmentCloseOn.toISOString().slice(0, 10),
+    directInvestmentMinimum: "",
+    pooledInvestmentAllowed: true,
+    pooledInvestmentTarget: "",
     projectedExitOn: "",
     actualExitOn: ""
   };
@@ -415,6 +418,9 @@ export function buildDealEditorDraft(deal) {
     timelineProgress: String(deal.timelineProgress ?? 0),
     fundedOn: String(deal.fundedOn ?? ""),
     investmentCloseOn: String(deal.investmentCloseOn ?? ""),
+    directInvestmentMinimum: String(deal.directInvestmentMinimum ?? 0),
+    pooledInvestmentAllowed: Boolean(deal.pooledInvestmentAllowed),
+    pooledInvestmentTarget: String(deal.pooledInvestmentTarget ?? 0),
     projectedExitOn: String(deal.projectedExitOn ?? ""),
     actualExitOn: String(deal.actualExitOn ?? ""),
     expenseEntries:
@@ -466,7 +472,7 @@ export function syncCreateDealField(target) {
   if (target.dataset.createDealField) {
     updateCreateDealDraft((draft) => ({
       ...draft,
-      [target.dataset.createDealField]: target.value,
+      [target.dataset.createDealField]: target.type === "checkbox" ? target.checked : target.value,
       ...(target.dataset.createDealField === "status" && target.value === "sold"
         ? { timelineProgress: "100" }
         : {})
@@ -569,7 +575,7 @@ export function syncDealEditorField(target) {
   if (target.dataset.dealField) {
     updateDealEditorDraft(dealId, (draft) => ({
       ...draft,
-      [target.dataset.dealField]: target.value,
+      [target.dataset.dealField]: target.type === "checkbox" ? target.checked : target.value,
       ...(target.dataset.dealField === "status" && target.value === "sold"
         ? { timelineProgress: "100" }
         : {})

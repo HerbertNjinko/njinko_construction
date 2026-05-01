@@ -5,7 +5,7 @@ import {
   LOGIN_PAGE_TITLE,
   app,
   state
-} from "./state.js?v=20260501-frontend-07";
+} from "./state.js?v=20260501-frontend-08";
 import {
   breakdownItem,
   escapeHtml,
@@ -21,7 +21,7 @@ import {
   renderSectionToggle,
   summaryItem,
   titleCase
-} from "./helpers.js?v=20260501-frontend-07";
+} from "./helpers.js?v=20260501-frontend-08";
 import {
   applyAllocationFilters,
   applyArchivedProjectFilters,
@@ -44,7 +44,7 @@ import {
   getInvestorProjectFilterOptions,
   getManagerEditableDeal,
   getUserFilterOptions
-} from "./data.js?v=20260501-frontend-07";
+} from "./data.js?v=20260501-frontend-08";
 
 function renderLogin() {
   const errorMarkup = state.loginError
@@ -2286,15 +2286,26 @@ function renderUserCapitalAccountPanel() {
               <option value="">Select project</option>
               ${allocationTargets
                 .map(
-                  (deal) => `
-                    <option value="${escapeHtml(deal.id)}">
-                      ${escapeHtml(
-                        deal.investmentCloseOn
-                          ? `${deal.name} · closes ${formatDate(deal.investmentCloseOn)}`
-                          : deal.name
-                      )}
-                    </option>
-                  `
+                  (deal) => {
+                    const ruleLabel = [
+                      Number(deal.directInvestmentMinimum) > 0
+                        ? `direct min ${formatCurrency(deal.directInvestmentMinimum)}`
+                        : "no direct minimum",
+                      deal.pooledInvestmentAllowed
+                        ? `pool target ${formatCurrency(deal.pooledInvestmentTarget || 0)}`
+                        : "pooling disabled"
+                    ].join(" · ");
+
+                    return `
+                      <option value="${escapeHtml(deal.id)}">
+                        ${escapeHtml(
+                          deal.investmentCloseOn
+                            ? `${deal.name} · closes ${formatDate(deal.investmentCloseOn)} · ${ruleLabel}`
+                            : `${deal.name} · ${ruleLabel}`
+                        )}
+                      </option>
+                    `;
+                  }
                 )
                 .join("")}
             </select>
@@ -2324,6 +2335,15 @@ function renderUserCapitalAccountPanel() {
         isContractor
           ? ""
           : `
+            <p class="helper-copy">
+              Amounts at or above a project&apos;s direct minimum request a direct investor position. Smaller amounts request pooled placement when that project allows pooling.
+            </p>
+          `
+      }
+      ${
+        isContractor
+          ? ""
+          : `
       <form id="capital-deposit-form">
         <div class="form-grid-2">
           <label>
@@ -2349,6 +2369,7 @@ function renderUserCapitalAccountPanel() {
             <tr>
               <th>Project</th>
               <th>Amount</th>
+              <th>Mode</th>
               <th>Status</th>
               <th>Submitted</th>
               <th>Manager note</th>
@@ -2363,6 +2384,7 @@ function renderUserCapitalAccountPanel() {
                         <tr>
                           <td>${escapeHtml(request.dealName || "Project")}</td>
                           <td>${escapeHtml(formatCurrency(request.amount))}</td>
+                          <td>${escapeHtml(titleCase(request.allocationMode || "direct"))}</td>
                           <td>${escapeHtml(titleCase(request.status))}</td>
                           <td>${escapeHtml(formatDateTime(request.submittedAt || request.createdAt))}</td>
                           <td>${escapeHtml(request.managerNotes || "—")}</td>
@@ -2370,7 +2392,7 @@ function renderUserCapitalAccountPanel() {
                       `
                     )
                     .join("")
-                : '<tr><td colspan="5">No project allocation requests submitted yet.</td></tr>'
+                : '<tr><td colspan="6">No project allocation requests submitted yet.</td></tr>'
             }
           </tbody>
         </table>
@@ -3513,7 +3535,6 @@ function renderCreateUserPanel() {
             Category / role
             <select name="category" required>
               <option value="investor" selected>Investor</option>
-              <option value="pool_member">Pool member</option>
               <option value="contractor">Contractor</option>
               <option value="manager">Manager</option>
             </select>
@@ -3706,6 +3727,7 @@ function renderManagerCapitalFundsPanel() {
 function renderManagerAllocationRequestsPanel() {
   const requests = state.dashboard.admin.allocationRequests ?? [];
   const pendingRequests = requests.filter((request) => request.needsReview);
+  const projectPooledRequests = state.dashboard.admin.projectPooledRequests ?? [];
 
   return renderCollapsibleSection({
     sectionId: "manager-allocation-requests",
@@ -3714,6 +3736,48 @@ function renderManagerAllocationRequestsPanel() {
       "Review investor, pooled-member, and contractor requests before they become official deal allocations.",
     message: renderMessage(state.messages.allocation),
     body: `
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Project pooled bucket</th>
+              <th>Approved</th>
+              <th>Target</th>
+              <th>Remaining</th>
+              <th>Members</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${
+              projectPooledRequests.length
+                ? projectPooledRequests
+                    .map(
+                      (bucket) => `
+                        <tr>
+                          <td>${escapeHtml(bucket.dealName)}</td>
+                          <td>${escapeHtml(formatCurrency(bucket.approvedAmount))}</td>
+                          <td>${escapeHtml(formatCurrency(bucket.pooledInvestmentTarget || 0))}</td>
+                          <td>${escapeHtml(formatCurrency(bucket.amountRemaining || 0))}</td>
+                          <td>${escapeHtml(String(bucket.requestCount))}</td>
+                          <td>
+                            <form data-project-pool-funding-form="true" data-deal-id="${escapeHtml(
+                              bucket.dealId
+                            )}">
+                              <button class="button-primary button-inline" type="submit" ${
+                                bucket.canFund ? "" : "disabled"
+                              }>Fund pooled bucket</button>
+                            </form>
+                          </td>
+                        </tr>
+                      `
+                    )
+                    .join("")
+                : '<tr><td colspan="6">No approved pooled requests are waiting for project funding.</td></tr>'
+            }
+          </tbody>
+        </table>
+      </div>
       <div class="table-wrap">
         <table>
           <thead>
@@ -3739,7 +3803,9 @@ function renderManagerAllocationRequestsPanel() {
                           <td>${escapeHtml(request.dealName || "Project")}</td>
                           <td>${escapeHtml(formatCurrency(request.amount))}</td>
                           <td>${escapeHtml(
-                            `${titleCase(request.participantCategory)} · ${request.classType}${
+                            `${titleCase(request.participantCategory)} · ${titleCase(
+                              request.allocationMode || "direct"
+                            )} · ${request.classType}${
                               request.trade ? ` · ${request.trade}` : ""
                             }`
                           )}</td>
@@ -3785,7 +3851,11 @@ function renderManagerAllocationRequestsPanel() {
                           <td>${escapeHtml(request.participantName)}</td>
                           <td>${escapeHtml(request.dealName || "Project")}</td>
                           <td>${escapeHtml(formatCurrency(request.amount))}</td>
-                          <td>${escapeHtml(titleCase(request.status))}</td>
+                          <td>${escapeHtml(
+                            `${titleCase(request.status)} · ${titleCase(
+                              request.allocationMode || "direct"
+                            )}`
+                          )}</td>
                           <td>${escapeHtml(
                             request.reviewedAt
                               ? `${formatDateTime(request.reviewedAt)}${request.reviewedByName ? ` by ${request.reviewedByName}` : ""}`
@@ -4173,6 +4243,42 @@ function renderCreateDealPanel() {
             />
           </label>
         </div>
+        <div class="form-grid-3">
+          <label>
+            Direct investor minimum
+            <input
+              type="number"
+              name="directInvestmentMinimum"
+              min="0"
+              step="1000"
+              value="${inputValue(draft.directInvestmentMinimum)}"
+              data-create-deal-field="directInvestmentMinimum"
+            />
+          </label>
+          <label>
+            Pooled investment target
+            <input
+              type="number"
+              name="pooledInvestmentTarget"
+              min="0"
+              step="1000"
+              value="${inputValue(draft.pooledInvestmentTarget)}"
+              data-create-deal-field="pooledInvestmentTarget"
+            />
+          </label>
+          <label class="checkbox-field">
+            <input
+              type="checkbox"
+              name="pooledInvestmentAllowed"
+              data-create-deal-field="pooledInvestmentAllowed"
+              ${draft.pooledInvestmentAllowed ? "checked" : ""}
+            />
+            Allow pooled investment
+          </label>
+        </div>
+        <p class="helper-copy">
+          Investor requests that are below the direct minimum are routed to this project&apos;s pooled bucket when pooling is enabled.
+        </p>
         <div class="form-grid-2">
           <label>
             Projected exit
@@ -4595,6 +4701,11 @@ function renderDealEditorPanel() {
             "Investment closes",
             deal.investmentCloseOn ? formatDate(deal.investmentCloseOn) : "No deadline"
           )}
+          ${summaryItem("Direct minimum", formatCurrency(deal.directInvestmentMinimum || 0))}
+          ${summaryItem(
+            "Pooled target",
+            deal.pooledInvestmentAllowed ? formatCurrency(deal.pooledInvestmentTarget || 0) : "Disabled"
+          )}
           ${summaryItem(
             "Early withdrawal penalty",
             formatRate(draft.earlyWithdrawalPenaltyRate)
@@ -4836,6 +4947,42 @@ function renderDealEditorPanel() {
             />
           </label>
         </div>
+        <div class="form-grid-3">
+          <label>
+            Direct investor minimum
+            <input
+              type="number"
+              name="directInvestmentMinimum"
+              min="0"
+              step="1000"
+              value="${inputValue(draft.directInvestmentMinimum)}"
+              data-deal-field="directInvestmentMinimum"
+            />
+          </label>
+          <label>
+            Pooled investment target
+            <input
+              type="number"
+              name="pooledInvestmentTarget"
+              min="0"
+              step="1000"
+              value="${inputValue(draft.pooledInvestmentTarget)}"
+              data-deal-field="pooledInvestmentTarget"
+            />
+          </label>
+          <label class="checkbox-field">
+            <input
+              type="checkbox"
+              name="pooledInvestmentAllowed"
+              data-deal-field="pooledInvestmentAllowed"
+              ${draft.pooledInvestmentAllowed ? "checked" : ""}
+            />
+            Allow pooled investment
+          </label>
+        </div>
+        <p class="helper-copy">
+          Investor requests below the direct minimum are held in a pooled bucket until the project&apos;s pooled target is funded.
+        </p>
         <div class="form-grid-2">
           <label>
             Projected exit
@@ -5783,9 +5930,8 @@ function renderUserDirectory() {
           </label>
         </div>
         <p class="helper-copy">
-          Category conversion is limited to <code>Investor</code> and <code>Pooled member</code>.
-          A pooled member can only become a direct investor after every pooled commitment tied to
-          that account has fully settled and paid out.
+          New capital users are investors. Legacy pooled-member records can be converted to investor
+          only after every older pooled commitment tied to that account has fully settled and paid out.
         </p>
         <span class="read-only-tag">Showing ${escapeHtml(String(filteredRows.length))} of ${escapeHtml(String(rows.length))}</span>
       </div>
@@ -5815,8 +5961,7 @@ function renderUserDirectory() {
             ${filteredRows
               .map(
                 (row) => {
-                  const canEditCategory =
-                    row.role === "investor" && ["investor", "pool_member"].includes(row.category);
+                  const canEditCategory = row.role === "investor" && row.category === "pool_member";
                   const categoryMarkup = canEditCategory
                     ? `
                         <form
@@ -5825,12 +5970,8 @@ function renderUserDirectory() {
                           data-user-id="${escapeHtml(row.id)}"
                         >
                           <select name="category">
-                            <option value="investor" ${
-                              row.category === "investor" ? "selected" : ""
-                            }>Investor</option>
-                            <option value="pool_member" ${
-                              row.category === "pool_member" ? "selected" : ""
-                            }>Pooled member</option>
+                            <option value="pool_member" selected>Legacy pooled member</option>
+                            <option value="investor">Investor</option>
                           </select>
                           <button class="button-secondary button-inline" type="submit">
                             Update
@@ -6080,6 +6221,9 @@ function getManagerReviewAlertCounts() {
     (request) => request.needsReview
   ).length;
   const readyPools = (admin.investorPools ?? []).filter((pool) => pool.canFund).length;
+  const readyProjectPools = (admin.projectPooledRequests ?? []).filter(
+    (bucket) => bucket.canFund
+  ).length;
 
   return {
     pendingAccounts,
@@ -6087,7 +6231,14 @@ function getManagerReviewAlertCounts() {
     pendingWithdrawals,
     pendingAllocations,
     readyPools,
-    total: pendingAccounts + pendingDistributions + pendingWithdrawals + pendingAllocations + readyPools
+    readyProjectPools,
+    total:
+      pendingAccounts +
+      pendingDistributions +
+      pendingWithdrawals +
+      pendingAllocations +
+      readyPools +
+      readyProjectPools
   };
 }
 
@@ -6134,6 +6285,13 @@ function renderManagerReviewAlertPanel() {
             ? `<button class="button-secondary manager-alert-button" type="button" data-manager-page="pooled-investors">! ${escapeHtml(
                 String(counts.readyPools)
               )} ready pool${counts.readyPools === 1 ? "" : "s"}</button>`
+            : ""
+        }
+        ${
+          counts.readyProjectPools
+            ? `<button class="button-secondary manager-alert-button" type="button" data-manager-page="allocations">! ${escapeHtml(
+                String(counts.readyProjectPools)
+              )} project pool${counts.readyProjectPools === 1 ? "" : "s"}</button>`
             : ""
         }
       </div>
@@ -6207,6 +6365,10 @@ function renderNotificationPanel(notificationCenter) {
               <button class="notification-summary-item" type="button" data-manager-page="pooled-investors">
                 <span>Pool funding</span>
                 <strong>${escapeHtml(String(managerCounts.readyPools))}</strong>
+              </button>
+              <button class="notification-summary-item" type="button" data-manager-page="allocations">
+                <span>Project pools</span>
+                <strong>${escapeHtml(String(managerCounts.readyProjectPools))}</strong>
               </button>
             </div>
           `

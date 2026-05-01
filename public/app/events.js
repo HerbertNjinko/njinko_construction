@@ -1,9 +1,10 @@
-import { state } from "./state.js?v=20260501-frontend-07";
+import { state } from "./state.js?v=20260501-frontend-08";
 import {
   clearAuthFeedback,
   clearMessages,
   clearPasswordResetTokenFromLocation,
   escapeHtml,
+  formatCurrency,
   formatDateTime,
   formatNotificationBatchSummary,
   formatNotificationStatus,
@@ -13,7 +14,7 @@ import {
   setMessage,
   titleCase,
   toggleSectionCollapsed
-} from "./helpers.js?v=20260501-frontend-07";
+} from "./helpers.js?v=20260501-frontend-08";
 import {
   applyArchivedProjectFilters,
   applyQuestionnaireFilters,
@@ -29,7 +30,7 @@ import {
   syncDealEditorField,
   updateCreateDealDraft,
   updateDealEditorDraft
-} from "./data.js?v=20260501-frontend-07";
+} from "./data.js?v=20260501-frontend-08";
 import {
   api,
   applyLoggedOutState,
@@ -37,8 +38,8 @@ import {
   loadSession,
   recordSessionActivity,
   refreshDashboard
-} from "./session.js?v=20260501-frontend-07";
-import { render } from "./renderers.js?v=20260501-frontend-07";
+} from "./session.js?v=20260501-frontend-08";
+import { render } from "./renderers.js?v=20260501-frontend-08";
 
 let listenersBound = false;
 
@@ -1115,6 +1116,40 @@ export function setupEventListeners() {
       return;
     }
 
+    if (event.target.dataset.projectPoolFundingForm === "true") {
+      event.preventDefault();
+      const dealId = String(event.target.dataset.dealId ?? "");
+
+      if (!dealId) {
+        setMessage("allocation", "error", "A valid project is required.");
+        render();
+        return;
+      }
+
+      try {
+        const result = await api(
+          `/api/admin/deals/${encodeURIComponent(dealId)}/pooled-requests/fund`,
+          {
+            method: "POST",
+            body: JSON.stringify({})
+          }
+        );
+        await refreshDashboard();
+        setMessage(
+          "allocation",
+          "success",
+          `Pooled requests funded into the project cap table: ${formatCurrency(
+            result.fundedAmount
+          )}.`
+        );
+      } catch (error) {
+        setMessage("allocation", "error", error.message);
+      }
+
+      render();
+      return;
+    }
+
     if (event.target.dataset.allocationRequestReviewForm === "true") {
       event.preventDefault();
       const formData = new FormData(event.target);
@@ -1174,6 +1209,9 @@ export function setupEventListeners() {
             timelineProgress: draft.timelineProgress,
             fundedOn: draft.fundedOn,
             investmentCloseOn: draft.investmentCloseOn,
+            directInvestmentMinimum: draft.directInvestmentMinimum,
+            pooledInvestmentAllowed: draft.pooledInvestmentAllowed,
+            pooledInvestmentTarget: draft.pooledInvestmentTarget,
             projectedExitOn: draft.projectedExitOn,
             actualExitOn: draft.actualExitOn,
             expenseEntries: draft.expenseEntries,
@@ -1224,6 +1262,9 @@ export function setupEventListeners() {
             timelineProgress: draft.timelineProgress,
             fundedOn: draft.fundedOn,
             investmentCloseOn: draft.investmentCloseOn,
+            directInvestmentMinimum: draft.directInvestmentMinimum,
+            pooledInvestmentAllowed: draft.pooledInvestmentAllowed,
+            pooledInvestmentTarget: draft.pooledInvestmentTarget,
             projectedExitOn: draft.projectedExitOn,
             actualExitOn: draft.actualExitOn,
             expenseEntries: draft.expenseEntries,

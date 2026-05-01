@@ -21,6 +21,7 @@ import {
   deleteDeal,
   deleteUserAccount,
   ensureInitialManagerUser,
+  fundProjectPooledAllocationRequests,
   fundInvestorPool,
   getAppDataSnapshot,
   getCapitalDepositProofDownload,
@@ -927,6 +928,9 @@ const server = createServer(async (request, response) => {
     enforceTrustedOrigin(request);
     const url = getRequestUrl(request);
     const dealArchiveMatch = url.pathname.match(/^\/api\/admin\/deals\/([^/]+)\/archive$/);
+    const dealPooledFundingMatch = url.pathname.match(
+      /^\/api\/admin\/deals\/([^/]+)\/pooled-requests\/fund$/
+    );
     const dealUpdateMatch = url.pathname.match(/^\/api\/admin\/deals\/([^/]+)$/);
     const issueVoteMatch = url.pathname.match(/^\/api\/issues\/([^/]+)\/vote$/);
     const userStatusMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)\/status$/);
@@ -2093,6 +2097,26 @@ const server = createServer(async (request, response) => {
         const result = await reviewAllocationRequest(
           decodeURIComponent(adminAllocationRequestReviewMatch[1]),
           body,
+          manager.id
+        );
+        sendJson(response, 200, result);
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "POST" && dealPooledFundingMatch) {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      try {
+        const result = await fundProjectPooledAllocationRequests(
+          decodeURIComponent(dealPooledFundingMatch[1]),
           manager.id
         );
         sendJson(response, 200, result);

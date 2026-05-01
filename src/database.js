@@ -570,6 +570,14 @@ function normalizePositiveCurrencyAmount(value, fieldLabel) {
   return amount;
 }
 
+function formatCurrencyForError(value) {
+  return Number(value ?? 0).toLocaleString("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: 2
+  });
+}
+
 function normalizePoolStatus(status) {
   const normalized = String(status ?? "").trim();
 
@@ -723,7 +731,10 @@ async function getEligiblePoolTargetDeal(dealId, executor = pool) {
         id,
         name,
         status,
-        investment_close_on AS "investmentCloseOn"
+        investment_close_on AS "investmentCloseOn",
+        direct_investment_minimum AS "directInvestmentMinimum",
+        pooled_investment_allowed AS "pooledInvestmentAllowed",
+        pooled_investment_target AS "pooledInvestmentTarget"
       FROM deals
       WHERE id = $1
     `,
@@ -1341,6 +1352,7 @@ function mapAllocationRequestRow(row) {
     dealId: row.dealId,
     dealName: row.dealName ?? "",
     amount: Number(row.amount ?? 0),
+    allocationMode: row.allocationMode ?? "direct",
     classType: row.classType,
     contributionType: row.contributionType,
     trade: row.trade ?? "",
@@ -1608,6 +1620,9 @@ async function insertSeedData(executor) {
           current_phase,
           funded_on,
           investment_close_on,
+          direct_investment_minimum,
+          pooled_investment_allowed,
+          pooled_investment_target,
           projected_exit_on,
           actual_exit_on,
           timeline_progress,
@@ -1637,7 +1652,10 @@ async function insertSeedData(executor) {
           $20,
           $21,
           $22,
-          $23
+          $23,
+          $24,
+          $25,
+          $26
         )
       `,
       [
@@ -1659,6 +1677,9 @@ async function insertSeedData(executor) {
         deal.currentPhase,
         deal.fundedOn,
         deal.investmentCloseOn ?? null,
+        deal.directInvestmentMinimum ?? 0,
+        deal.pooledInvestmentAllowed === false ? 0 : 1,
+        deal.pooledInvestmentTarget ?? 0,
         deal.projectedExitOn ?? null,
         deal.actualExitOn ?? null,
         deal.timelineProgress,
@@ -2301,6 +2322,7 @@ export async function getAppDataSnapshot({ skipAutomation = false } = {}) {
         user_allocation_requests.deal_id AS "dealId",
         deals.name AS "dealName",
         user_allocation_requests.amount AS amount,
+        user_allocation_requests.allocation_mode AS "allocationMode",
         user_allocation_requests.class_type AS "classType",
         user_allocation_requests.contribution_type AS "contributionType",
         user_allocation_requests.trade AS trade,
@@ -2368,6 +2390,9 @@ export async function getAppDataSnapshot({ skipAutomation = false } = {}) {
         current_phase AS "currentPhase",
         funded_on AS "fundedOn",
         investment_close_on AS "investmentCloseOn",
+        direct_investment_minimum AS "directInvestmentMinimum",
+        pooled_investment_allowed AS "pooledInvestmentAllowed",
+        pooled_investment_target AS "pooledInvestmentTarget",
         projected_exit_on AS "projectedExitOn",
         actual_exit_on AS "actualExitOn",
         timeline_progress AS "timelineProgress",
@@ -2392,6 +2417,9 @@ export async function getAppDataSnapshot({ skipAutomation = false } = {}) {
     salePrice: Number(row.salePrice),
     holdMonths: Number(row.holdMonths),
     prefRate: Number(row.prefRate),
+    directInvestmentMinimum: Number(row.directInvestmentMinimum ?? 0),
+    pooledInvestmentAllowed: Boolean(Number(row.pooledInvestmentAllowed ?? 0)),
+    pooledInvestmentTarget: Number(row.pooledInvestmentTarget ?? 0),
     timelineProgress: Number(row.timelineProgress),
     promoteTiers: [],
     timeline: [],
@@ -2981,7 +3009,8 @@ async function createUserRecord(
 }
 
 export async function createManagedUser(input) {
-  const category = normalizeCategory(input?.category || "investor");
+  const requestedCategory = normalizeCategory(input?.category || "investor");
+  const category = requestedCategory === "pool_member" ? "investor" : requestedCategory;
 
   return createUserRecord(
     {
@@ -4618,6 +4647,9 @@ function normalizeDealInput(input) {
   const salePrice = Number(input.salePrice);
   const holdMonths = Number(input.holdMonths);
   const prefRate = Number(input.prefRate);
+  const directInvestmentMinimum = Number(input.directInvestmentMinimum ?? 0);
+  const pooledInvestmentAllowed = normalizeBooleanInput(input.pooledInvestmentAllowed ?? true);
+  const pooledInvestmentTarget = Number(input.pooledInvestmentTarget ?? 0);
   const timelineProgress = Number(input.timelineProgress);
 
   if (!name || !location || !currentPhase || !fundedOn || !investmentCloseOn) {
@@ -4675,6 +4707,14 @@ function normalizeDealInput(input) {
     throw new Error("Preferred return rate must be zero or greater.");
   }
 
+  if (!Number.isFinite(directInvestmentMinimum) || directInvestmentMinimum < 0) {
+    throw new Error("Direct investor minimum must be zero or greater.");
+  }
+
+  if (!Number.isFinite(pooledInvestmentTarget) || pooledInvestmentTarget < 0) {
+    throw new Error("Pooled investment target must be zero or greater.");
+  }
+
   if (!Number.isFinite(timelineProgress) || timelineProgress < 0 || timelineProgress > 100) {
     throw new Error("Timeline progress must be between 0 and 100.");
   }
@@ -4700,6 +4740,9 @@ function normalizeDealInput(input) {
     salePrice: roundNumber(salePrice),
     holdMonths: Math.round(holdMonths),
     prefRate: roundNumber(prefRate),
+    directInvestmentMinimum: roundNumber(directInvestmentMinimum),
+    pooledInvestmentAllowed,
+    pooledInvestmentTarget: roundNumber(pooledInvestmentTarget),
     timelineProgress: status === "sold" ? 100 : Math.round(timelineProgress)
   };
 }
@@ -5392,6 +5435,9 @@ export async function createDeal(input) {
           current_phase,
           funded_on,
           investment_close_on,
+          direct_investment_minimum,
+          pooled_investment_allowed,
+          pooled_investment_target,
           projected_exit_on,
           actual_exit_on,
           timeline_progress,
@@ -5421,7 +5467,10 @@ export async function createDeal(input) {
           $20,
           $21,
           $22,
-          $23
+          $23,
+          $24,
+          $25,
+          $26
         )
       `,
       [
@@ -5443,6 +5492,9 @@ export async function createDeal(input) {
         deal.currentPhase,
         deal.fundedOn,
         deal.investmentCloseOn,
+        deal.directInvestmentMinimum,
+        deal.pooledInvestmentAllowed ? 1 : 0,
+        deal.pooledInvestmentTarget,
         deal.projectedExitOn,
         deal.actualExitOn,
         deal.timelineProgress,
@@ -5596,11 +5648,14 @@ export async function updateDeal(dealId, input) {
           current_phase = $14,
           funded_on = $15,
           investment_close_on = $16,
-          projected_exit_on = $17,
-          actual_exit_on = $18,
-          timeline_progress = $19,
-          updated_at = $20
-        WHERE id = $21
+          direct_investment_minimum = $17,
+          pooled_investment_allowed = $18,
+          pooled_investment_target = $19,
+          projected_exit_on = $20,
+          actual_exit_on = $21,
+          timeline_progress = $22,
+          updated_at = $23
+        WHERE id = $24
       `,
       [
         deal.name,
@@ -5619,6 +5674,9 @@ export async function updateDeal(dealId, input) {
         deal.currentPhase,
         deal.fundedOn,
         deal.investmentCloseOn,
+        deal.directInvestmentMinimum,
+        deal.pooledInvestmentAllowed ? 1 : 0,
+        deal.pooledInvestmentTarget,
         deal.projectedExitOn,
         deal.actualExitOn,
         deal.timelineProgress,
@@ -5973,6 +6031,16 @@ async function getParticipantCapitalLedger(
             SELECT SUM(amount)
             FROM user_allocation_requests
             WHERE participant_id = $1
+              AND allocation_mode = 'pooled'
+              AND status = 'approved'
+          ),
+          0
+        )::float AS "committedToProjectPools",
+        COALESCE(
+          (
+            SELECT SUM(amount)
+            FROM user_allocation_requests
+            WHERE participant_id = $1
               AND status = 'pending'
               AND ($2::text IS NULL OR id <> $2)
           ),
@@ -5986,7 +6054,9 @@ async function getParticipantCapitalLedger(
   const approvedDepositAmount = roundNumber(row?.approvedDepositAmount ?? 0);
   const pendingDepositAmount = roundNumber(row?.pendingDepositAmount ?? 0);
   const allocatedToProjects = roundNumber(row?.allocatedToProjects ?? 0);
-  const committedToPools = roundNumber(row?.committedToPools ?? 0);
+  const committedToPools = roundNumber(
+    Number(row?.committedToPools ?? 0) + Number(row?.committedToProjectPools ?? 0)
+  );
   const pendingAllocationRequestAmount = roundNumber(row?.pendingAllocationRequestAmount ?? 0);
   const totalAccountFunds = roundNumber(enrollmentInvestmentAmount + approvedDepositAmount);
   const totalAllocatedFunds = roundNumber(
@@ -6427,6 +6497,7 @@ async function getAllocationRequestById(requestId, executor = pool) {
         user_allocation_requests.deal_id AS "dealId",
         deals.name AS "dealName",
         user_allocation_requests.amount AS amount,
+        user_allocation_requests.allocation_mode AS "allocationMode",
         user_allocation_requests.class_type AS "classType",
         user_allocation_requests.contribution_type AS "contributionType",
         user_allocation_requests.trade AS trade,
@@ -6470,7 +6541,10 @@ async function getOpenDealForUserAllocation(dealId, executor = pool) {
         id,
         name,
         status,
-        investment_close_on AS "investmentCloseOn"
+        investment_close_on AS "investmentCloseOn",
+        direct_investment_minimum AS "directInvestmentMinimum",
+        pooled_investment_allowed AS "pooledInvestmentAllowed",
+        pooled_investment_target AS "pooledInvestmentTarget"
       FROM deals
       WHERE id = $1
     `,
@@ -6517,6 +6591,28 @@ function getAllocationRequestDefaultsForCategory(category) {
     classType: "Class A",
     contributionType: "Cash equity"
   };
+}
+
+function resolveAllocationModeForRequest({ category, amount, deal }) {
+  if (category === "contractor") {
+    return "direct";
+  }
+
+  const directMinimum = roundNumber(Number(deal?.directInvestmentMinimum ?? 0));
+
+  if (directMinimum <= 0 || amount >= directMinimum) {
+    return "direct";
+  }
+
+  if (Boolean(Number(deal?.pooledInvestmentAllowed ?? 0))) {
+    return "pooled";
+  }
+
+  throw new Error(
+    `${deal.name} requires at least ${formatCurrencyForError(
+      directMinimum
+    )} for a direct investor allocation, and pooled investment is not enabled for this project.`
+  );
 }
 
 async function notifyManagersAboutAllocationRequest(allocationRequest) {
@@ -6588,6 +6684,11 @@ export async function submitAllocationRequest(userId, input) {
 
   const deal = await getOpenDealForUserAllocation(dealId);
   const defaults = getAllocationRequestDefaultsForCategory(user.category);
+  const allocationMode = resolveAllocationModeForRequest({
+    category: user.category,
+    amount,
+    deal
+  });
 
   if (user.category === "contractor") {
     if (!trade) {
@@ -6619,6 +6720,7 @@ export async function submitAllocationRequest(userId, input) {
         deal_id,
         participant_category,
         amount,
+        allocation_mode,
         class_type,
         contribution_type,
         trade,
@@ -6632,7 +6734,7 @@ export async function submitAllocationRequest(userId, input) {
         created_at,
         updated_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, 'pending', NULL, $11, NULL, NULL, $11, $11)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULL, 'pending', NULL, $12, NULL, NULL, $12, $12)
     `,
     [
       requestId,
@@ -6641,6 +6743,7 @@ export async function submitAllocationRequest(userId, input) {
       deal.id,
       user.category,
       amount,
+      allocationMode,
       defaults.classType,
       defaults.contributionType,
       trade,
@@ -6682,20 +6785,23 @@ export async function reviewAllocationRequest(requestId, input, actingUserId) {
 
   if (decision === "approved") {
     await getOpenDealForUserAllocation(existing.dealId);
-    allocation = await createDealAllocation({
-      allocationRequestId: existing.id,
-      participantId: existing.participantId,
-      dealId: existing.dealId,
-      classType: existing.classType,
-      contributionAmount: existing.amount,
-      contributionType: existing.contributionType,
-      trade: existing.trade,
-      totalContractValue:
-        existing.participantCategory === "contractor" ? existing.amount : undefined,
-      cashPaid: 0,
-      contractorStatus: "Active"
-    });
-    createdPositionId = allocation.positionId;
+
+    if (existing.allocationMode !== "pooled") {
+      allocation = await createDealAllocation({
+        allocationRequestId: existing.id,
+        participantId: existing.participantId,
+        dealId: existing.dealId,
+        classType: existing.classType,
+        contributionAmount: existing.amount,
+        contributionType: existing.contributionType,
+        trade: existing.trade,
+        totalContractValue:
+          existing.participantCategory === "contractor" ? existing.amount : undefined,
+        cashPaid: 0,
+        contractorStatus: "Active"
+      });
+      createdPositionId = allocation.positionId;
+    }
   }
 
   await pool.query(
@@ -6727,6 +6833,152 @@ export async function reviewAllocationRequest(requestId, input, actingUserId) {
     allocationRequest,
     allocation,
     notification
+  };
+}
+
+export async function fundProjectPooledAllocationRequests(dealId, actingUserId) {
+  const normalizedDealId = String(dealId ?? "").trim();
+
+  if (!normalizedDealId) {
+    throw new Error("A valid project is required.");
+  }
+
+  const deal = await getOpenDealForUserAllocation(normalizedDealId);
+
+  if (!Boolean(Number(deal.pooledInvestmentAllowed ?? 0))) {
+    throw new Error("Pooled investment is not enabled for this project.");
+  }
+
+  const timestamp = nowTimestamp();
+  const poolParticipantId = `project-pool-${normalizedDealId}`;
+  let positionId = null;
+  let fundedAmount = 0;
+  let fundedRequestCount = 0;
+
+  await withTransaction(async (client) => {
+    const requests = await queryAll(
+      `
+        SELECT id, amount
+        FROM user_allocation_requests
+        WHERE deal_id = $1
+          AND allocation_mode = 'pooled'
+          AND status = 'approved'
+          AND created_position_id IS NULL
+        ORDER BY created_at, id
+        FOR UPDATE
+      `,
+      [normalizedDealId],
+      client
+    );
+
+    if (!requests.length) {
+      throw new Error("There are no approved pooled requests waiting to be funded for this project.");
+    }
+
+    fundedAmount = roundNumber(
+      requests.reduce((sum, request) => sum + Number(request.amount ?? 0), 0)
+    );
+    fundedRequestCount = requests.length;
+
+    const pooledTarget = roundNumber(Number(deal.pooledInvestmentTarget ?? 0));
+
+    if (pooledTarget > 0 && fundedAmount < pooledTarget) {
+      throw new Error(
+        `Approved pooled requests total ${formatCurrencyForError(
+          fundedAmount
+        )}. This project requires ${formatCurrencyForError(
+          pooledTarget
+        )} before the pooled group can be funded.`
+      );
+    }
+
+    await client.query(
+      `
+        INSERT INTO participants (id, name, category, created_at, updated_at)
+        VALUES ($1, $2, 'pool', $3, $3)
+        ON CONFLICT (id) DO UPDATE
+        SET
+          name = EXCLUDED.name,
+          updated_at = EXCLUDED.updated_at
+      `,
+      [poolParticipantId, `${deal.name} Pooled Investors`, timestamp]
+    );
+
+    const existingPosition = await queryOne(
+      `
+        SELECT id, contribution_amount AS "contributionAmount"
+        FROM positions
+        WHERE deal_id = $1
+          AND participant_id = $2
+      `,
+      [normalizedDealId, poolParticipantId],
+      client
+    );
+
+    if (existingPosition) {
+      positionId = existingPosition.id;
+      await client.query(
+        `
+          UPDATE positions
+          SET
+            contribution_type = 'Project pooled capital',
+            contribution_amount = $1,
+            updated_at = $2
+          WHERE id = $3
+        `,
+        [
+          roundNumber(Number(existingPosition.contributionAmount ?? 0) + fundedAmount),
+          timestamp,
+          positionId
+        ]
+      );
+    } else {
+      positionId = createId("position");
+      await client.query(
+        `
+          INSERT INTO positions (
+            id,
+            deal_id,
+            participant_id,
+            class_type,
+            contribution_type,
+            contribution_amount,
+            distributions_to_date,
+            created_at,
+            updated_at
+          )
+          VALUES ($1, $2, $3, 'Class A', 'Project pooled capital', $4, 0, $5, $5)
+        `,
+        [positionId, normalizedDealId, poolParticipantId, fundedAmount, timestamp]
+      );
+    }
+
+    await client.query(
+      `
+        UPDATE user_allocation_requests
+        SET
+          created_position_id = $1,
+          reviewed_by_user_id = COALESCE(reviewed_by_user_id, $2),
+          reviewed_at = COALESCE(reviewed_at, $3),
+          updated_at = $3
+        WHERE id = ANY($4::text[])
+      `,
+      [
+        positionId,
+        String(actingUserId ?? "").trim() || null,
+        timestamp,
+        requests.map((request) => request.id)
+      ]
+    );
+
+    await syncDealEquity(normalizedDealId, client);
+  });
+
+  return {
+    dealId: normalizedDealId,
+    positionId,
+    fundedAmount,
+    fundedRequestCount
   };
 }
 
@@ -9358,7 +9610,13 @@ export async function updateUserCategory(userId, nextCategoryInput, actingUserId
   }
 
   if (!["investor", "pool_member"].includes(nextCategory)) {
-    throw new Error("Only investor and pooled-member categories can be assigned here.");
+    throw new Error("Only investor and legacy pooled-member categories can be assigned here.");
+  }
+
+  if (nextCategory === "pool_member" && currentCategory !== "pool_member") {
+    throw new Error(
+      "New pooled participation is handled through project allocation requests. Keep this account as an investor."
+    );
   }
 
   if (!["investor", "pool_member"].includes(currentCategory)) {

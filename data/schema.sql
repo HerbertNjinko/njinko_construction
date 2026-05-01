@@ -105,6 +105,7 @@ CREATE TABLE IF NOT EXISTS user_allocation_requests (
     participant_category IN ('investor', 'pool_member', 'contractor')
   ),
   amount REAL NOT NULL CHECK (amount > 0),
+  allocation_mode TEXT NOT NULL DEFAULT 'direct' CHECK (allocation_mode IN ('direct', 'pooled')),
   class_type TEXT NOT NULL CHECK (class_type IN ('Class A', 'Class B', 'Class C')),
   contribution_type TEXT NOT NULL,
   trade TEXT,
@@ -162,6 +163,9 @@ CREATE TABLE IF NOT EXISTS deals (
   current_phase TEXT NOT NULL,
   funded_on TEXT NOT NULL,
   investment_close_on TEXT,
+  direct_investment_minimum REAL NOT NULL DEFAULT 0 CHECK (direct_investment_minimum >= 0),
+  pooled_investment_allowed INTEGER NOT NULL DEFAULT 1 CHECK (pooled_investment_allowed IN (0, 1)),
+  pooled_investment_target REAL NOT NULL DEFAULT 0 CHECK (pooled_investment_target >= 0),
   projected_exit_on TEXT,
   actual_exit_on TEXT,
   timeline_progress INTEGER NOT NULL DEFAULT 0,
@@ -461,6 +465,8 @@ CREATE INDEX IF NOT EXISTS idx_user_allocation_requests_deal_id
   ON user_allocation_requests(deal_id, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_user_allocation_requests_status
   ON user_allocation_requests(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_user_allocation_requests_deal_mode_status
+  ON user_allocation_requests(deal_id, allocation_mode, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_investor_questionnaires_participant_id
   ON investor_questionnaires(participant_id, submitted_at DESC);
 CREATE INDEX IF NOT EXISTS idx_investor_questionnaires_submitted_at
