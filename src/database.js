@@ -181,16 +181,19 @@ function createDynamicLegalDocumentVersion(filePath) {
 
 function inferDynamicLegalDocumentRequirements(title, requiredCategories) {
   const normalizedTitle = title.toLowerCase();
-  const investorFacing = requiredCategories.some((category) =>
+  const investorSpecific = requiredCategories.every((category) =>
     INVESTOR_DOCUMENT_CATEGORIES.includes(category)
   );
-  const contractorFacing = requiredCategories.includes("contractor");
+  const contractorSpecific = requiredCategories.every((category) =>
+    CONTRACTOR_DOCUMENT_CATEGORIES.includes(category)
+  );
   const isSubscriptionLike =
-    investorFacing &&
-    normalizedTitle.includes("subscription") &&
-    normalizedTitle.includes("agreement");
+    investorSpecific &&
+    ((normalizedTitle.includes("subscription") && normalizedTitle.includes("agreement")) ||
+      normalizedTitle.includes("deal sheet") ||
+      normalizedTitle.includes("investor package"));
   const isContractorEquityLike =
-    contractorFacing &&
+    contractorSpecific &&
     normalizedTitle.includes("contractor") &&
     (normalizedTitle.includes("equity") || normalizedTitle.includes("election"));
 
@@ -242,13 +245,15 @@ function readLegalDocumentsFromDirectory(root, scope) {
 
 export function getLegalDocumentDefinitions({ includeNewUserDocuments = true } = {}) {
   const documentsByKey = new Map(
-    LEGAL_DOCUMENT_DEFINITIONS.map((document) => [
-      document.key,
-      {
-        ...mapLegalDocumentDefinition(document),
-        onboardingOnly: Boolean(document.onboardingOnly)
-      }
-    ])
+    LEGAL_DOCUMENT_DEFINITIONS.filter((document) => existsSync(document.fileName)).map(
+      (document) => [
+        document.key,
+        {
+          ...mapLegalDocumentDefinition(document),
+          onboardingOnly: Boolean(document.onboardingOnly)
+        }
+      ]
+    )
   );
 
   for (const root of LEGAL_DOCUMENT_ROOTS) {

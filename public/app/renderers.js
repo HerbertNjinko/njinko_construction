@@ -5,7 +5,7 @@ import {
   LOGIN_PAGE_TITLE,
   app,
   state
-} from "./state.js?v=20260430-frontend-24";
+} from "./state.js?v=20260501-frontend-01";
 import {
   breakdownItem,
   escapeHtml,
@@ -21,7 +21,7 @@ import {
   renderSectionToggle,
   summaryItem,
   titleCase
-} from "./helpers.js?v=20260430-frontend-24";
+} from "./helpers.js?v=20260501-frontend-01";
 import {
   applyAllocationFilters,
   applyArchivedProjectFilters,
@@ -44,7 +44,7 @@ import {
   getInvestorProjectFilterOptions,
   getManagerEditableDeal,
   getUserFilterOptions
-} from "./data.js?v=20260430-frontend-24";
+} from "./data.js?v=20260501-frontend-01";
 
 function renderLogin() {
   const errorMarkup = state.loginError
@@ -4508,26 +4508,32 @@ function renderDealEditorPanel() {
   });
 }
 
-function renderIdentityReviewActions(row) {
-  const documentLinks = row.idCardFileName
-    ? `
-        <a
-          class="button-secondary button-inline"
-          href="/api/admin/users/${encodeURIComponent(row.id)}/id-card?view=1"
-          target="_blank"
-          rel="noopener"
-        >
-          View ID
-        </a>
-        <a
-          class="button-secondary button-inline"
-          href="/api/admin/users/${encodeURIComponent(row.id)}/id-card"
-          download="${escapeHtml(row.idCardFileName)}"
-        >
-          Download ID
-        </a>
-      `
-    : "";
+function renderIdentityDocumentLinks(row) {
+  if (!row.idCardFileName) {
+    return '<span class="read-only-tag">No ID uploaded</span>';
+  }
+
+  return `
+    <a
+      class="button-secondary button-inline"
+      href="/api/admin/users/${encodeURIComponent(row.id)}/id-card?view=1"
+      target="_blank"
+      rel="noopener"
+    >
+      View ID
+    </a>
+    <a
+      class="button-secondary button-inline"
+      href="/api/admin/users/${encodeURIComponent(row.id)}/id-card"
+      download="${escapeHtml(row.idCardFileName)}"
+    >
+      Download ID
+    </a>
+  `;
+}
+
+function renderIdentityReviewActions(row, { showDocumentLinks = true } = {}) {
+  const documentLinks = showDocumentLinks ? renderIdentityDocumentLinks(row) : "";
 
   if (row.accountApprovalStatus !== "pending_review") {
     return documentLinks;
@@ -5028,7 +5034,7 @@ function renderManagerArchivedProjectsPage() {
   });
 }
 
-function renderPendingUserApprovalsPage() {
+function renderPendingAccountApprovalsSection() {
   const rows = (state.dashboard.admin.users ?? []).filter(
     (row) => row.accountApprovalStatus === "pending_review"
   );
@@ -5056,7 +5062,6 @@ function renderPendingUserApprovalsPage() {
                     <th>Contact</th>
                     <th>ID card</th>
                     <th>ID dates</th>
-                    <th>Legal documents</th>
                     <th>Questionnaire</th>
                     <th>Submitted</th>
                     <th>Review</th>
@@ -5077,7 +5082,6 @@ function renderPendingUserApprovalsPage() {
                               ? `${formatDate(row.idDocumentIssueDate)} to ${formatDate(row.idDocumentExpirationDate)}`
                               : "—"
                           )}</td>
-                          <td>${renderLegalAcknowledgementStatus(row)}</td>
                           <td>${renderInvestorQuestionnaireStatus(row)}</td>
                           <td>${escapeHtml(formatDateTime(row.onboardingSubmittedAt))}</td>
                           <td>
@@ -5097,6 +5101,91 @@ function renderPendingUserApprovalsPage() {
       }
     `
   });
+}
+
+function renderDocumentAcknowledgementsSection() {
+  const rows = (state.dashboard.admin.users ?? []).filter(
+    (row) => (row.legalAcknowledgements ?? []).length > 0
+  );
+  const signedDocumentCount = rows.reduce(
+    (sum, row) => sum + (row.legalAcknowledgements ?? []).length,
+    0
+  );
+  const usersNeedingLegalItems = (state.dashboard.admin.users ?? []).filter(
+    (row) => getLegalReviewIssuesForUser(row).length > 0
+  ).length;
+
+  return renderCollapsibleSection({
+    sectionId: "manager-document-acknowledgements",
+    title: "Document Acknowledgements",
+    copy:
+      "Review signed legal documents, proof uploads, and ID files without crowding the user directory.",
+    body: `
+      <div class="metrics-grid">
+        ${metricCard("Users with acknowledgements", String(rows.length))}
+        ${metricCard("Signed documents", String(signedDocumentCount))}
+        ${metricCard("Users needing legal items", String(usersNeedingLegalItems))}
+      </div>
+      ${
+        rows.length
+          ? `
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th>Category</th>
+                    <th>Email</th>
+                    <th>ID document</th>
+                    <th>ID dates</th>
+                    <th>Legal documents</th>
+                    <th>Account approval</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${rows
+                    .map(
+                      (row) => `
+                        <tr>
+                          <td>${escapeHtml(row.name)}</td>
+                          <td>${escapeHtml(titleCase(row.category))}</td>
+                          <td>${escapeHtml(row.email)}</td>
+                          <td>
+                            <div class="table-actions">
+                              ${renderIdentityDocumentLinks(row)}
+                            </div>
+                            ${
+                              row.idCardFileName
+                                ? `<p class="table-note">${escapeHtml(row.idCardFileName)}</p>`
+                                : ""
+                            }
+                          </td>
+                          <td>${escapeHtml(
+                            row.idDocumentIssueDate && row.idDocumentExpirationDate
+                              ? `${formatDate(row.idDocumentIssueDate)} to ${formatDate(row.idDocumentExpirationDate)}`
+                              : "—"
+                          )}</td>
+                          <td>${renderLegalAcknowledgementStatus(row)}</td>
+                          <td>${escapeHtml(accountApprovalStatusLabel(row.accountApprovalStatus))}</td>
+                        </tr>
+                      `
+                    )
+                    .join("")}
+                </tbody>
+              </table>
+            </div>
+          `
+          : '<div class="empty-state">No document acknowledgements have been submitted yet.</div>'
+      }
+    `
+  });
+}
+
+function renderPendingUserApprovalsPage() {
+  return `
+    ${renderPendingAccountApprovalsSection()}
+    ${renderDocumentAcknowledgementsSection()}
+  `;
 }
 
 function renderUserDirectory() {
@@ -5194,7 +5283,6 @@ function renderUserDirectory() {
               <th>Password reset</th>
               <th>ID card</th>
               <th>ID dates</th>
-              <th>Legal documents</th>
               <th>Latest notice</th>
               <th>Actions</th>
             </tr>
@@ -5251,7 +5339,6 @@ function renderUserDirectory() {
                         ? `${formatDate(row.idDocumentIssueDate)} to ${formatDate(row.idDocumentExpirationDate)}`
                         : "—"
                     )}</td>
-                    <td>${renderLegalAcknowledgementStatus(row)}</td>
                     <td>${escapeHtml(
                       row.notificationStatus
                         ? `${titleCase(row.notificationStatus)}${row.notificationProvider ? ` · ${titleCase(row.notificationProvider)}` : ""}`
@@ -5259,7 +5346,7 @@ function renderUserDirectory() {
                     )}</td>
                     <td>
                       <div class="table-actions identity-review-actions">
-                        ${renderIdentityReviewActions(row)}
+                        ${renderIdentityReviewActions(row, { showDocumentLinks: false })}
                         <button
                           class="button-secondary button-inline"
                           type="button"
