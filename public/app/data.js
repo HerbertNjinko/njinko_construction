@@ -1,5 +1,5 @@
-import { state } from "./state.js?v=20260501-frontend-02";
-import { roundMoney } from "./helpers.js?v=20260501-frontend-02";
+import { state } from "./state.js?v=20260501-frontend-04";
+import { roundMoney } from "./helpers.js?v=20260501-frontend-04";
 
 export function getCreateDealDefaults() {
   const investmentCloseOn = new Date();

@@ -8,6 +8,8 @@ import { assertDatabaseReady } from "./migrations.js";
 import {
   sendAccountApprovedNotification,
   sendAccountRejectedNotification,
+  sendCapitalDepositReviewedNotification,
+  sendCapitalDepositSubmittedAlertNotification,
   sendCredentialNotification,
   sendDistributionElectionApprovedNotification,
   sendDistributionElectionAlertNotification,
@@ -1294,6 +1296,34 @@ function mapLegalAcknowledgementRow(row) {
   };
 }
 
+function mapCapitalDepositRow(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    userId: row.userId,
+    participantId: row.participantId,
+    participantName: row.participantName ?? "",
+    userEmail: row.userEmail ?? "",
+    category: row.category ?? "",
+    amount: Number(row.amount ?? 0),
+    status: row.status,
+    proofFileName: row.proofFileName ?? "",
+    hasProof: Boolean(row.hasProof ?? row.proofFileName),
+    notes: row.notes ?? "",
+    managerNotes: row.managerNotes ?? "",
+    submittedByUserId: row.submittedByUserId ?? null,
+    submittedByName: row.submittedByName ?? null,
+    reviewedByUserId: row.reviewedByUserId ?? null,
+    reviewedByName: row.reviewedByName ?? null,
+    reviewedAt: row.reviewedAt ?? null,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  };
+}
+
 function mapInvestorQuestionnaireRow(row) {
   if (!row) {
     return null;
@@ -2190,6 +2220,42 @@ export async function getAppDataSnapshot({ skipAutomation = false } = {}) {
       ORDER BY acknowledged_at DESC, document_title
     `
   )).map((row) => mapLegalAcknowledgementRow(row));
+  const userCapitalDeposits = (await queryAll(
+    `
+      SELECT
+        user_capital_deposits.id AS id,
+        user_capital_deposits.user_id AS "userId",
+        user_capital_deposits.participant_id AS "participantId",
+        participants.name AS "participantName",
+        participants.category AS category,
+        users.email AS "userEmail",
+        user_capital_deposits.amount AS amount,
+        user_capital_deposits.status AS status,
+        user_capital_deposits.proof_file_name AS "proofFileName",
+        (user_capital_deposits.proof_file_name IS NOT NULL AND user_capital_deposits.proof_file_data_url IS NOT NULL) AS "hasProof",
+        user_capital_deposits.notes AS notes,
+        user_capital_deposits.manager_notes AS "managerNotes",
+        user_capital_deposits.submitted_by_user_id AS "submittedByUserId",
+        submitted_by_participants.name AS "submittedByName",
+        user_capital_deposits.reviewed_by_user_id AS "reviewedByUserId",
+        reviewed_by_participants.name AS "reviewedByName",
+        user_capital_deposits.reviewed_at AS "reviewedAt",
+        user_capital_deposits.created_at AS "createdAt",
+        user_capital_deposits.updated_at AS "updatedAt"
+      FROM user_capital_deposits
+      JOIN participants ON participants.id = user_capital_deposits.participant_id
+      JOIN users ON users.id = user_capital_deposits.user_id
+      LEFT JOIN users AS submitted_by_users
+        ON submitted_by_users.id = user_capital_deposits.submitted_by_user_id
+      LEFT JOIN participants AS submitted_by_participants
+        ON submitted_by_participants.id = submitted_by_users.participant_id
+      LEFT JOIN users AS reviewed_by_users
+        ON reviewed_by_users.id = user_capital_deposits.reviewed_by_user_id
+      LEFT JOIN participants AS reviewed_by_participants
+        ON reviewed_by_participants.id = reviewed_by_users.participant_id
+      ORDER BY user_capital_deposits.created_at DESC, user_capital_deposits.id
+    `
+  )).map((row) => mapCapitalDepositRow(row));
   const investorQuestionnaires = (await queryAll(
     `
       SELECT
@@ -2648,6 +2714,7 @@ export async function getAppDataSnapshot({ skipAutomation = false } = {}) {
     participants,
     users,
     userLegalAcknowledgements,
+    userCapitalDeposits,
     investorQuestionnaires,
     deals,
     positions,
@@ -3009,7 +3076,7 @@ export async function upsertInvestorPoolCommitment(poolId, input) {
   await withTransaction(async (client) => {
     const existingCommitment = await queryOne(
       `
-        SELECT id
+        SELECT id, commitment_amount AS "commitmentAmount"
         FROM investor_pool_commitments
         WHERE pool_id = $1
           AND participant_id = $2
@@ -3017,6 +3084,21 @@ export async function upsertInvestorPoolCommitment(poolId, input) {
       [normalizedPoolId, participantId],
       client
     );
+    const ledger = await getParticipantCapitalLedger(participantId, client);
+    const availableForThisCommitment = roundNumber(
+      ledger.availableCapital + Number(existingCommitment?.commitmentAmount ?? 0)
+    );
+
+    if (
+      (ledger.totalAccountFunds > 0 || ledger.pendingDepositAmount > 0) &&
+      commitmentAmount > availableForThisCommitment
+    ) {
+      throw new Error(
+        `Commitment amount exceeds this user's available account funds. Available funds: ${availableForThisCommitment.toFixed(
+          2
+        )}.`
+      );
+    }
 
     if (existingCommitment) {
       action = "updated";
@@ -4090,6 +4172,14 @@ export async function createDealAllocation(input) {
 
   if (!["investor", "contractor"].includes(participant.category)) {
     throw new Error("Only investor and contractor participants can be allocated to deals.");
+  }
+
+  if (participant.category === "investor") {
+    await assertSufficientAccountFunds({
+      participantId,
+      amount: contributionAmount,
+      fieldLabel: "Contribution amount"
+    });
   }
 
   const existingPosition = await queryOne(
@@ -5653,6 +5743,473 @@ export async function getLegalAcknowledgementPaymentProofDownload(acknowledgemen
 
   if (!document.fileName || !document.fileDataUrl) {
     throw new Error("This legal acknowledgement does not have proof of payment.");
+  }
+
+  return document;
+}
+
+function normalizeCapitalDepositDecision(value) {
+  const decision = String(value ?? "").trim().toLowerCase();
+
+  if (!["approved", "rejected"].includes(decision)) {
+    throw new Error("Capital deposit decision must be approved or rejected.");
+  }
+
+  return decision;
+}
+
+async function getCapitalDepositById(depositId, executor = pool) {
+  const normalizedDepositId = String(depositId ?? "").trim();
+
+  if (!normalizedDepositId) {
+    return null;
+  }
+
+  const row = await queryOne(
+    `
+      SELECT
+        user_capital_deposits.id AS id,
+        user_capital_deposits.user_id AS "userId",
+        user_capital_deposits.participant_id AS "participantId",
+        participants.name AS "participantName",
+        participants.category AS category,
+        users.email AS "userEmail",
+        user_capital_deposits.amount AS amount,
+        user_capital_deposits.status AS status,
+        user_capital_deposits.proof_file_name AS "proofFileName",
+        (user_capital_deposits.proof_file_name IS NOT NULL AND user_capital_deposits.proof_file_data_url IS NOT NULL) AS "hasProof",
+        user_capital_deposits.notes AS notes,
+        user_capital_deposits.manager_notes AS "managerNotes",
+        user_capital_deposits.submitted_by_user_id AS "submittedByUserId",
+        submitted_by_participants.name AS "submittedByName",
+        user_capital_deposits.reviewed_by_user_id AS "reviewedByUserId",
+        reviewed_by_participants.name AS "reviewedByName",
+        user_capital_deposits.reviewed_at AS "reviewedAt",
+        user_capital_deposits.created_at AS "createdAt",
+        user_capital_deposits.updated_at AS "updatedAt"
+      FROM user_capital_deposits
+      JOIN participants ON participants.id = user_capital_deposits.participant_id
+      JOIN users ON users.id = user_capital_deposits.user_id
+      LEFT JOIN users AS submitted_by_users
+        ON submitted_by_users.id = user_capital_deposits.submitted_by_user_id
+      LEFT JOIN participants AS submitted_by_participants
+        ON submitted_by_participants.id = submitted_by_users.participant_id
+      LEFT JOIN users AS reviewed_by_users
+        ON reviewed_by_users.id = user_capital_deposits.reviewed_by_user_id
+      LEFT JOIN participants AS reviewed_by_participants
+        ON reviewed_by_participants.id = reviewed_by_users.participant_id
+      WHERE user_capital_deposits.id = $1
+    `,
+    [normalizedDepositId],
+    executor
+  );
+
+  return mapCapitalDepositRow(row);
+}
+
+async function getCapitalAccountParticipant(participantId, executor = pool) {
+  return queryOne(
+    `
+      SELECT
+        participants.id AS "participantId",
+        participants.name AS "participantName",
+        participants.category AS category,
+        users.id AS "userId",
+        users.email AS "userEmail",
+        users.is_active AS "isActive"
+      FROM participants
+      JOIN users ON users.participant_id = participants.id
+      WHERE participants.id = $1
+    `,
+    [String(participantId ?? "").trim()],
+    executor
+  );
+}
+
+async function getParticipantCapitalLedger(participantId, executor = pool) {
+  const normalizedParticipantId = String(participantId ?? "").trim();
+
+  if (!normalizedParticipantId) {
+    throw new Error("A valid participant is required.");
+  }
+
+  const row = await queryOne(
+    `
+      SELECT
+        COALESCE(
+          (
+            SELECT MAX(investment_amount)
+            FROM user_legal_acknowledgements
+            WHERE participant_id = $1
+              AND investment_amount IS NOT NULL
+              AND investment_amount > 0
+          ),
+          0
+        )::float AS "enrollmentInvestmentAmount",
+        COALESCE(
+          (
+            SELECT SUM(amount)
+            FROM user_capital_deposits
+            WHERE participant_id = $1
+              AND status = 'approved'
+          ),
+          0
+        )::float AS "approvedDepositAmount",
+        COALESCE(
+          (
+            SELECT SUM(amount)
+            FROM user_capital_deposits
+            WHERE participant_id = $1
+              AND status = 'pending'
+          ),
+          0
+        )::float AS "pendingDepositAmount",
+        COALESCE(
+          (
+            SELECT SUM(contribution_amount)
+            FROM positions
+            WHERE participant_id = $1
+              AND COALESCE(contribution_type, '') <> 'Reinvested proceeds'
+          ),
+          0
+        )::float AS "allocatedToProjects",
+        COALESCE(
+          (
+            SELECT SUM(commitment_amount)
+            FROM investor_pool_commitments
+            WHERE participant_id = $1
+          ),
+          0
+        )::float AS "committedToPools"
+    `,
+    [normalizedParticipantId],
+    executor
+  );
+  const enrollmentInvestmentAmount = roundNumber(row?.enrollmentInvestmentAmount ?? 0);
+  const approvedDepositAmount = roundNumber(row?.approvedDepositAmount ?? 0);
+  const pendingDepositAmount = roundNumber(row?.pendingDepositAmount ?? 0);
+  const allocatedToProjects = roundNumber(row?.allocatedToProjects ?? 0);
+  const committedToPools = roundNumber(row?.committedToPools ?? 0);
+  const totalAccountFunds = roundNumber(enrollmentInvestmentAmount + approvedDepositAmount);
+  const totalAllocatedFunds = roundNumber(allocatedToProjects + committedToPools);
+  const availableCapital = roundNumber(Math.max(totalAccountFunds - totalAllocatedFunds, 0));
+
+  return {
+    participantId: normalizedParticipantId,
+    enrollmentInvestmentAmount,
+    approvedDepositAmount,
+    pendingDepositAmount,
+    totalAccountFunds,
+    allocatedToProjects,
+    committedToPools,
+    totalAllocatedFunds,
+    availableCapital
+  };
+}
+
+async function assertSufficientAccountFunds({
+  participantId,
+  amount,
+  fieldLabel,
+  availableOverride = null,
+  executor = pool
+}) {
+  const ledger = await getParticipantCapitalLedger(participantId, executor);
+  const requestedAmount = roundNumber(Number(amount ?? 0));
+  const availableCapital =
+    availableOverride === null || availableOverride === undefined
+      ? ledger.availableCapital
+      : roundNumber(Number(availableOverride));
+
+  if (
+    (ledger.totalAccountFunds > 0 || ledger.pendingDepositAmount > 0) &&
+    requestedAmount > availableCapital
+  ) {
+    throw new Error(
+      `${fieldLabel} exceeds this user's available account funds. Available funds: ${availableCapital.toFixed(
+        2
+      )}.`
+    );
+  }
+
+  return {
+    ...ledger,
+    availableCapital
+  };
+}
+
+async function notifyManagersAboutCapitalDeposit(deposit) {
+  const managerRecipients = await getActiveManagerRecipients();
+
+  await Promise.all(
+    managerRecipients.map(async (managerRecipient) => {
+      try {
+        return await sendCapitalDepositSubmittedAlertNotification({
+          userId: managerRecipient.userId,
+          participantId: managerRecipient.participantId,
+          managerName: managerRecipient.fullName,
+          email: managerRecipient.email,
+          investorName: deposit.participantName,
+          investorEmail: deposit.userEmail,
+          amount: deposit.amount,
+          submittedAt: deposit.createdAt
+        });
+      } catch {
+        return null;
+      }
+    })
+  );
+}
+
+async function notifyCapitalDepositReview(deposit) {
+  if (!deposit?.userId || !deposit?.userEmail) {
+    return null;
+  }
+
+  try {
+    return await sendCapitalDepositReviewedNotification({
+      userId: deposit.userId,
+      participantId: deposit.participantId,
+      fullName: deposit.participantName,
+      email: deposit.userEmail,
+      amount: deposit.amount,
+      status: deposit.status,
+      managerNotes: deposit.managerNotes
+    });
+  } catch (error) {
+    return {
+      status: "failed",
+      provider: "notification_error",
+      localPath: null,
+      errorMessage: error.message
+    };
+  }
+}
+
+export async function submitCapitalDepositRequest(userId, input) {
+  const normalizedUserId = String(userId ?? "").trim();
+  const amount = normalizePositiveCurrencyAmount(input?.amount, "Deposit amount");
+  const proofFile = normalizePaymentProofFile(input?.proofFile);
+  const notes = normalizeOptionalText(input?.notes);
+
+  if (!proofFile) {
+    throw new Error("Proof of payment is required for account-funds deposits.");
+  }
+
+  const user = await getUserAccountById(normalizedUserId);
+
+  if (!user || user.role === "manager") {
+    throw new Error("Only investor and pooled-member accounts can submit account-funds deposits.");
+  }
+
+  if (!["investor", "pool_member"].includes(user.category)) {
+    throw new Error("Only investor and pooled-member accounts can hold future-investment funds.");
+  }
+
+  const timestamp = nowTimestamp();
+  const depositId = createId("capital-deposit");
+
+  await pool.query(
+    `
+      INSERT INTO user_capital_deposits (
+        id,
+        user_id,
+        participant_id,
+        amount,
+        status,
+        proof_file_name,
+        proof_file_mime_type,
+        proof_file_data_url,
+        notes,
+        manager_notes,
+        submitted_by_user_id,
+        reviewed_by_user_id,
+        reviewed_at,
+        created_at,
+        updated_at
+      )
+      VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, $8, NULL, $9, NULL, NULL, $10, $10)
+    `,
+    [
+      depositId,
+      user.id,
+      user.participantId,
+      amount,
+      proofFile.fileName,
+      proofFile.mimeType,
+      proofFile.dataUrl,
+      notes,
+      user.id,
+      timestamp
+    ]
+  );
+
+  const deposit = await getCapitalDepositById(depositId);
+  await notifyManagersAboutCapitalDeposit(deposit);
+
+  return {
+    deposit
+  };
+}
+
+export async function createCapitalDepositForParticipant(input, actingUserId) {
+  const participantId = String(input?.participantId ?? "").trim();
+  const amount = normalizePositiveCurrencyAmount(input?.amount, "Deposit amount");
+  const proofFile = normalizePaymentProofFile(input?.proofFile);
+  const notes = normalizeOptionalText(input?.notes);
+  const managerNotes = normalizeOptionalText(input?.managerNotes);
+
+  if (!proofFile) {
+    throw new Error("Proof of payment is required before account funds can be recorded.");
+  }
+
+  const target = await getCapitalAccountParticipant(participantId);
+
+  if (!target) {
+    throw new Error("Select a user account before recording account funds.");
+  }
+
+  if (!["investor", "pool_member"].includes(target.category)) {
+    throw new Error("Account funds can only be recorded for investor or pooled-member users.");
+  }
+
+  if (!Boolean(target.isActive)) {
+    throw new Error("The user account must be active before account funds can be recorded.");
+  }
+
+  const timestamp = nowTimestamp();
+  const depositId = createId("capital-deposit");
+
+  await pool.query(
+    `
+      INSERT INTO user_capital_deposits (
+        id,
+        user_id,
+        participant_id,
+        amount,
+        status,
+        proof_file_name,
+        proof_file_mime_type,
+        proof_file_data_url,
+        notes,
+        manager_notes,
+        submitted_by_user_id,
+        reviewed_by_user_id,
+        reviewed_at,
+        created_at,
+        updated_at
+      )
+      VALUES ($1, $2, $3, $4, 'approved', $5, $6, $7, $8, $9, $10, $10, $11, $11, $11)
+    `,
+    [
+      depositId,
+      target.userId,
+      target.participantId,
+      amount,
+      proofFile.fileName,
+      proofFile.mimeType,
+      proofFile.dataUrl,
+      notes,
+      managerNotes,
+      String(actingUserId ?? "").trim() || null,
+      timestamp
+    ]
+  );
+
+  const deposit = await getCapitalDepositById(depositId);
+  const notification = await notifyCapitalDepositReview(deposit);
+
+  return {
+    deposit,
+    notification
+  };
+}
+
+export async function reviewCapitalDeposit(depositId, input, actingUserId) {
+  const decision = normalizeCapitalDepositDecision(input?.decision ?? input?.status);
+  const managerNotes = normalizeOptionalText(input?.managerNotes);
+  const timestamp = nowTimestamp();
+  const normalizedDepositId = String(depositId ?? "").trim();
+
+  if (!normalizedDepositId) {
+    throw new Error("A valid account-funds deposit is required.");
+  }
+
+  let deposit = null;
+
+  await withTransaction(async (client) => {
+    const existing = await queryOne(
+      `
+        SELECT id, status
+        FROM user_capital_deposits
+        WHERE id = $1
+        FOR UPDATE
+      `,
+      [normalizedDepositId],
+      client
+    );
+
+    if (!existing) {
+      throw new Error("Account-funds deposit not found.");
+    }
+
+    if (existing.status !== "pending") {
+      throw new Error("Only pending account-funds deposits can be reviewed.");
+    }
+
+    await client.query(
+      `
+        UPDATE user_capital_deposits
+        SET
+          status = $1,
+          manager_notes = $2,
+          reviewed_by_user_id = $3,
+          reviewed_at = $4,
+          updated_at = $4
+        WHERE id = $5
+      `,
+      [decision, managerNotes, String(actingUserId ?? "").trim() || null, timestamp, normalizedDepositId]
+    );
+
+    deposit = await getCapitalDepositById(normalizedDepositId, client);
+  });
+
+  const notification = await notifyCapitalDepositReview(deposit);
+
+  return {
+    deposit,
+    notification
+  };
+}
+
+export async function getCapitalDepositProofDownload(depositId) {
+  const normalizedDepositId = String(depositId ?? "").trim();
+
+  if (!normalizedDepositId) {
+    throw new Error("A valid account-funds deposit is required.");
+  }
+
+  const document = await queryOne(
+    `
+      SELECT
+        user_capital_deposits.id,
+        user_capital_deposits.proof_file_name AS "fileName",
+        user_capital_deposits.proof_file_mime_type AS "fileMimeType",
+        user_capital_deposits.proof_file_data_url AS "fileDataUrl",
+        participants.name AS "participantName"
+      FROM user_capital_deposits
+      JOIN participants ON participants.id = user_capital_deposits.participant_id
+      WHERE user_capital_deposits.id = $1
+    `,
+    [normalizedDepositId]
+  );
+
+  if (!document) {
+    throw new Error("Account-funds deposit not found.");
+  }
+
+  if (!document.fileName || !document.fileDataUrl) {
+    throw new Error("This account-funds deposit does not have proof of payment.");
   }
 
   return document;

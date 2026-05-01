@@ -362,6 +362,83 @@ function getUserMapByParticipantId(data) {
   return new Map((data.users ?? []).map((user) => [user.participantId, user]));
 }
 
+function getEnrollmentInvestmentAmount(data, participantId) {
+  const amounts = (data.userLegalAcknowledgements ?? [])
+    .filter((acknowledgement) => acknowledgement.participantId === participantId)
+    .filter((acknowledgement) => Number(acknowledgement.investmentAmount) > 0)
+    .map((acknowledgement) => Number(acknowledgement.investmentAmount ?? 0));
+
+  return roundCurrency(amounts.length ? Math.max(...amounts) : 0);
+}
+
+function getEnrollmentDeferredAmount(data, participantId) {
+  const amounts = (data.userLegalAcknowledgements ?? [])
+    .filter((acknowledgement) => acknowledgement.participantId === participantId)
+    .filter((acknowledgement) => Number(acknowledgement.deferredAmount) > 0)
+    .map((acknowledgement) => Number(acknowledgement.deferredAmount ?? 0));
+
+  return roundCurrency(amounts.length ? Math.max(...amounts) : 0);
+}
+
+function buildCapitalAccountLedger(data, participantId) {
+  const approvedDeposits = (data.userCapitalDeposits ?? []).filter(
+    (deposit) => deposit.participantId === participantId && deposit.status === "approved"
+  );
+  const pendingDeposits = (data.userCapitalDeposits ?? []).filter(
+    (deposit) => deposit.participantId === participantId && deposit.status === "pending"
+  );
+  const enrollmentInvestmentAmount = getEnrollmentInvestmentAmount(data, participantId);
+  const approvedDepositAmount = roundCurrency(
+    approvedDeposits.reduce((sum, deposit) => sum + Number(deposit.amount ?? 0), 0)
+  );
+  const pendingDepositAmount = roundCurrency(
+    pendingDeposits.reduce((sum, deposit) => sum + Number(deposit.amount ?? 0), 0)
+  );
+  const allocatedToProjects = roundCurrency(
+    (data.positions ?? [])
+      .filter((position) => position.participantId === participantId)
+      .filter((position) => position.contributionType !== "Reinvested proceeds")
+      .reduce((sum, position) => sum + Number(position.contributionAmount ?? 0), 0)
+  );
+  const committedToPools = roundCurrency(
+    (data.investorPoolCommitments ?? [])
+      .filter((commitment) => commitment.participantId === participantId)
+      .reduce((sum, commitment) => sum + Number(commitment.commitmentAmount ?? 0), 0)
+  );
+  const totalAccountFunds = roundCurrency(enrollmentInvestmentAmount + approvedDepositAmount);
+  const totalAllocatedFunds = roundCurrency(allocatedToProjects + committedToPools);
+  const availableCapital = roundCurrency(Math.max(totalAccountFunds - totalAllocatedFunds, 0));
+  const latestApprovedDeposit = approvedDeposits
+    .slice()
+    .sort((left, right) => String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? "")))[0];
+  const latestEnrollmentProof = (data.userLegalAcknowledgements ?? [])
+    .filter((acknowledgement) => acknowledgement.participantId === participantId)
+    .filter(
+      (acknowledgement) =>
+        Number(acknowledgement.investmentAmount) > 0 &&
+        acknowledgement.proofOfPaymentFileName
+    )
+    .sort((left, right) =>
+      String(right.acknowledgedAt ?? "").localeCompare(String(left.acknowledgedAt ?? ""))
+    )[0];
+
+  return {
+    participantId,
+    enrollmentInvestmentAmount,
+    approvedDepositAmount,
+    pendingDepositAmount,
+    totalAccountFunds,
+    allocatedToProjects,
+    committedToPools,
+    totalAllocatedFunds,
+    availableCapital,
+    latestApprovedDepositId: latestApprovedDeposit?.id ?? null,
+    latestApprovedProofFileName: latestApprovedDeposit?.proofFileName ?? "",
+    enrollmentProofAcknowledgementId: latestEnrollmentProof?.id ?? null,
+    enrollmentProofFileName: latestEnrollmentProof?.proofOfPaymentFileName ?? ""
+  };
+}
+
 function calculateCurrentPref(position, deal, asOfDate) {
   const stopDate = deal.status === "sold" ? deal.actualExitOn : asOfDate;
   const monthsAccrued = Math.min(monthsBetween(deal.fundedOn, stopDate), deal.holdMonths);
@@ -402,6 +479,7 @@ function buildProfilePayload(user, participant) {
 function buildNotificationCenter(user, data = seedData) {
   const managerActionSubjects = [
     "Account approval requested:",
+    "Account funds deposit submitted:",
     "Investor distribution election submitted",
     "Early withdrawal request submitted",
     "Pool vote submitted:"
@@ -1487,6 +1565,12 @@ export function buildPoolMemberDashboard(user, data = seedData) {
   const jointCapitalDeployed = roundCurrency(
     pools.reduce((sum, investmentPool) => sum + (investmentPool.jointPosition?.amountInvested ?? 0), 0)
   );
+  const capitalAccount = {
+    ...buildCapitalAccountLedger(data, user.participantId),
+    deposits: (data.userCapitalDeposits ?? [])
+      .filter((deposit) => deposit.participantId === user.participantId)
+      .sort((left, right) => String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? "")))
+  };
 
   return {
     role: user.role,
@@ -1499,6 +1583,7 @@ export function buildPoolMemberDashboard(user, data = seedData) {
     profile: buildProfilePayload(user, participant),
     notifications: buildNotificationCenter(user, data),
     companyResources: data.companyResources ?? [],
+    capitalAccount,
     poolPortfolio: {
       totalCommitted,
       totalInvested,
@@ -1890,6 +1975,12 @@ export function buildInvestorDashboard(user, data = seedData) {
     },
     reinvestmentTargets: context.reinvestmentTargets
   }));
+  const capitalAccount = {
+    ...buildCapitalAccountLedger(data, user.participantId),
+    deposits: (data.userCapitalDeposits ?? [])
+      .filter((deposit) => deposit.participantId === user.participantId)
+      .sort((left, right) => String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? "")))
+  };
 
   return {
     role: user.role,
@@ -1901,6 +1992,7 @@ export function buildInvestorDashboard(user, data = seedData) {
     },
     profile: buildProfilePayload(user, participant),
     notifications: buildNotificationCenter(user, data),
+    capitalAccount,
     portfolio: {
       totalInvested,
       totalReturned,
@@ -2064,22 +2156,9 @@ export function buildManagerDashboard(user, data = seedData) {
   });
 
   function getEnrollmentFundingDetails(participantId, participantCategory) {
-    const linkedUser = userMap.get(participantId);
-    const acknowledgements = linkedUser
-      ? legalAcknowledgementsByUserId.get(linkedUser.id) ?? []
-      : [];
-    const subscriptionAcknowledgement = acknowledgements.find(
-      (acknowledgement) =>
-        acknowledgement.documentKey === "subscription_agreement_237_ville" &&
-        Number(acknowledgement.investmentAmount) > 0
-    );
-    const contractorAcknowledgement = acknowledgements.find(
-      (acknowledgement) =>
-        acknowledgement.documentKey === "contractor_equity_election_form" &&
-        Number(acknowledgement.deferredAmount) > 0
-    );
-    const investmentAmount = roundCurrency(subscriptionAcknowledgement?.investmentAmount ?? 0);
-    const deferredAmount = roundCurrency(contractorAcknowledgement?.deferredAmount ?? 0);
+    const investmentAmount = getEnrollmentInvestmentAmount(data, participantId);
+    const deferredAmount = getEnrollmentDeferredAmount(data, participantId);
+    const capitalLedger = buildCapitalAccountLedger(data, participantId);
     const enrollmentFundingAmount =
       participantCategory === "contractor" ? deferredAmount : investmentAmount;
     const allocatedAmount = roundCurrency(
@@ -2092,9 +2171,11 @@ export function buildManagerDashboard(user, data = seedData) {
             .reduce((sum, position) => sum + position.contributionAmount, 0)
     );
     const remainingAmount =
-      enrollmentFundingAmount > 0
-        ? roundCurrency(Math.max(enrollmentFundingAmount - allocatedAmount, 0))
-        : null;
+      participantCategory === "contractor"
+        ? enrollmentFundingAmount > 0
+          ? roundCurrency(Math.max(enrollmentFundingAmount - allocatedAmount, 0))
+          : null
+        : capitalLedger.availableCapital;
     const fundingLabel =
       participantCategory === "contractor"
         ? deferredAmount > 0
@@ -2102,11 +2183,17 @@ export function buildManagerDashboard(user, data = seedData) {
               remainingAmount !== null ? `; Remaining: ${formatCurrencyLabel(remainingAmount)}` : ""
             }`
           : ""
-        : investmentAmount > 0
-          ? `Investment Amount: ${formatCurrencyLabel(investmentAmount)}${
-              remainingAmount !== null ? `; Remaining: ${formatCurrencyLabel(remainingAmount)}` : ""
+        : capitalLedger.totalAccountFunds > 0 || capitalLedger.pendingDepositAmount > 0
+          ? `Account funds: ${formatCurrencyLabel(capitalLedger.totalAccountFunds)}; Available: ${formatCurrencyLabel(
+              capitalLedger.availableCapital
+            )}${
+              capitalLedger.pendingDepositAmount > 0
+                ? `; Pending deposits: ${formatCurrencyLabel(capitalLedger.pendingDepositAmount)}`
+                : ""
             }`
-          : "";
+          : investmentAmount > 0
+            ? `Investment Amount: ${formatCurrencyLabel(investmentAmount)}`
+            : "";
 
     return {
       enrollmentInvestmentAmount: investmentAmount || null,
@@ -2114,6 +2201,11 @@ export function buildManagerDashboard(user, data = seedData) {
       enrollmentFundingAmount: enrollmentFundingAmount || null,
       enrollmentAllocatedAmount: allocatedAmount || null,
       enrollmentRemainingAmount: remainingAmount,
+      accountFundsTotal: capitalLedger.totalAccountFunds,
+      accountFundsAvailable: capitalLedger.availableCapital,
+      accountFundsPendingDeposits: capitalLedger.pendingDepositAmount,
+      accountFundsAllocatedToProjects: capitalLedger.allocatedToProjects,
+      accountFundsCommittedToPools: capitalLedger.committedToPools,
       suggestedAllocationAmount: remainingAmount && remainingAmount > 0 ? remainingAmount : null,
       enrollmentFundingLabel: fundingLabel
     };
@@ -2198,6 +2290,39 @@ export function buildManagerDashboard(user, data = seedData) {
   const poolMembers = adminParticipants.filter(
     (participant) => participant.category === "pool_member" && participant.hasUser
   );
+  const capitalAccounts = adminParticipants
+    .filter(
+      (participant) =>
+        ["investor", "pool_member"].includes(participant.category) && participant.hasUser
+    )
+    .map((participant) => ({
+      ...participant,
+      ...buildCapitalAccountLedger(data, participant.id)
+    }))
+    .sort((left, right) => {
+      if (right.availableCapital !== left.availableCapital) {
+        return right.availableCapital - left.availableCapital;
+      }
+
+      return left.name.localeCompare(right.name);
+    });
+  const capitalDeposits = (data.userCapitalDeposits ?? [])
+    .map((deposit) => ({
+      ...deposit,
+      participantName: participantMap.get(deposit.participantId)?.name ?? deposit.participantName,
+      category: participantMap.get(deposit.participantId)?.category ?? deposit.category
+    }))
+    .sort((left, right) => {
+      if (left.status === "pending" && right.status !== "pending") {
+        return -1;
+      }
+
+      if (left.status !== "pending" && right.status === "pending") {
+        return 1;
+      }
+
+      return String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? ""));
+    });
 
   function resolveAllocationStatus({ deal, position, participant: allocationParticipant, contractorRecord }) {
     if (!deal) {
@@ -2553,6 +2678,8 @@ export function buildManagerDashboard(user, data = seedData) {
       investorQuestionnaires,
       allocationParticipants,
       poolMembers,
+      capitalAccounts,
+      capitalDeposits,
       investorPools,
       allocations: adminAllocations,
       archivedProjects,

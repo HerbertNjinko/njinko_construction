@@ -5,7 +5,7 @@ import {
   LOGIN_PAGE_TITLE,
   app,
   state
-} from "./state.js?v=20260501-frontend-02";
+} from "./state.js?v=20260501-frontend-04";
 import {
   breakdownItem,
   escapeHtml,
@@ -21,7 +21,7 @@ import {
   renderSectionToggle,
   summaryItem,
   titleCase
-} from "./helpers.js?v=20260501-frontend-02";
+} from "./helpers.js?v=20260501-frontend-04";
 import {
   applyAllocationFilters,
   applyArchivedProjectFilters,
@@ -44,7 +44,7 @@ import {
   getInvestorProjectFilterOptions,
   getManagerEditableDeal,
   getUserFilterOptions
-} from "./data.js?v=20260501-frontend-02";
+} from "./data.js?v=20260501-frontend-04";
 
 function renderLogin() {
   const errorMarkup = state.loginError
@@ -2242,6 +2242,97 @@ function renderInvestorArchivedProjectHistory(archivedProjects = []) {
   `;
 }
 
+function renderUserCapitalAccountPanel() {
+  const account = state.dashboard.capitalAccount ?? {};
+  const deposits = account.deposits ?? [];
+
+  return renderCollapsibleSection({
+    sectionId: "investor-account-funds",
+    title: "Account Funds",
+    copy:
+      "Approved account funds can be assigned later to a project position or pooled-capital commitment.",
+    message: renderMessage(state.messages.capital),
+    body: `
+      <div class="metrics-grid">
+        ${metricCard("Total account funds", formatCurrency(account.totalAccountFunds || 0))}
+        ${metricCard("Available to allocate", formatCurrency(account.availableCapital || 0))}
+        ${metricCard("Allocated to projects", formatCurrency(account.allocatedToProjects || 0))}
+        ${metricCard("Committed to pools", formatCurrency(account.committedToPools || 0))}
+        ${metricCard("Pending deposit review", formatCurrency(account.pendingDepositAmount || 0))}
+      </div>
+      <form id="capital-deposit-form">
+        <div class="form-grid-2">
+          <label>
+            Additional deposit amount
+            <input type="number" name="amount" min="0" step="0.01" required />
+          </label>
+          <label>
+            Proof of payment
+            <input type="file" name="proofFile" accept="application/pdf,image/*" required />
+          </label>
+        </div>
+        <label>
+          Notes
+          <textarea name="notes" rows="3" placeholder="Wire, check, Zelle, or reference details"></textarea>
+        </label>
+        <button class="button-primary" type="submit">Submit deposit for review</button>
+      </form>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Submitted</th>
+              <th>Amount</th>
+              <th>Status</th>
+              <th>Manager note</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${
+              deposits.length
+                ? deposits
+                    .map(
+                      (deposit) => `
+                        <tr>
+                          <td>${escapeHtml(formatDateTime(deposit.createdAt))}</td>
+                          <td>${escapeHtml(formatCurrency(deposit.amount))}</td>
+                          <td>${escapeHtml(titleCase(deposit.status))}</td>
+                          <td>${escapeHtml(deposit.managerNotes || "—")}</td>
+                        </tr>
+                      `
+                    )
+                    .join("")
+                : '<tr><td colspan="4">No additional account-funds deposits submitted yet.</td></tr>'
+            }
+          </tbody>
+        </table>
+      </div>
+    `
+  });
+}
+
+function renderAccountActionStack(showAccountDetails = false) {
+  const accountDetailsButton = showAccountDetails
+    ? `
+        <button
+          class="button-secondary"
+          id="account-details-button"
+          type="button"
+          aria-expanded="${state.accountDetailsOpen ? "true" : "false"}"
+        >
+          Account Details
+        </button>
+      `
+    : "";
+
+  return `
+    <div class="account-action-stack">
+      <button class="button-secondary" id="logout-button" type="button">Log out</button>
+      ${accountDetailsButton}
+    </div>
+  `;
+}
+
 function renderInvestorDashboard() {
   const {
     viewer,
@@ -2259,6 +2350,7 @@ function renderInvestorDashboard() {
     ),
     ...pooledDistributionProjects
   ];
+  const canViewAccountDetails = ["investor", "pool_member"].includes(viewer.category);
 
   return `
     <div class="shell">
@@ -2273,10 +2365,11 @@ function renderInvestorDashboard() {
         <div class="button-row">
           <span class="read-only-tag">Deal data remains read only</span>
           ${renderNotificationBell()}
-          <button class="button-secondary" id="logout-button" type="button">Log out</button>
+          ${renderAccountActionStack(canViewAccountDetails)}
         </div>
       </section>
 
+      ${canViewAccountDetails && state.accountDetailsOpen ? renderUserCapitalAccountPanel() : ""}
       ${renderProfilePanel()}
       ${renderCompanyLibraryPanel()}
 
@@ -2683,10 +2776,11 @@ function renderPoolMemberDashboard() {
         <div class="button-row">
           <span class="read-only-tag">Project allocations remain pooled</span>
           ${renderNotificationBell()}
-          <button class="button-secondary" id="logout-button" type="button">Log out</button>
+          ${renderAccountActionStack(true)}
         </div>
       </section>
 
+      ${state.accountDetailsOpen ? renderUserCapitalAccountPanel() : ""}
       ${renderProfilePanel()}
       ${renderCompanyLibraryPanel()}
 
@@ -3296,6 +3390,184 @@ function renderCreateUserPanel() {
         </div>
         <button class="button-primary" type="submit">Create user</button>
       </form>
+    `
+  });
+}
+
+function renderManagerCapitalFundsPanel() {
+  const accounts = state.dashboard.admin.capitalAccounts ?? [];
+  const deposits = state.dashboard.admin.capitalDeposits ?? [];
+  const pendingDeposits = deposits.filter((deposit) => deposit.status === "pending");
+
+  return renderCollapsibleSection({
+    sectionId: "manager-account-funds",
+    title: "User Account Funds",
+    copy:
+      "Track cleared deposits that belong to a user account before the money is assigned to a project or pooled-capital group.",
+    message: renderMessage(state.messages.capital),
+    body: `
+      <div class="admin-grid">
+        <form id="admin-capital-deposit-form" class="admin-card-inner">
+          <p class="eyebrow">Manager Control</p>
+          <label>
+            User account
+            <select name="participantId" required>
+              <option value="">Select user</option>
+              ${accounts
+                .map(
+                  (account) => `
+                    <option value="${escapeHtml(account.id)}">
+                      ${escapeHtml(
+                        `${account.name} · ${titleCase(account.category)} · available ${formatCurrency(
+                          account.availableCapital || 0
+                        )}`
+                      )}
+                    </option>
+                  `
+                )
+                .join("")}
+            </select>
+          </label>
+          <div class="form-grid-2">
+            <label>
+              Cleared deposit amount
+              <input type="number" name="amount" min="0" step="0.01" required />
+            </label>
+            <label>
+              Proof of payment
+              <input type="file" name="proofFile" accept="application/pdf,image/*" required />
+            </label>
+          </div>
+          <label>
+            Notes
+            <textarea name="notes" rows="3" placeholder="Payment reference or source details"></textarea>
+          </label>
+          <label>
+            Manager note
+            <textarea name="managerNotes" rows="3" placeholder="Internal verification note"></textarea>
+          </label>
+          <button class="button-primary" type="submit">Record approved funds</button>
+        </form>
+        <div>
+          <div class="section-head">
+            <div>
+              <h4>Pending Deposit Requests</h4>
+              <p class="section-copy">Investor-submitted deposits become available only after approval.</p>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>User</th>
+                  <th>Amount</th>
+                  <th>Proof</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                ${
+                  pendingDeposits.length
+                    ? pendingDeposits
+                        .map(
+                          (deposit) => `
+                            <tr>
+                              <td>${escapeHtml(
+                                `${deposit.participantName} · ${deposit.userEmail || "No email"}`
+                              )}</td>
+                              <td>${escapeHtml(formatCurrency(deposit.amount))}</td>
+                              <td>
+                                ${
+                                  deposit.hasProof
+                                    ? `
+                                      <a class="button-secondary button-inline" target="_blank" rel="noreferrer" href="/api/admin/capital-deposits/${encodeURIComponent(
+                                        deposit.id
+                                      )}/proof?view=1">View proof</a>
+                                      <a class="button-secondary button-inline" href="/api/admin/capital-deposits/${encodeURIComponent(
+                                        deposit.id
+                                      )}/proof" download="${escapeHtml(
+                                        deposit.proofFileName || "payment-proof"
+                                      )}">Download</a>
+                                    `
+                                    : "No proof"
+                                }
+                              </td>
+                              <td>
+                                <form data-capital-deposit-review-form="true" data-deposit-id="${escapeHtml(
+                                  deposit.id
+                                )}">
+                                  <textarea name="managerNotes" rows="2" placeholder="Manager note"></textarea>
+                                  <div class="button-row">
+                                    <button class="button-primary button-inline" type="submit" name="decision" value="approved">Approve</button>
+                                    <button class="button-danger button-inline" type="submit" name="decision" value="rejected">Reject</button>
+                                  </div>
+                                </form>
+                              </td>
+                            </tr>
+                          `
+                        )
+                        .join("")
+                    : '<tr><td colspan="4">No pending account-funds deposits.</td></tr>'
+                }
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>User</th>
+              <th>Category</th>
+              <th>Total funds</th>
+              <th>Project allocations</th>
+              <th>Pool commitments</th>
+              <th>Available</th>
+              <th>Pending</th>
+              <th>Latest proof</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${
+              accounts.length
+                ? accounts
+                    .map(
+                      (account) => `
+                        <tr>
+                          <td>${escapeHtml(`${account.name} · ${account.email || "No email"}`)}</td>
+                          <td>${escapeHtml(titleCase(account.category))}</td>
+                          <td>${escapeHtml(formatCurrency(account.totalAccountFunds || 0))}</td>
+                          <td>${escapeHtml(formatCurrency(account.allocatedToProjects || 0))}</td>
+                          <td>${escapeHtml(formatCurrency(account.committedToPools || 0))}</td>
+                          <td>${escapeHtml(formatCurrency(account.availableCapital || 0))}</td>
+                          <td>${escapeHtml(formatCurrency(account.pendingDepositAmount || 0))}</td>
+                          <td>
+                            ${
+                              account.latestApprovedDepositId
+                                ? `
+                                  <a class="button-secondary button-inline" target="_blank" rel="noreferrer" href="/api/admin/capital-deposits/${encodeURIComponent(
+                                    account.latestApprovedDepositId
+                                  )}/proof?view=1">View proof</a>
+                                `
+                                : account.enrollmentProofAcknowledgementId
+                                  ? `
+                                    <a class="button-secondary button-inline" target="_blank" rel="noreferrer" href="/api/admin/legal-acknowledgements/${encodeURIComponent(
+                                      account.enrollmentProofAcknowledgementId
+                                    )}/proof?view=1">View proof</a>
+                                  `
+                                : "—"
+                            }
+                          </td>
+                        </tr>
+                      `
+                    )
+                    .join("")
+                : '<tr><td colspan="8">No investor or pooled-member account funds recorded yet.</td></tr>'
+            }
+          </tbody>
+        </table>
+      </div>
     `
   });
 }
@@ -6249,6 +6521,7 @@ function renderManagerInvestorPoolsPage() {
 
 function renderManagerAllocationsPage() {
   return `
+    ${renderManagerCapitalFundsPanel()}
     <div class="admin-grid">
       ${renderAllocationPanel()}
     </div>

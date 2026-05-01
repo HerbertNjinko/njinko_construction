@@ -363,6 +363,15 @@ button:disabled {
   gap: 0.75rem;
 }
 
+.account-action-stack {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.account-action-stack .button-secondary {
+  width: 100%;
+}
+
 .notification-bell-shell {
   position: relative;
   display: inline-flex;

@@ -10,6 +10,7 @@ import {
   archiveDeal,
   castDealIssueVote,
   castInvestorPoolVote,
+  createCapitalDepositForParticipant,
   createCompanyResource,
   createDeal,
   createDealAllocation,
@@ -22,6 +23,7 @@ import {
   ensureInitialManagerUser,
   fundInvestorPool,
   getAppDataSnapshot,
+  getCapitalDepositProofDownload,
   getCompanyResourceDownload,
   getLegalAcknowledgementPaymentProofDownload,
   getLegalDocumentDefinition,
@@ -36,10 +38,12 @@ import {
   markUserLogin,
   requestPasswordReset,
   reviewEarlyWithdrawalRequest,
+  reviewCapitalDeposit,
   reviewUserIdentity,
   resetPasswordWithToken,
   setUserAccountActive,
   submitIdentityReview,
+  submitCapitalDepositRequest,
   submitRequiredLegalAcknowledgements,
   updateUserCategory,
   upsertInvestorPoolCommitment,
@@ -937,6 +941,12 @@ const server = createServer(async (request, response) => {
     const legalPaymentProofMatch = url.pathname.match(
       /^\/api\/admin\/legal-acknowledgements\/([^/]+)\/proof$/
     );
+    const capitalDepositProofMatch = url.pathname.match(
+      /^\/api\/admin\/capital-deposits\/([^/]+)\/proof$/
+    );
+    const adminCapitalDepositReviewMatch = url.pathname.match(
+      /^\/api\/admin\/capital-deposits\/([^/]+)$/
+    );
     const legalDocumentMatch = url.pathname.match(/^\/api\/legal-documents\/([^/]+)$/);
     const userDeleteMatch = url.pathname.match(/^\/api\/admin\/users\/([^/]+)$/);
     const resourceDeleteMatch = url.pathname.match(/^\/api\/admin\/resources\/([^/]+)$/);
@@ -1455,6 +1465,30 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    if (method === "POST" && url.pathname === "/api/capital-deposits") {
+      const user = await requireUnlockedUser(request, response);
+
+      if (!user) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const result = await submitCapitalDepositRequest(user.id, body);
+        sendJson(response, 201, result);
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
     if (method === "POST" && url.pathname === "/api/admin/users") {
       const manager = await requireManager(request, response);
 
@@ -1577,6 +1611,30 @@ const server = createServer(async (request, response) => {
           user: await stripUserSecrets(result.user),
           notification: result.notification
         });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/admin/capital-deposits") {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const result = await createCapitalDepositForParticipant(body, manager.id);
+        sendJson(response, 201, result);
       } catch (error) {
         sendJson(response, 400, { error: error.message });
       }
@@ -1924,6 +1982,65 @@ const server = createServer(async (request, response) => {
         response.end(decoded.buffer);
       } catch (error) {
         sendJson(response, 404, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "GET" && capitalDepositProofMatch) {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      try {
+        const document = await getCapitalDepositProofDownload(
+          decodeURIComponent(capitalDepositProofMatch[1])
+        );
+        const decoded = decodeDataUrl(document.fileDataUrl);
+        const disposition =
+          url.searchParams.get("view") === "1"
+            ? buildInlineDisposition(document.fileName)
+            : buildAttachmentDisposition(document.fileName);
+
+        response.writeHead(200, {
+          "Content-Type": sanitizeContentType(document.fileMimeType || decoded.mimeType),
+          "Content-Disposition": disposition,
+          "Cache-Control": "private, max-age=0, must-revalidate",
+          ...getSecurityHeaders()
+        });
+        response.end(decoded.buffer);
+      } catch (error) {
+        sendJson(response, 404, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "PUT" && adminCapitalDepositReviewMatch) {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const result = await reviewCapitalDeposit(
+          decodeURIComponent(adminCapitalDepositReviewMatch[1]),
+          body,
+          manager.id
+        );
+        sendJson(response, 200, result);
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
       }
 
       return;

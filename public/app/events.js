@@ -1,4 +1,4 @@
-import { state } from "./state.js?v=20260501-frontend-02";
+import { state } from "./state.js?v=20260501-frontend-04";
 import {
   clearAuthFeedback,
   clearMessages,
@@ -13,7 +13,7 @@ import {
   setMessage,
   titleCase,
   toggleSectionCollapsed
-} from "./helpers.js?v=20260501-frontend-02";
+} from "./helpers.js?v=20260501-frontend-04";
 import {
   applyArchivedProjectFilters,
   applyQuestionnaireFilters,
@@ -29,7 +29,7 @@ import {
   syncDealEditorField,
   updateCreateDealDraft,
   updateDealEditorDraft
-} from "./data.js?v=20260501-frontend-02";
+} from "./data.js?v=20260501-frontend-04";
 import {
   api,
   applyLoggedOutState,
@@ -37,8 +37,8 @@ import {
   loadSession,
   recordSessionActivity,
   refreshDashboard
-} from "./session.js?v=20260501-frontend-02";
-import { render } from "./renderers.js?v=20260501-frontend-02";
+} from "./session.js?v=20260501-frontend-04";
+import { render } from "./renderers.js?v=20260501-frontend-04";
 
 let listenersBound = false;
 
@@ -998,6 +998,98 @@ export function setupEventListeners() {
       return;
     }
 
+    if (event.target.id === "capital-deposit-form") {
+      event.preventDefault();
+      const formData = new FormData(event.target);
+
+      try {
+        const proofFile = await readFileAsPayload(event.target.elements.proofFile.files[0]);
+        await api("/api/capital-deposits", {
+          method: "POST",
+          body: JSON.stringify({
+            amount: Number(formData.get("amount")),
+            proofFile,
+            notes: formData.get("notes")
+          })
+        });
+        await refreshDashboard();
+        setMessage("capital", "success", "Deposit submitted for manager review.");
+        event.target.reset();
+      } catch (error) {
+        setMessage("capital", "error", error.message);
+      }
+
+      render();
+      return;
+    }
+
+    if (event.target.id === "admin-capital-deposit-form") {
+      event.preventDefault();
+      const formData = new FormData(event.target);
+
+      try {
+        const proofFile = await readFileAsPayload(event.target.elements.proofFile.files[0]);
+        const result = await api("/api/admin/capital-deposits", {
+          method: "POST",
+          body: JSON.stringify({
+            participantId: formData.get("participantId"),
+            amount: Number(formData.get("amount")),
+            proofFile,
+            notes: formData.get("notes"),
+            managerNotes: formData.get("managerNotes")
+          })
+        });
+        await refreshDashboard();
+        setMessage(
+          "capital",
+          "success",
+          `Approved account funds recorded. ${formatNotificationStatus(result.notification)}`
+        );
+        event.target.reset();
+      } catch (error) {
+        setMessage("capital", "error", error.message);
+      }
+
+      render();
+      return;
+    }
+
+    if (event.target.dataset.capitalDepositReviewForm === "true") {
+      event.preventDefault();
+      const formData = new FormData(event.target);
+      const depositId = String(event.target.dataset.depositId ?? "");
+      const decision = event.submitter?.value || formData.get("decision");
+
+      if (!depositId) {
+        setMessage("capital", "error", "A valid deposit request is required.");
+        render();
+        return;
+      }
+
+      try {
+        const result = await api(`/api/admin/capital-deposits/${encodeURIComponent(depositId)}`, {
+          method: "PUT",
+          body: JSON.stringify({
+            decision,
+            managerNotes: formData.get("managerNotes")
+          })
+        });
+        await refreshDashboard();
+        setMessage(
+          "capital",
+          "success",
+          `Deposit ${decision === "approved" ? "approved" : "rejected"}. ${formatNotificationStatus(
+            result.notification
+          )}`
+        );
+      } catch (error) {
+        setMessage("capital", "error", error.message);
+      }
+
+      render();
+      return;
+    }
+
     if (event.target.id === "create-deal-form") {
       event.preventDefault();
       const draft = getCreateDealDraft();
@@ -1305,6 +1397,15 @@ export function setupEventListeners() {
         render();
       }
 
+      return;
+    }
+
+    const accountDetailsButton = event.target.closest("#account-details-button");
+
+    if (accountDetailsButton) {
+      state.accountDetailsOpen = !state.accountDetailsOpen;
+      state.notificationPanelOpen = false;
+      render();
       return;
     }
 
