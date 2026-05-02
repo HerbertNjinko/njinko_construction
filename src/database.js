@@ -6894,6 +6894,7 @@ function buildProjectPoolVoteSummary({ deal, requests, votes, asOfDate = todaySt
   const pooledInvestmentTarget = roundNumber(Number(deal.pooledInvestmentTarget ?? 0));
   const targetMet = pooledInvestmentTarget <= 0 || totalCommitted >= pooledInvestmentTarget;
   const votePassed = totalCommitted > 0 && effectiveYesPct >= voteThreshold;
+  const requirementsMet = targetMet && votePassed;
 
   return {
     voteThreshold,
@@ -6914,7 +6915,9 @@ function buildProjectPoolVoteSummary({ deal, requests, votes, asOfDate = todaySt
     effectiveYesPct,
     targetMet,
     votePassed,
-    canFund: targetMet && votePassed,
+    requirementsMet,
+    canFund: votingClosed && requirementsMet,
+    canManagerOverrideFund: votingClosed && totalCommitted > 0 && !requirementsMet,
     members: [...participantWeights.entries()].map(([participantId, amount]) => {
       const vote = voteByParticipant.get(participantId);
 
@@ -7039,58 +7042,20 @@ async function settleProjectPooledAllocationRequests() {
       const approvedRequests = await getProjectPoolEligibleRequests(deal.id, pool, {
         statuses: ["approved"]
       });
-      const pendingRequests = await getProjectPoolEligibleRequests(deal.id, pool, {
-        statuses: ["pending"]
-      });
       const voteSummary = buildProjectPoolVoteSummary({
         deal,
         requests: approvedRequests,
         votes: await getProjectPoolVoteRows(deal.id)
       });
 
-      if (approvedRequests.length && voteSummary.canFund) {
-        await fundProjectPooledAllocationRequests(deal.id, null);
-        continue;
-      }
-
       if (!voteSummary.votingClosed) {
         continue;
       }
 
-      const requestsToReject = [...approvedRequests, ...pendingRequests];
-
-      if (!requestsToReject.length) {
+      if (approvedRequests.length && voteSummary.canFund) {
+        await fundProjectPooledAllocationRequests(deal.id, null);
         continue;
       }
-
-      const targetReason = voteSummary.targetMet
-        ? `the weighted yes vote was ${(
-            voteSummary.effectiveYesPct * 100
-          ).toFixed(1)}%, below the required ${(voteSummary.voteThreshold * 100).toFixed(1)}%`
-        : `the approved pool amount was ${formatCurrencyForError(
-            voteSummary.totalCommitted
-          )}, below the required ${formatCurrencyForError(voteSummary.pooledInvestmentTarget)}`;
-      const timestamp = nowTimestamp();
-
-      await pool.query(
-        `
-          UPDATE user_allocation_requests
-          SET
-            status = 'rejected',
-            manager_notes = $1,
-            reviewed_by_user_id = NULL,
-            reviewed_at = $2,
-            updated_at = $2
-          WHERE id = ANY($3::text[])
-            AND status IN ('pending', 'approved')
-            AND created_position_id IS NULL
-        `,
-        [
-          `Project pool closed without funding because ${targetReason}.`,
-          timestamp,
-          requestsToReject.map((request) => request.id)
-        ]
-      );
     } catch (error) {
       console.error(`Unable to settle project pool ${deal.id}:`, error);
     }
@@ -7388,6 +7353,7 @@ export async function fundProjectPooledAllocationRequests(dealId, actingUserId) 
   let positionId = null;
   let fundedAmount = 0;
   let fundedRequestCount = 0;
+  let fundedByManagerOverride = false;
 
   await withTransaction(async (client) => {
     const requests = await getProjectPoolEligibleRequests(normalizedDealId, client, {
@@ -7407,7 +7373,18 @@ export async function fundProjectPooledAllocationRequests(dealId, actingUserId) 
     fundedAmount = voteSummary.totalCommitted;
     fundedRequestCount = requests.length;
 
-    if (!voteSummary.targetMet) {
+    if (!voteSummary.votingClosed) {
+      throw new Error(
+        `This project pool cannot be funded until voting closes${
+          voteSummary.voteClosesOn ? ` on ${voteSummary.voteClosesOn}` : ""
+        }. Investors can still change votes or add approved capital before then.`
+      );
+    }
+
+    const isManagerOverride = Boolean(String(actingUserId ?? "").trim()) && !voteSummary.requirementsMet;
+    fundedByManagerOverride = isManagerOverride;
+
+    if (!voteSummary.targetMet && !isManagerOverride) {
       throw new Error(
         `Pooled requests total ${formatCurrencyForError(
           fundedAmount
@@ -7417,7 +7394,7 @@ export async function fundProjectPooledAllocationRequests(dealId, actingUserId) 
       );
     }
 
-    if (!voteSummary.votePassed) {
+    if (!voteSummary.votePassed && !isManagerOverride) {
       throw new Error(
         `This project pool has not passed its weighted investor vote. Current effective yes vote is ${(
           voteSummary.effectiveYesPct * 100
@@ -7491,6 +7468,10 @@ export async function fundProjectPooledAllocationRequests(dealId, actingUserId) 
         UPDATE user_allocation_requests
         SET
           status = 'approved',
+          manager_notes = COALESCE(
+            manager_notes,
+            $5
+          ),
           created_position_id = $1,
           reviewed_by_user_id = COALESCE(reviewed_by_user_id, $2),
           reviewed_at = COALESCE(reviewed_at, $3),
@@ -7501,8 +7482,33 @@ export async function fundProjectPooledAllocationRequests(dealId, actingUserId) 
         positionId,
         String(actingUserId ?? "").trim() || null,
         timestamp,
-        requests.map((request) => request.id)
+        requests.map((request) => request.id),
+        isManagerOverride
+          ? `Manager override funded after the project pool deadline. Approved amount: ${formatCurrencyForError(
+              fundedAmount
+            )}; effective yes vote: ${(voteSummary.effectiveYesPct * 100).toFixed(1)}%.`
+          : null
       ]
+    );
+
+    await client.query(
+      `
+        UPDATE user_allocation_requests
+        SET
+          status = 'rejected',
+          manager_notes = COALESCE(
+            manager_notes,
+            'Project pool was funded after the voting deadline before this request was approved.'
+          ),
+          reviewed_by_user_id = COALESCE(reviewed_by_user_id, $1),
+          reviewed_at = COALESCE(reviewed_at, $2),
+          updated_at = $2
+        WHERE deal_id = $3
+          AND allocation_mode = 'pooled'
+          AND status = 'pending'
+          AND created_position_id IS NULL
+      `,
+      [String(actingUserId ?? "").trim() || null, timestamp, normalizedDealId]
     );
 
     await syncDealEquity(normalizedDealId, client);
@@ -7512,7 +7518,8 @@ export async function fundProjectPooledAllocationRequests(dealId, actingUserId) 
     dealId: normalizedDealId,
     positionId,
     fundedAmount,
-    fundedRequestCount
+    fundedRequestCount,
+    fundedByManagerOverride
   };
 }
 
@@ -8670,8 +8677,176 @@ function getPoolMemberReinvestmentConflictIssues(snapshot, participantId, source
 
 function normalizeEarlyWithdrawalRequestInput(input) {
   return {
+    positionId: normalizeOptionalText(input?.positionId),
     investorNotes: normalizeOptionalText(input?.investorNotes ?? input?.notes)
   };
+}
+
+function getApprovedWithdrawalAmountByPositionParticipant(snapshot) {
+  const withdrawalMap = new Map();
+
+  for (const request of snapshot.earlyWithdrawalRequests ?? []) {
+    if (request.requestStatus !== "approved" || !request.positionId) {
+      continue;
+    }
+
+    const key = `${request.positionId}:${request.participantId}`;
+    withdrawalMap.set(
+      key,
+      roundNumber(
+        (withdrawalMap.get(key) ?? 0) + Number(request.requestedCapitalAmount ?? 0)
+      )
+    );
+  }
+
+  return withdrawalMap;
+}
+
+function getEffectiveCapitalAfterWithdrawal({ amount, positionId, participantId, withdrawalMap }) {
+  const withdrawnAmount = withdrawalMap.get(`${positionId}:${participantId}`) ?? 0;
+
+  return roundNumber(Math.max(Number(amount ?? 0) - withdrawnAmount, 0));
+}
+
+function buildEarlyWithdrawalPositionContexts(snapshot, dealId, participantId) {
+  const dealMap = new Map((snapshot.deals ?? []).map((deal) => [deal.id, deal]));
+  const positionById = new Map((snapshot.positions ?? []).map((position) => [position.id, position]));
+  const withdrawalMap = getApprovedWithdrawalAmountByPositionParticipant(snapshot);
+  const normalizedDealId = String(dealId ?? "").trim();
+  const normalizedParticipantId = String(participantId ?? "").trim();
+  const contexts = [];
+
+  for (const position of snapshot.positions ?? []) {
+    if (position.dealId !== normalizedDealId || position.participantId !== normalizedParticipantId) {
+      continue;
+    }
+
+    const deal = dealMap.get(position.dealId);
+
+    if (!deal || deal.status === "sold") {
+      continue;
+    }
+
+    contexts.push({
+      position,
+      positionId: position.id,
+      classType: position.classType,
+      sourceKind: "direct",
+      sourceName: position.contributionType || "Direct investor position",
+      currentContributionAmount: getEffectiveCapitalAfterWithdrawal({
+        amount: position.contributionAmount,
+        positionId: position.id,
+        participantId: normalizedParticipantId,
+        withdrawalMap
+      })
+    });
+  }
+
+  const projectPoolRequestByPositionId = new Map();
+
+  for (const request of snapshot.userAllocationRequests ?? []) {
+    if (
+      request.dealId !== normalizedDealId ||
+      request.participantId !== normalizedParticipantId ||
+      request.allocationMode !== "pooled" ||
+      request.status !== "approved" ||
+      !request.createdPositionId
+    ) {
+      continue;
+    }
+
+    if (!projectPoolRequestByPositionId.has(request.createdPositionId)) {
+      projectPoolRequestByPositionId.set(request.createdPositionId, []);
+    }
+
+    projectPoolRequestByPositionId.get(request.createdPositionId).push(request);
+  }
+
+  for (const [positionId, requests] of projectPoolRequestByPositionId) {
+    const position = positionById.get(positionId);
+    const deal = position ? dealMap.get(position.dealId) : null;
+
+    if (!position || !deal || deal.status === "sold") {
+      continue;
+    }
+
+    contexts.push({
+      position,
+      positionId,
+      classType: position.classType,
+      sourceKind: "project_pool",
+      sourceName: `${deal.name} Project Pool`,
+      currentContributionAmount: roundNumber(
+        requests.reduce(
+          (sum, request) =>
+            sum +
+            getEffectiveCapitalAfterWithdrawal({
+              amount: request.amount,
+              positionId,
+              participantId: normalizedParticipantId,
+              withdrawalMap
+            }),
+          0
+        )
+      )
+    });
+  }
+
+  for (const commitment of snapshot.investorPoolCommitments ?? []) {
+    if (commitment.participantId !== normalizedParticipantId) {
+      continue;
+    }
+
+    const investmentPool = (snapshot.investorPools ?? []).find(
+      (poolRow) => poolRow.id === commitment.poolId && poolRow.selectedDealId === normalizedDealId
+    );
+    const position = investmentPool
+      ? (snapshot.positions ?? []).find(
+          (item) =>
+            item.dealId === normalizedDealId &&
+            item.participantId === investmentPool.poolParticipantId
+        )
+      : null;
+    const deal = position ? dealMap.get(position.dealId) : null;
+
+    if (!investmentPool || !position || !deal || deal.status === "sold") {
+      continue;
+    }
+
+    contexts.push({
+      position,
+      positionId: position.id,
+      classType: position.classType,
+      sourceKind: "legacy_pool",
+      sourceName: investmentPool.name,
+      currentContributionAmount: getEffectiveCapitalAfterWithdrawal({
+        amount: commitment.commitmentAmount,
+        positionId: position.id,
+        participantId: normalizedParticipantId,
+        withdrawalMap
+      })
+    });
+  }
+
+  return contexts.filter((context) => context.currentContributionAmount > 0);
+}
+
+function selectEarlyWithdrawalPositionContext(snapshot, { dealId, participantId, positionId = null }) {
+  const contexts = buildEarlyWithdrawalPositionContexts(snapshot, dealId, participantId);
+
+  if (positionId) {
+    const matchingContext = contexts.find((context) => context.positionId === positionId);
+
+    if (!matchingContext) {
+      throw new Error("The selected position is not eligible for early withdrawal.");
+    }
+
+    return matchingContext;
+  }
+
+  const directContext = contexts.find((context) => context.sourceKind === "direct");
+
+  return directContext ?? contexts[0] ?? null;
 }
 
 function normalizeEarlyWithdrawalReviewInput(input) {
@@ -8723,17 +8898,22 @@ export async function upsertEarlyWithdrawalRequest(dealId, userId, input) {
 
   const participant = snapshot.participants.find((item) => item.id === user.participantId);
 
-  if (!["investor", "contractor"].includes(participant?.category ?? "")) {
+  if (!["investor", "pool_member", "contractor"].includes(participant?.category ?? "")) {
     throw new Error("Only participant positions with portal access can request an early withdrawal.");
   }
 
-  const position = snapshot.positions.find(
-    (item) => item.dealId === normalizedDealId && item.participantId === user.participantId
-  );
+  const request = normalizeEarlyWithdrawalRequestInput(input);
+  const withdrawalContext = selectEarlyWithdrawalPositionContext(snapshot, {
+    dealId: normalizedDealId,
+    participantId: user.participantId,
+    positionId: request.positionId
+  });
 
-  if (!position || position.contributionAmount <= 0) {
+  if (!withdrawalContext || withdrawalContext.currentContributionAmount <= 0) {
     throw new Error("You do not have an active invested position in this project.");
   }
+
+  const position = withdrawalContext.position;
 
   if (!participantHasPayoutInstructions(participant)) {
     throw new Error(
@@ -8741,7 +8921,6 @@ export async function upsertEarlyWithdrawalRequest(dealId, userId, input) {
     );
   }
 
-  const request = normalizeEarlyWithdrawalRequestInput(input);
   const existingRequest = await queryOne(
     `
       SELECT
@@ -8760,7 +8939,7 @@ export async function upsertEarlyWithdrawalRequest(dealId, userId, input) {
 
   const timestamp = nowTimestamp();
   const { capitalAmount, penaltyRate, penaltyAmount, payoutAmount } = computeEarlyWithdrawalAmounts(
-    position.contributionAmount,
+    withdrawalContext.currentContributionAmount,
     deal.earlyWithdrawalPenaltyRate
   );
 
@@ -8788,7 +8967,7 @@ export async function upsertEarlyWithdrawalRequest(dealId, userId, input) {
         `,
         [
           position.id,
-          position.classType,
+          withdrawalContext.classType,
           capitalAmount,
           penaltyRate,
           penaltyAmount,
@@ -8830,7 +9009,7 @@ export async function upsertEarlyWithdrawalRequest(dealId, userId, input) {
           normalizedDealId,
           user.participantId,
           position.id,
-          position.classType,
+          withdrawalContext.classType,
           capitalAmount,
           penaltyRate,
           penaltyAmount,
@@ -8878,7 +9057,9 @@ export async function upsertEarlyWithdrawalRequest(dealId, userId, input) {
     dealId: normalizedDealId,
     participantId: user.participantId,
     positionId: position.id,
-    classType: position.classType,
+    classType: withdrawalContext.classType,
+    sourceKind: withdrawalContext.sourceKind,
+    sourceName: withdrawalContext.sourceName,
     requestStatus: "pending",
     requestedCapitalAmount: capitalAmount,
     penaltyRate,
@@ -8916,7 +9097,7 @@ export async function reviewEarlyWithdrawalRequest(dealId, participantId, userId
 
   const participant = snapshot.participants.find((item) => item.id === normalizedParticipantId);
 
-  if (!["investor", "contractor"].includes(participant?.category ?? "")) {
+  if (!["investor", "pool_member", "contractor"].includes(participant?.category ?? "")) {
     throw new Error("Only participant positions with portal access can be reviewed for early withdrawal.");
   }
 
@@ -8952,9 +9133,23 @@ export async function reviewEarlyWithdrawalRequest(dealId, participantId, userId
     throw new Error("This early withdrawal request has already been reviewed.");
   }
 
-  const position = snapshot.positions.find(
-    (item) => item.dealId === normalizedDealId && item.participantId === normalizedParticipantId
-  );
+  let withdrawalContext = null;
+
+  try {
+    withdrawalContext = selectEarlyWithdrawalPositionContext(snapshot, {
+      dealId: normalizedDealId,
+      participantId: normalizedParticipantId,
+      positionId: existingRequest.positionId
+    });
+  } catch (error) {
+    if (review.decision === "approve") {
+      throw error;
+    }
+  }
+  const position =
+    withdrawalContext?.position ??
+    snapshot.positions.find((item) => item.id === existingRequest.positionId) ??
+    null;
   const requestedCapitalAmount = roundNumber(existingRequest.requestedCapitalAmount ?? 0);
   const penaltyRate = roundNumber(existingRequest.penaltyRate ?? deal.earlyWithdrawalPenaltyRate);
   const penaltyAmount = roundNumber(existingRequest.penaltyAmount ?? 0);
@@ -8963,8 +9158,12 @@ export async function reviewEarlyWithdrawalRequest(dealId, participantId, userId
   );
 
   if (review.decision === "approve") {
-    if (!position || position.contributionAmount <= 0) {
+    if (!position || !withdrawalContext || withdrawalContext.currentContributionAmount <= 0) {
       throw new Error("No active capital remains on this position to withdraw.");
+    }
+
+    if (requestedCapitalAmount > withdrawalContext.currentContributionAmount) {
+      throw new Error("Requested withdrawal exceeds the active capital remaining on this position.");
     }
 
     if (!participantHasPayoutInstructions(participant)) {
@@ -9010,10 +9209,10 @@ export async function reviewEarlyWithdrawalRequest(dealId, participantId, userId
       await client.query(
         `
           UPDATE positions
-          SET contribution_amount = 0, updated_at = $1
-          WHERE id = $2
+          SET contribution_amount = GREATEST(contribution_amount - $1, 0), updated_at = $2
+          WHERE id = $3
         `,
-        [timestamp, position.id]
+        [requestedCapitalAmount, timestamp, position.id]
       );
 
       await syncDealEquity(normalizedDealId, client);
@@ -9077,6 +9276,8 @@ export async function reviewEarlyWithdrawalRequest(dealId, participantId, userId
     participantId: normalizedParticipantId,
     positionId: existingRequest.positionId ?? position?.id ?? null,
     classType: existingRequest.classType ?? position?.classType ?? null,
+    sourceKind: withdrawalContext?.sourceKind ?? "direct",
+    sourceName: withdrawalContext?.sourceName ?? "Direct investor position",
     requestStatus: review.decision === "approve" ? "approved" : "rejected",
     requestedCapitalAmount,
     penaltyRate,

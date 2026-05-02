@@ -1,4 +1,4 @@
-import { state } from "./state.js?v=20260501-frontend-10";
+import { state } from "./state.js?v=20260501-frontend-12";
 import {
   clearAuthFeedback,
   clearMessages,
@@ -14,7 +14,7 @@ import {
   setMessage,
   titleCase,
   toggleSectionCollapsed
-} from "./helpers.js?v=20260501-frontend-10";
+} from "./helpers.js?v=20260501-frontend-12";
 import {
   applyArchivedProjectFilters,
   applyQuestionnaireFilters,
@@ -30,7 +30,7 @@ import {
   syncDealEditorField,
   updateCreateDealDraft,
   updateDealEditorDraft
-} from "./data.js?v=20260501-frontend-10";
+} from "./data.js?v=20260501-frontend-12";
 import {
   api,
   applyLoggedOutState,
@@ -38,8 +38,8 @@ import {
   loadSession,
   recordSessionActivity,
   refreshDashboard
-} from "./session.js?v=20260501-frontend-10";
-import { render } from "./renderers.js?v=20260501-frontend-10";
+} from "./session.js?v=20260501-frontend-12";
+import { render } from "./renderers.js?v=20260501-frontend-12";
 
 let listenersBound = false;
 
@@ -835,6 +835,7 @@ export function setupEventListeners() {
         const result = await api(`/api/deals/${encodeURIComponent(dealId)}/withdrawal-request`, {
           method: "PUT",
           body: JSON.stringify({
+            positionId: formData.get("positionId"),
             investorNotes: formData.get("investorNotes")
           })
         });
@@ -1167,7 +1168,7 @@ export function setupEventListeners() {
         setMessage(
           "allocation",
           "success",
-          `Pooled requests funded into the project cap table: ${formatCurrency(
+          `${result.fundedByManagerOverride ? "Project pool override-funded" : "Pooled requests funded"} into the project cap table: ${formatCurrency(
             result.fundedAmount
           )}.`
         );

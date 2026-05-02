@@ -5,7 +5,7 @@ import {
   LOGIN_PAGE_TITLE,
   app,
   state
-} from "./state.js?v=20260501-frontend-10";
+} from "./state.js?v=20260501-frontend-12";
 import {
   breakdownItem,
   escapeHtml,
@@ -21,7 +21,7 @@ import {
   renderSectionToggle,
   summaryItem,
   titleCase
-} from "./helpers.js?v=20260501-frontend-10";
+} from "./helpers.js?v=20260501-frontend-12";
 import {
   applyAllocationFilters,
   applyArchivedProjectFilters,
@@ -44,7 +44,7 @@ import {
   getInvestorProjectFilterOptions,
   getManagerEditableDeal,
   getUserFilterOptions
-} from "./data.js?v=20260501-frontend-10";
+} from "./data.js?v=20260501-frontend-12";
 
 function renderLogin() {
   const errorMarkup = state.loginError
@@ -1458,6 +1458,7 @@ function renderInvestorEarlyWithdrawalCard(project) {
   }
 
   const sectionId = `investor-withdrawal-${project.id}`;
+  const dealId = project.dealId || project.id;
   const collapsed = Boolean(state.collapsedSections?.[sectionId]);
   const statusClass =
     withdrawal.requestStatus === "approved"
@@ -1480,6 +1481,9 @@ function renderInvestorEarlyWithdrawalCard(project) {
               earlyWithdrawalStatusLabel(withdrawal.requestStatus)
             )}</span>
             <span class="class-pill">${escapeHtml(withdrawal.classType || "Investor position")}</span>
+            <span class="read-only-tag">${escapeHtml(
+              withdrawal.sourceName || "Direct investor position"
+            )}</span>
             <span class="read-only-tag">${escapeHtml(
               payoutMethodLabel(withdrawal.payoutMethod)
             )}</span>
@@ -1518,6 +1522,9 @@ function renderInvestorEarlyWithdrawalCard(project) {
                 <p><strong>Investment window closes:</strong> ${escapeHtml(
                   project.investmentCloseOn ? formatDate(project.investmentCloseOn) : "Not set"
                 )}</p>
+                <p><strong>Withdrawal source:</strong> ${escapeHtml(
+                  withdrawal.sourceName || "Direct investor position"
+                )}</p>
                 <p><strong>Investor notes:</strong> ${escapeHtml(
                   withdrawal.investorNotes || "None provided."
                 )}</p>
@@ -1529,8 +1536,11 @@ function renderInvestorEarlyWithdrawalCard(project) {
                 withdrawal.canRequest
                   ? `
                     <form class="distribution-form" data-withdrawal-form="true" data-deal-id="${escapeHtml(
-                      project.id
+                      dealId
                     )}">
+                      <input type="hidden" name="positionId" value="${escapeHtml(
+                        withdrawal.positionId || project.positionId || ""
+                      )}" />
                       <label>
                         Notes for the manager
                         <textarea
@@ -1793,6 +1803,9 @@ function renderManagerEarlyWithdrawalReviewCard(review) {
             )}</span>
             <span class="class-pill">${escapeHtml(review.classType || "Investor position")}</span>
             <span class="read-only-tag">${escapeHtml(
+              review.sourceName || "Direct investor position"
+            )}</span>
+            <span class="read-only-tag">${escapeHtml(
               payoutMethodLabel(review.payoutMethod)
             )}</span>
           </div>
@@ -1827,6 +1840,9 @@ function renderManagerEarlyWithdrawalReviewCard(review) {
                 <p><strong>Reviewed by:</strong> ${escapeHtml(reviewSummary)}</p>
                 <p><strong>Status:</strong> ${escapeHtml(
                   earlyWithdrawalStatusLabel(review.requestStatus)
+                )}</p>
+                <p><strong>Withdrawal source:</strong> ${escapeHtml(
+                  review.sourceName || "Direct investor position"
                 )}</p>
                 ${renderPayoutInstructionMeta(review)}
                 <p><strong>Participant notes:</strong> ${escapeHtml(
@@ -3911,7 +3927,7 @@ function renderManagerAllocationRequestsPanel() {
     sectionId: "manager-allocation-requests",
     title: "Project Allocation Requests",
     copy:
-      "Direct investor and contractor approvals create project positions. Pooled approvals admit investors into that project's pool; the cap-table position is created only after the weighted vote or deadline funding rule passes.",
+      "Direct investor and contractor approvals create project positions. Pooled approvals admit investors into that project's pool. Project pools stay open until the vote deadline so investors can change votes or add approved capital.",
     message: renderMessage(state.messages.allocation),
     body: `
       <div class="table-wrap">
@@ -3951,8 +3967,23 @@ function renderManagerAllocationRequestsPanel() {
                               bucket.dealId
                             )}">
                               <button class="button-primary button-inline" type="submit" ${
-                                bucket.canFund ? "" : "disabled"
-                              }>Fund pooled bucket</button>
+                                bucket.canManagerFund ? "" : "disabled"
+                              }>${
+                                bucket.canManagerOverrideFund
+                                  ? "Override fund pool"
+                                  : "Fund pooled bucket"
+                              }</button>
+                              <p class="table-note">${
+                                bucket.votingClosed
+                                  ? bucket.requirementsMet
+                                    ? "Deadline closed and requirements met."
+                                    : "Deadline closed; manager override is available."
+                                  : `Funding waits until ${
+                                      bucket.voteClosesOn
+                                        ? formatDate(bucket.voteClosesOn)
+                                        : "the vote deadline"
+                                    }.`
+                              }</p>
                             </form>
                           </td>
                         </tr>
@@ -6479,7 +6510,7 @@ function getManagerReviewAlertCounts() {
   ).length;
   const readyPools = (admin.investorPools ?? []).filter((pool) => pool.canFund).length;
   const readyProjectPools = (admin.projectPooledRequests ?? []).filter(
-    (bucket) => bucket.canFund
+    (bucket) => bucket.canManagerFund
   ).length;
 
   return {
@@ -7191,11 +7222,26 @@ function renderManagerInvestorPoolsPage() {
                             )}</td>
                             <td>
                               <form data-project-pool-funding-form="true" data-deal-id="${escapeHtml(
-                                bucket.dealId
-                              )}">
+                              bucket.dealId
+                            )}">
                                 <button class="button-primary button-inline" type="submit" ${
-                                  bucket.canFund ? "" : "disabled"
-                                }>Fund pooled bucket</button>
+                                  bucket.canManagerFund ? "" : "disabled"
+                                }>${
+                                  bucket.canManagerOverrideFund
+                                    ? "Override fund pool"
+                                    : "Fund pooled bucket"
+                                }</button>
+                                <p class="table-note">${
+                                  bucket.votingClosed
+                                    ? bucket.requirementsMet
+                                      ? "Deadline closed and requirements met."
+                                      : "Deadline closed; manager override is available."
+                                    : `Funding waits until ${
+                                        bucket.voteClosesOn
+                                          ? formatDate(bucket.voteClosesOn)
+                                          : "the vote deadline"
+                                      }.`
+                                }</p>
                               </form>
                             </td>
                           </tr>
