@@ -458,6 +458,21 @@ function buildCapitalAccountLedger(data, participantId) {
   };
 }
 
+function buildDwollaAccountPayload(user) {
+  return {
+    customerId: user?.dwollaCustomerId ?? "",
+    customerUrl: user?.dwollaCustomerUrl ?? "",
+    customerStatus: user?.dwollaCustomerStatus ?? "",
+    fundingSourceId: user?.dwollaFundingSourceId ?? "",
+    fundingSourceUrl: user?.dwollaFundingSourceUrl ?? "",
+    fundingSourceStatus: user?.dwollaFundingSourceStatus ?? "",
+    fundingSourceName: user?.dwollaFundingSourceName ?? "",
+    fundingSourceBankName: user?.dwollaFundingSourceBankName ?? "",
+    fundingSourceType: user?.dwollaFundingSourceType ?? "",
+    syncedAt: user?.dwollaSyncedAt ?? null
+  };
+}
+
 function buildDeferredAccountLedger(data, participantId) {
   const enrollmentDeferredAmount = getEnrollmentDeferredAmount(data, participantId);
   const allocatedDeferredAmount = roundCurrency(
@@ -657,7 +672,7 @@ function buildProjectPooledRequestBuckets(data, asOfDate) {
   const userMap = getUserMapByParticipantId(data);
 
   return (data.deals ?? [])
-    .filter((deal) => deal.status !== "sold" && !isDateClosed(deal.investmentCloseOn, asOfDate))
+    .filter((deal) => deal.status !== "sold")
     .filter((deal) => Boolean(Number(deal.pooledInvestmentAllowed ?? 0)))
     .map((deal) => {
       const pooledRequests = (data.userAllocationRequests ?? [])
@@ -688,6 +703,7 @@ function buildProjectPooledRequestBuckets(data, asOfDate) {
         dealName: deal.name,
         location: deal.location,
         investmentCloseOn: deal.investmentCloseOn ?? null,
+        investmentWindowClosed: isDateClosed(deal.investmentCloseOn, asOfDate),
         pooledInvestmentTarget: voteSummary.pooledInvestmentTarget,
         approvedAmount: voteSummary.totalCommitted,
         committedAmount: voteSummary.totalCommitted,
@@ -735,6 +751,7 @@ function buildProjectPooledRequestBuckets(data, asOfDate) {
         })
       };
     })
+    .filter((bucket) => !bucket.investmentWindowClosed || bucket.requestCount > 0)
     .sort((left, right) => {
       if (left.canManagerFund !== right.canManagerFund) {
         return left.canManagerFund ? -1 : 1;
@@ -2531,6 +2548,7 @@ export function buildPoolMemberDashboard(user, data = seedData) {
     ...(isContractorAccount
       ? buildDeferredAccountLedger(data, user.participantId)
       : buildCapitalAccountLedger(data, user.participantId)),
+    dwolla: buildDwollaAccountPayload(user),
     deposits: isContractorAccount
       ? []
       : (data.userCapitalDeposits ?? [])
@@ -3080,6 +3098,7 @@ export function buildInvestorDashboard(user, data = seedData) {
     ...(isContractorAccount
       ? buildDeferredAccountLedger(data, user.participantId)
       : buildCapitalAccountLedger(data, user.participantId)),
+    dwolla: buildDwollaAccountPayload(user),
     deposits: isContractorAccount
       ? []
       : (data.userCapitalDeposits ?? [])
@@ -3400,6 +3419,7 @@ export function buildManagerDashboard(user, data = seedData) {
         category: participant.category,
         hasUser: Boolean(linkedUser),
         email: linkedUser?.email ?? null,
+        dwolla: buildDwollaAccountPayload(linkedUser),
         contactPhone: participant.contactPhone ?? "",
         idCardFileName: participant.idCardFileName ?? "",
         ...getEnrollmentFundingDetails(participant.id, participant.category)

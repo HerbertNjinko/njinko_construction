@@ -28,6 +28,27 @@ Credential emails and password reset links use `APP_URL`; if it is not set, the 
 If no manager account exists when the app starts, it will create the initial manager from the `DEFAULT_MANAGER_*` values in `.env`.
 If `SMTP_HOST`, `SMTP_USER`, and `SMTP_PASS` are set, new-user credential emails are sent through SMTP. If SMTP is unavailable, the app falls back to the local outbox. Resend remains optional as a secondary provider when SMTP is not configured.
 
+## Dwolla ACH
+
+Dwolla is wired as the ACH provider, but remains disabled until the account is approved and the production or sandbox credentials are present:
+
+```bash
+DWOLLA_ENABLED=true
+DWOLLA_ENVIRONMENT=sandbox
+DWOLLA_KEY=...
+DWOLLA_SECRET=...
+DWOLLA_WEBHOOK_SECRET=...
+DWOLLA_COMPANY_FUNDING_SOURCE_URL=https://api-sandbox.dwolla.com/funding-sources/...
+```
+
+Configure the Dwolla webhook subscription to post to:
+
+```text
+https://investors.njinkofarm.com/api/webhooks/dwolla
+```
+
+ACH deposits created through Dwolla stay pending in `user_capital_deposits` until a signed webhook confirms the transfer is processed. Failed, returned, or cancelled transfers are rejected automatically.
+
 ## User service
 
 The investor portal is also installed as a user-level systemd service using:

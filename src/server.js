@@ -4,6 +4,7 @@ import { extname, isAbsolute, relative, resolve } from "node:path";
 import { readFile } from "node:fs/promises";
 
 import { buildDashboardForUser, calculateScenarioForDeal } from "./calculations.js";
+import { getDwollaPublicConfig } from "./dwolla.js";
 import { assertDatabaseReady } from "./migrations.js";
 import { closeDatabasePool } from "./postgres.js";
 import {
@@ -33,6 +34,8 @@ import {
   getRequiredLegalDocumentsForCategory,
   getUserDocumentAcknowledgementReport,
   isInvestorQuestionnaireRequired,
+  createDwollaClientTokenForUser,
+  ensureDwollaCustomerForUser,
   getUserByEmail,
   getUserById,
   getUserIdentityDocumentDownload,
@@ -43,10 +46,13 @@ import {
   reviewEarlyWithdrawalRequest,
   reviewCapitalDeposit,
   reviewUserIdentity,
+  processDwollaWebhook,
+  refreshDwollaFundingSourcesForUser,
   resetPasswordWithToken,
   setUserAccountActive,
   submitIdentityReview,
   submitAllocationRequest,
+  submitDwollaAchDepositRequest,
   submitCapitalDepositRequest,
   submitRequiredLegalAcknowledgements,
   updateUserCategory,
@@ -82,14 +88,15 @@ const securityHeaders = {
   "Content-Security-Policy": [
     "default-src 'self'",
     "base-uri 'self'",
-    "connect-src 'self'",
+    "connect-src 'self' https://api.dwolla.com https://api-sandbox.dwolla.com",
     "font-src 'self'",
     "form-action 'self'",
+    "frame-src 'self' https://*.dwolla.com",
     "frame-ancestors 'none'",
     "img-src 'self' data:",
     "object-src 'none'",
-    "script-src 'self'",
-    "style-src 'self'"
+    "script-src 'self' https://cdn.dwolla.com",
+    "style-src 'self' 'unsafe-inline'"
   ].join("; "),
   "Cross-Origin-Resource-Policy": "same-origin",
   "Permissions-Policy": "camera=(), geolocation=(), microphone=(), payment=()",
@@ -344,8 +351,29 @@ async function readJsonBody(request) {
     return {};
   }
 
+  return parseJsonBuffer(Buffer.concat(chunks));
+}
+
+async function readRawBody(request) {
+  const chunks = [];
+  let byteLength = 0;
+
+  for await (const chunk of request) {
+    byteLength += chunk.length;
+
+    if (byteLength > JSON_BODY_MAX_BYTES) {
+      throw createHttpError(413, "Request body is too large.", "REQUEST_BODY_TOO_LARGE");
+    }
+
+    chunks.push(chunk);
+  }
+
+  return chunks.length ? Buffer.concat(chunks).toString("utf8") : "";
+}
+
+function parseJsonBuffer(buffer) {
   try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    return JSON.parse(buffer.toString("utf8"));
   } catch {
     return null;
   }
@@ -980,6 +1008,20 @@ const server = createServer(async (request, response) => {
     );
     const adminPoolFundMatch = url.pathname.match(/^\/api\/admin\/pools\/([^/]+)\/fund$/);
 
+    if (method === "POST" && url.pathname === "/api/webhooks/dwolla") {
+      const rawBody = await readRawBody(request);
+      const signature = getHeaderValue(request, "x-request-signature-sha-256");
+
+      try {
+        const result = await processDwollaWebhook(rawBody, signature);
+        sendJson(response, 200, result);
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
     if (method === "POST" && url.pathname === "/api/password/forgot") {
       const body = await readJsonBody(request);
 
@@ -1135,7 +1177,12 @@ const server = createServer(async (request, response) => {
       }
 
       const snapshot = await getAppDataSnapshot();
-      sendJson(response, 200, buildDashboardForUser(user, snapshot));
+      sendJson(response, 200, {
+        ...buildDashboardForUser(user, snapshot),
+        paymentIntegrations: {
+          dwolla: getDwollaPublicConfig()
+        }
+      });
       return;
     }
 
@@ -1522,6 +1569,90 @@ const server = createServer(async (request, response) => {
 
       try {
         const result = await submitCapitalDepositRequest(user.id, body);
+        sendJson(response, 201, result);
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/payments/dwolla/customer") {
+      const user = await requireUnlockedUser(request, response);
+
+      if (!user) {
+        return;
+      }
+
+      try {
+        const result = await ensureDwollaCustomerForUser(user.id, {
+          ipAddress: getClientAddress(request)
+        });
+        sendJson(response, 200, result);
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/payments/dwolla/client-token") {
+      const user = await requireUnlockedUser(request, response);
+
+      if (!user) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const result = await createDwollaClientTokenForUser(user.id, body);
+        sendJson(response, 200, result);
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/payments/dwolla/funding-sources/refresh") {
+      const user = await requireUnlockedUser(request, response);
+
+      if (!user) {
+        return;
+      }
+
+      try {
+        const result = await refreshDwollaFundingSourcesForUser(user.id);
+        sendJson(response, 200, result);
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/payments/dwolla/deposits") {
+      const user = await requireUnlockedUser(request, response);
+
+      if (!user) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const result = await submitDwollaAchDepositRequest(user.id, body);
         sendJson(response, 201, result);
       } catch (error) {
         sendJson(response, 400, { error: error.message });

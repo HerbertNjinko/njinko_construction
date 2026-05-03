@@ -1176,6 +1176,33 @@ td {
   line-height: 1.5;
 }
 
+.account-subsection {
+  display: grid;
+  gap: 1rem;
+  margin: 1.15rem 0;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.38);
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  min-height: 3rem;
+}
+
+.checkbox-row input {
+  width: auto;
+}
+
+.dwolla-dropin-shell {
+  display: grid;
+  gap: 0.8rem;
+  min-height: 5rem;
+}
+
 .resource-grid {
   display: grid;
   gap: 1rem;

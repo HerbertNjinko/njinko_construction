@@ -1,4 +1,4 @@
-import { state } from "./state.js?v=20260501-frontend-12";
+import { state } from "./state.js?v=20260502-frontend-1";
 import {
   clearAuthFeedback,
   clearMessages,
@@ -14,7 +14,7 @@ import {
   setMessage,
   titleCase,
   toggleSectionCollapsed
-} from "./helpers.js?v=20260501-frontend-12";
+} from "./helpers.js?v=20260502-frontend-1";
 import {
   applyArchivedProjectFilters,
   applyQuestionnaireFilters,
@@ -30,7 +30,7 @@ import {
   syncDealEditorField,
   updateCreateDealDraft,
   updateDealEditorDraft
-} from "./data.js?v=20260501-frontend-12";
+} from "./data.js?v=20260502-frontend-1";
 import {
   api,
   applyLoggedOutState,
@@ -38,8 +38,8 @@ import {
   loadSession,
   recordSessionActivity,
   refreshDashboard
-} from "./session.js?v=20260501-frontend-12";
-import { render } from "./renderers.js?v=20260501-frontend-12";
+} from "./session.js?v=20260502-frontend-1";
+import { render } from "./renderers.js?v=20260502-frontend-1";
 
 let listenersBound = false;
 
@@ -295,6 +295,30 @@ export function setupEventListeners() {
   }
 
   listenersBound = true;
+
+  document.addEventListener("njinko:dwolla-success", async () => {
+    try {
+      await api("/api/payments/dwolla/funding-sources/refresh", {
+        method: "POST",
+        body: JSON.stringify({})
+      });
+      await refreshDashboard();
+      setMessage("capital", "success", "Dwolla ACH bank status refreshed.");
+    } catch (error) {
+      setMessage("capital", "error", error.message);
+    }
+
+    render();
+  });
+
+  document.addEventListener("njinko:dwolla-error", (event) => {
+    setMessage(
+      "capital",
+      "error",
+      event.detail?.message ?? "Dwolla ACH setup could not be completed."
+    );
+    render();
+  });
 
   document.addEventListener("submit", async (event) => {
     if (event.target.id === "login-form") {
@@ -1025,6 +1049,34 @@ export function setupEventListeners() {
       return;
     }
 
+    if (event.target.id === "dwolla-ach-deposit-form") {
+      event.preventDefault();
+      const formData = new FormData(event.target);
+
+      try {
+        await api("/api/payments/dwolla/deposits", {
+          method: "POST",
+          body: JSON.stringify({
+            amount: Number(formData.get("amount")),
+            authorizationAccepted: formData.get("authorizationAccepted") === "on",
+            notes: formData.get("notes")
+          })
+        });
+        await refreshDashboard();
+        setMessage(
+          "capital",
+          "success",
+          "ACH transfer started. Funds will stay pending until Dwolla confirms processing."
+        );
+        event.target.reset();
+      } catch (error) {
+        setMessage("capital", "error", error.message);
+      }
+
+      render();
+      return;
+    }
+
     if (event.target.id === "allocation-request-form") {
       event.preventDefault();
       const formData = new FormData(event.target);
@@ -1541,6 +1593,42 @@ export function setupEventListeners() {
     if (accountDetailsButton) {
       state.accountDetailsOpen = !state.accountDetailsOpen;
       state.notificationPanelOpen = false;
+      render();
+      return;
+    }
+
+    const dwollaCreateCustomerButton = event.target.closest("#dwolla-create-customer-button");
+
+    if (dwollaCreateCustomerButton) {
+      try {
+        await api("/api/payments/dwolla/customer", {
+          method: "POST",
+          body: JSON.stringify({})
+        });
+        await refreshDashboard();
+        setMessage("capital", "success", "Dwolla ACH profile is ready for bank setup.");
+      } catch (error) {
+        setMessage("capital", "error", error.message);
+      }
+
+      render();
+      return;
+    }
+
+    const dwollaRefreshButton = event.target.closest("#dwolla-refresh-funding-sources-button");
+
+    if (dwollaRefreshButton) {
+      try {
+        await api("/api/payments/dwolla/funding-sources/refresh", {
+          method: "POST",
+          body: JSON.stringify({})
+        });
+        await refreshDashboard();
+        setMessage("capital", "success", "Dwolla ACH bank status refreshed.");
+      } catch (error) {
+        setMessage("capital", "error", error.message);
+      }
+
       render();
       return;
     }

@@ -5,7 +5,7 @@ import {
   LOGIN_PAGE_TITLE,
   app,
   state
-} from "./state.js?v=20260501-frontend-12";
+} from "./state.js?v=20260502-frontend-1";
 import {
   breakdownItem,
   escapeHtml,
@@ -21,7 +21,7 @@ import {
   renderSectionToggle,
   summaryItem,
   titleCase
-} from "./helpers.js?v=20260501-frontend-12";
+} from "./helpers.js?v=20260502-frontend-1";
 import {
   applyAllocationFilters,
   applyArchivedProjectFilters,
@@ -44,7 +44,7 @@ import {
   getInvestorProjectFilterOptions,
   getManagerEditableDeal,
   getUserFilterOptions
-} from "./data.js?v=20260501-frontend-12";
+} from "./data.js?v=20260502-frontend-1";
 
 function renderLogin() {
   const errorMarkup = state.loginError
@@ -2402,6 +2402,104 @@ function renderInvestorProjectPoolCard(pool) {
   `;
 }
 
+function renderDwollaAchPanel(account) {
+  const dwollaConfig = state.dashboard?.paymentIntegrations?.dwolla ?? {};
+  const dwolla = account.dwolla ?? {};
+
+  if (!dwollaConfig.enabled) {
+    return "";
+  }
+
+  const hasCustomer = Boolean(dwolla.customerId);
+  const hasFundingSource = Boolean(dwolla.fundingSourceId);
+  const hasVerifiedFundingSource = dwolla.fundingSourceStatus === "verified";
+  const bankLabel = [
+    dwolla.fundingSourceBankName,
+    dwolla.fundingSourceName,
+    titleCase(dwolla.fundingSourceType)
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return `
+    <div class="account-subsection">
+      <div class="section-head">
+        <div>
+          <h4>ACH Direct Payment</h4>
+          <p class="section-copy">
+            Dwolla moves funds directly to the company account. ACH deposits remain pending until Dwolla confirms processing.
+          </p>
+        </div>
+        ${
+          hasCustomer
+            ? `
+              <button class="button-secondary button-inline" id="dwolla-refresh-funding-sources-button" type="button">
+                Refresh ACH status
+              </button>
+            `
+            : ""
+        }
+      </div>
+      ${
+        hasCustomer
+          ? `
+            <div class="summary-grid">
+              ${summaryItem("Dwolla profile", titleCase(dwolla.customerStatus || "Created"))}
+              ${summaryItem("Bank status", titleCase(dwolla.fundingSourceStatus || "Not linked"))}
+              ${summaryItem("Linked bank", bankLabel || "No bank selected")}
+            </div>
+            ${
+              hasVerifiedFundingSource
+                ? `
+                  <form id="dwolla-ach-deposit-form">
+                    <div class="form-grid-2">
+                      <label>
+                        ACH deposit amount
+                        <input type="number" name="amount" min="0" step="0.01" required />
+                      </label>
+                      <label class="checkbox-row">
+                        <input type="checkbox" name="authorizationAccepted" required />
+                        <span>I authorize this ACH debit from my linked bank account.</span>
+                      </label>
+                    </div>
+                    <label>
+                      Notes
+                      <textarea name="notes" rows="3" placeholder="Optional payment memo"></textarea>
+                    </label>
+                    <button class="button-primary" type="submit">Start ACH transfer</button>
+                  </form>
+                `
+                : `
+                  <div class="dwolla-dropin-shell">
+                    ${
+                      hasFundingSource
+                        ? `
+                          <dwolla-micro-deposits-verify
+                            customerId="${escapeHtml(dwolla.customerId)}"
+                            fundingSourceId="${escapeHtml(dwolla.fundingSourceId)}"
+                          ></dwolla-micro-deposits-verify>
+                        `
+                        : `
+                          <dwolla-funding-source-create
+                            customerId="${escapeHtml(dwolla.customerId)}"
+                            initiateMicroDeposits
+                          ></dwolla-funding-source-create>
+                        `
+                    }
+                  </div>
+                `
+            }
+          `
+          : `
+            <button class="button-primary" id="dwolla-create-customer-button" type="button">
+              Set up ACH profile
+            </button>
+          `
+      }
+    </div>
+  `;
+}
+
 function renderUserCapitalAccountPanel() {
   const account = state.dashboard.capitalAccount ?? {};
   const deposits = account.deposits ?? [];
@@ -2435,9 +2533,10 @@ function renderUserCapitalAccountPanel() {
               ${metricCard("Committed to pools", formatCurrency(account.committedToPools || 0))}
               ${metricCard("Pending deposit review", formatCurrency(account.pendingDepositAmount || 0))}
               ${metricCard("Pending allocation requests", formatCurrency(account.pendingAllocationRequestAmount || 0))}
-            `
+          `
         }
       </div>
+      ${isContractor ? "" : renderDwollaAchPanel(account)}
       <form id="allocation-request-form">
         <div class="${isContractor ? "form-grid-2" : "form-grid-3"}">
           <label>
@@ -3824,7 +3923,9 @@ function renderManagerCapitalFundsPanel() {
                               <td>${escapeHtml(formatCurrency(deposit.amount))}</td>
                               <td>
                                 ${
-                                  deposit.hasProof
+                                  deposit.paymentMethod === "dwolla_ach"
+                                    ? `Dwolla ACH · ${escapeHtml(titleCase(deposit.providerTransferStatus || "pending"))}`
+                                    : deposit.hasProof
                                     ? `
                                       <a class="button-secondary button-inline" target="_blank" rel="noreferrer" href="/api/admin/capital-deposits/${encodeURIComponent(
                                         deposit.id
@@ -3839,15 +3940,21 @@ function renderManagerCapitalFundsPanel() {
                                 }
                               </td>
                               <td>
-                                <form data-capital-deposit-review-form="true" data-deposit-id="${escapeHtml(
-                                  deposit.id
-                                )}">
-                                  <textarea name="managerNotes" rows="2" placeholder="Manager note"></textarea>
-                                  <div class="button-row">
-                                    <button class="button-primary button-inline" type="submit" name="decision" value="approved">Approve</button>
-                                    <button class="button-danger button-inline" type="submit" name="decision" value="rejected">Reject</button>
-                                  </div>
-                                </form>
+                                ${
+                                  deposit.paymentMethod === "dwolla_ach"
+                                    ? '<span class="read-only-tag">Awaiting webhook</span>'
+                                    : `
+                                      <form data-capital-deposit-review-form="true" data-deposit-id="${escapeHtml(
+                                        deposit.id
+                                      )}">
+                                        <textarea name="managerNotes" rows="2" placeholder="Manager note"></textarea>
+                                        <div class="button-row">
+                                          <button class="button-primary button-inline" type="submit" name="decision" value="approved">Approve</button>
+                                          <button class="button-danger button-inline" type="submit" name="decision" value="rejected">Reject</button>
+                                        </div>
+                                      </form>
+                                    `
+                                }
                               </td>
                             </tr>
                           `
@@ -7411,29 +7518,82 @@ function renderLoading() {
   `;
 }
 
+function configureDwollaDropInsAfterRender() {
+  const dwollaConfig = state.dashboard?.paymentIntegrations?.dwolla ?? {};
+  const hasDwollaElement = Boolean(
+    document.querySelector("dwolla-funding-source-create, dwolla-micro-deposits-verify")
+  );
+
+  if (!dwollaConfig.enabled || !hasDwollaElement) {
+    return;
+  }
+
+  if (!window.dwolla) {
+    window.__njinkoDwollaRetryCount = Number(window.__njinkoDwollaRetryCount ?? 0) + 1;
+
+    if (window.__njinkoDwollaRetryCount <= 20) {
+      window.setTimeout(configureDwollaDropInsAfterRender, 250);
+    }
+
+    return;
+  }
+
+  window.__njinkoDwollaRetryCount = 0;
+  const configurationKey = `${dwollaConfig.environment}:investor-ach`;
+
+  if (window.__njinkoDwollaConfigurationKey === configurationKey) {
+    return;
+  }
+
+  window.dwolla.configure({
+    environment: dwollaConfig.environment,
+    tokenUrl: "/api/payments/dwolla/client-token",
+    success: () => {
+      document.dispatchEvent(new CustomEvent("njinko:dwolla-success"));
+      return Promise.resolve();
+    },
+    error: (error) => {
+      document.dispatchEvent(new CustomEvent("njinko:dwolla-error", { detail: error }));
+      return Promise.resolve();
+    }
+  });
+  window.__njinkoDwollaConfigurationKey = configurationKey;
+}
+
+function schedulePostRenderWork() {
+  window.queueMicrotask(() => {
+    configureDwollaDropInsAfterRender();
+  });
+}
+
 export function render() {
   if (state.loading) {
     app.innerHTML = renderLoading();
+    schedulePostRenderWork();
     return;
   }
 
   if (!state.session) {
     app.innerHTML = renderLogin();
+    schedulePostRenderWork();
     return;
   }
 
   if (state.session.mustChangePassword) {
     app.innerHTML = renderPasswordResetGate();
+    schedulePostRenderWork();
     return;
   }
 
   if (requiresIdentityGate(state.session)) {
     app.innerHTML = renderIdentityReviewGate();
+    schedulePostRenderWork();
     return;
   }
 
   if (requiresLegalAcknowledgementGate(state.session)) {
     app.innerHTML = renderLegalAcknowledgementGate();
+    schedulePostRenderWork();
     return;
   }
 
@@ -7443,4 +7603,5 @@ export function render() {
       : state.dashboard?.viewer?.category === "pool_member"
         ? renderPoolMemberDashboard()
         : renderInvestorDashboard();
+  schedulePostRenderWork();
 }

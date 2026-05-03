@@ -36,6 +36,16 @@ CREATE TABLE IF NOT EXISTS users (
   is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
   must_change_password INTEGER NOT NULL DEFAULT 0 CHECK (must_change_password IN (0, 1)),
   last_login_at TEXT,
+  dwolla_customer_id TEXT,
+  dwolla_customer_url TEXT,
+  dwolla_customer_status TEXT,
+  dwolla_funding_source_id TEXT,
+  dwolla_funding_source_url TEXT,
+  dwolla_funding_source_status TEXT,
+  dwolla_funding_source_name TEXT,
+  dwolla_funding_source_bank_name TEXT,
+  dwolla_funding_source_type TEXT,
+  dwolla_synced_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE
@@ -83,6 +93,14 @@ CREATE TABLE IF NOT EXISTS user_capital_deposits (
   proof_file_name TEXT,
   proof_file_mime_type TEXT,
   proof_file_data_url TEXT,
+  payment_method TEXT NOT NULL DEFAULT 'manual',
+  provider_name TEXT,
+  provider_transfer_id TEXT,
+  provider_transfer_url TEXT,
+  provider_transfer_status TEXT,
+  provider_correlation_id TEXT,
+  provider_failure_reason TEXT,
+  provider_raw_event JSONB,
   notes TEXT,
   manager_notes TEXT,
   submitted_by_user_id TEXT,
@@ -94,6 +112,19 @@ CREATE TABLE IF NOT EXISTS user_capital_deposits (
   FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE,
   FOREIGN KEY (submitted_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
   FOREIGN KEY (reviewed_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+);
+
+CREATE TABLE IF NOT EXISTS payment_webhook_events (
+  id TEXT PRIMARY KEY,
+  provider TEXT NOT NULL,
+  provider_event_id TEXT NOT NULL UNIQUE,
+  topic TEXT NOT NULL,
+  resource_id TEXT,
+  resource_url TEXT,
+  raw_body TEXT NOT NULL,
+  payload JSONB NOT NULL,
+  processed_at TEXT,
+  created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS user_allocation_requests (
@@ -473,6 +504,14 @@ CREATE INDEX IF NOT EXISTS idx_user_capital_deposits_participant_id
   ON user_capital_deposits(participant_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_user_capital_deposits_status
   ON user_capital_deposits(status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_users_dwolla_customer_id
+  ON users(dwolla_customer_id);
+CREATE INDEX IF NOT EXISTS idx_users_dwolla_funding_source_id
+  ON users(dwolla_funding_source_id);
+CREATE INDEX IF NOT EXISTS idx_user_capital_deposits_provider_transfer
+  ON user_capital_deposits(provider_name, provider_transfer_id);
+CREATE INDEX IF NOT EXISTS idx_payment_webhook_events_provider_topic
+  ON payment_webhook_events(provider, topic, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_user_allocation_requests_participant_id
   ON user_allocation_requests(participant_id, status, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_user_allocation_requests_deal_id

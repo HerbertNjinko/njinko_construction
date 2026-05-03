@@ -4,6 +4,15 @@ import { basename, extname, join } from "node:path";
 
 import { buildPoolDistributionContexts, calculateWaterfall } from "./calculations.js";
 import { seedData } from "./data.js";
+import {
+  assertDwollaConfigured,
+  createDwollaClientToken,
+  createDwollaCustomer,
+  initiateDwollaAchTransfer,
+  listDwollaFundingSources,
+  retrieveDwollaResource,
+  verifyDwollaWebhookSignature
+} from "./dwolla.js";
 import { assertDatabaseReady } from "./migrations.js";
 import {
   sendAccountApprovedNotification,
@@ -1279,6 +1288,16 @@ function mapUserRow(row) {
     accountReviewedAt: row.accountReviewedAt ?? null,
     onboardingSubmittedAt: row.onboardingSubmittedAt ?? null,
     lastLoginAt: row.lastLoginAt ?? null,
+    dwollaCustomerId: row.dwollaCustomerId ?? "",
+    dwollaCustomerUrl: row.dwollaCustomerUrl ?? "",
+    dwollaCustomerStatus: row.dwollaCustomerStatus ?? "",
+    dwollaFundingSourceId: row.dwollaFundingSourceId ?? "",
+    dwollaFundingSourceUrl: row.dwollaFundingSourceUrl ?? "",
+    dwollaFundingSourceStatus: row.dwollaFundingSourceStatus ?? "",
+    dwollaFundingSourceName: row.dwollaFundingSourceName ?? "",
+    dwollaFundingSourceBankName: row.dwollaFundingSourceBankName ?? "",
+    dwollaFundingSourceType: row.dwollaFundingSourceType ?? "",
+    dwollaSyncedAt: row.dwollaSyncedAt ?? null,
     notificationStatus: row.notificationStatus ?? null,
     notificationProvider: row.notificationProvider ?? null,
     notificationLocalPath: row.notificationLocalPath ?? null
@@ -1325,6 +1344,13 @@ function mapCapitalDepositRow(row) {
     category: row.category ?? "",
     amount: Number(row.amount ?? 0),
     status: row.status,
+    paymentMethod: row.paymentMethod ?? "manual",
+    providerName: row.providerName ?? "",
+    providerTransferId: row.providerTransferId ?? "",
+    providerTransferUrl: row.providerTransferUrl ?? "",
+    providerTransferStatus: row.providerTransferStatus ?? "",
+    providerCorrelationId: row.providerCorrelationId ?? "",
+    providerFailureReason: row.providerFailureReason ?? "",
     proofFileName: row.proofFileName ?? "",
     hasProof: Boolean(row.hasProof ?? row.proofFileName),
     notes: row.notes ?? "",
@@ -2111,6 +2137,16 @@ const USER_SELECT_FRAGMENT = `
     users.account_reviewed_at AS "accountReviewedAt",
     users.onboarding_submitted_at AS "onboardingSubmittedAt",
     users.last_login_at AS "lastLoginAt",
+    users.dwolla_customer_id AS "dwollaCustomerId",
+    users.dwolla_customer_url AS "dwollaCustomerUrl",
+    users.dwolla_customer_status AS "dwollaCustomerStatus",
+    users.dwolla_funding_source_id AS "dwollaFundingSourceId",
+    users.dwolla_funding_source_url AS "dwollaFundingSourceUrl",
+    users.dwolla_funding_source_status AS "dwollaFundingSourceStatus",
+    users.dwolla_funding_source_name AS "dwollaFundingSourceName",
+    users.dwolla_funding_source_bank_name AS "dwollaFundingSourceBankName",
+    users.dwolla_funding_source_type AS "dwollaFundingSourceType",
+    users.dwolla_synced_at AS "dwollaSyncedAt",
     notification.status AS "notificationStatus",
     notification.provider AS "notificationProvider",
     notification.local_path AS "notificationLocalPath"
@@ -2294,6 +2330,13 @@ export async function getAppDataSnapshot({ skipAutomation = false } = {}) {
         users.email AS "userEmail",
         user_capital_deposits.amount AS amount,
         user_capital_deposits.status AS status,
+        user_capital_deposits.payment_method AS "paymentMethod",
+        user_capital_deposits.provider_name AS "providerName",
+        user_capital_deposits.provider_transfer_id AS "providerTransferId",
+        user_capital_deposits.provider_transfer_url AS "providerTransferUrl",
+        user_capital_deposits.provider_transfer_status AS "providerTransferStatus",
+        user_capital_deposits.provider_correlation_id AS "providerCorrelationId",
+        user_capital_deposits.provider_failure_reason AS "providerFailureReason",
         user_capital_deposits.proof_file_name AS "proofFileName",
         (user_capital_deposits.proof_file_name IS NOT NULL AND user_capital_deposits.proof_file_data_url IS NOT NULL) AS "hasProof",
         user_capital_deposits.notes AS notes,
@@ -5964,6 +6007,13 @@ async function getCapitalDepositById(depositId, executor = pool) {
         users.email AS "userEmail",
         user_capital_deposits.amount AS amount,
         user_capital_deposits.status AS status,
+        user_capital_deposits.payment_method AS "paymentMethod",
+        user_capital_deposits.provider_name AS "providerName",
+        user_capital_deposits.provider_transfer_id AS "providerTransferId",
+        user_capital_deposits.provider_transfer_url AS "providerTransferUrl",
+        user_capital_deposits.provider_transfer_status AS "providerTransferStatus",
+        user_capital_deposits.provider_correlation_id AS "providerCorrelationId",
+        user_capital_deposits.provider_failure_reason AS "providerFailureReason",
         user_capital_deposits.proof_file_name AS "proofFileName",
         (user_capital_deposits.proof_file_name IS NOT NULL AND user_capital_deposits.proof_file_data_url IS NOT NULL) AS "hasProof",
         user_capital_deposits.notes AS notes,
@@ -6012,6 +6062,170 @@ async function getCapitalAccountParticipant(participantId, executor = pool) {
     [String(participantId ?? "").trim()],
     executor
   );
+}
+
+function extractDwollaIdFromUrl(url) {
+  return String(url ?? "").split("/").filter(Boolean).at(-1) ?? "";
+}
+
+function normalizeDwollaFundingSource(fundingSource) {
+  if (!fundingSource || typeof fundingSource !== "object") {
+    return null;
+  }
+
+  const fundingSourceUrl = fundingSource._links?.self?.href ?? "";
+
+  if (!fundingSourceUrl) {
+    return null;
+  }
+
+  return {
+    fundingSourceId: fundingSource.id ?? extractDwollaIdFromUrl(fundingSourceUrl),
+    fundingSourceUrl,
+    fundingSourceStatus: fundingSource.status ?? "",
+    fundingSourceName: fundingSource.name ?? "",
+    fundingSourceBankName: fundingSource.bankName ?? "",
+    fundingSourceType: fundingSource.bankAccountType ?? fundingSource.type ?? "",
+    customerUrl: fundingSource._links?.customer?.href ?? ""
+  };
+}
+
+function chooseDwollaFundingSource(fundingSources) {
+  const normalized = fundingSources.map(normalizeDwollaFundingSource).filter(Boolean);
+
+  return (
+    normalized.find((fundingSource) => fundingSource.fundingSourceStatus === "verified") ??
+    normalized.find((fundingSource) => fundingSource.fundingSourceStatus !== "removed") ??
+    null
+  );
+}
+
+async function updateDwollaFundingSourceForUser(userId, fundingSource, executor = pool) {
+  const timestamp = nowTimestamp();
+
+  await executor.query(
+    `
+      UPDATE users
+      SET
+        dwolla_funding_source_id = $1,
+        dwolla_funding_source_url = $2,
+        dwolla_funding_source_status = $3,
+        dwolla_funding_source_name = $4,
+        dwolla_funding_source_bank_name = $5,
+        dwolla_funding_source_type = $6,
+        dwolla_synced_at = $7,
+        updated_at = $7
+      WHERE id = $8
+    `,
+    [
+      fundingSource?.fundingSourceId ?? null,
+      fundingSource?.fundingSourceUrl ?? null,
+      fundingSource?.fundingSourceStatus ?? null,
+      fundingSource?.fundingSourceName ?? null,
+      fundingSource?.fundingSourceBankName ?? null,
+      fundingSource?.fundingSourceType ?? null,
+      timestamp,
+      userId
+    ]
+  );
+}
+
+export async function ensureDwollaCustomerForUser(userId, { ipAddress = "" } = {}) {
+  assertDwollaConfigured();
+  const user = await getUserAccountById(String(userId ?? "").trim());
+
+  if (!user || user.role === "manager") {
+    throw new Error("Only investor accounts can set up Dwolla ACH.");
+  }
+
+  if (!["investor", "pool_member"].includes(user.category)) {
+    throw new Error("Dwolla ACH deposits are available for investor funding accounts.");
+  }
+
+  if (user.dwollaCustomerUrl && user.dwollaCustomerId) {
+    return {
+      customerId: user.dwollaCustomerId,
+      customerUrl: user.dwollaCustomerUrl,
+      customerStatus: user.dwollaCustomerStatus,
+      fundingSourceId: user.dwollaFundingSourceId,
+      fundingSourceUrl: user.dwollaFundingSourceUrl,
+      fundingSourceStatus: user.dwollaFundingSourceStatus
+    };
+  }
+
+  const customer = await createDwollaCustomer({ user, ipAddress });
+  const timestamp = nowTimestamp();
+
+  await pool.query(
+    `
+      UPDATE users
+      SET
+        dwolla_customer_id = $1,
+        dwolla_customer_url = $2,
+        dwolla_customer_status = $3,
+        dwolla_synced_at = $4,
+        updated_at = $4
+      WHERE id = $5
+    `,
+    [
+      customer.customerId,
+      customer.customerUrl,
+      customer.customerStatus,
+      timestamp,
+      user.id
+    ]
+  );
+
+  return customer;
+}
+
+export async function createDwollaClientTokenForUser(userId, input) {
+  const user = await getUserAccountById(String(userId ?? "").trim());
+
+  if (!user?.dwollaCustomerUrl) {
+    throw new Error("Set up your Dwolla ACH profile before linking a bank account.");
+  }
+
+  const action = String(input?.action ?? "").trim();
+  const allowedActions = new Set([
+    "customer.fundingsources.create",
+    "customer.fundingsources.read",
+    "customer.microdeposits.create",
+    "customer.microdeposits.verify"
+  ]);
+
+  if (!allowedActions.has(action)) {
+    throw new Error("This Dwolla action is not allowed for investor bank setup.");
+  }
+
+  const token = await createDwollaClientToken({
+    action,
+    _links: {
+      customer: {
+        href: user.dwollaCustomerUrl
+      }
+    }
+  });
+
+  return token;
+}
+
+export async function refreshDwollaFundingSourcesForUser(userId) {
+  const user = await getUserAccountById(String(userId ?? "").trim());
+
+  if (!user?.dwollaCustomerUrl) {
+    throw new Error("Set up your Dwolla ACH profile before refreshing linked bank accounts.");
+  }
+
+  const fundingSources = await listDwollaFundingSources(user.dwollaCustomerUrl);
+  const selectedFundingSource = chooseDwollaFundingSource(fundingSources);
+
+  await updateDwollaFundingSourceForUser(user.id, selectedFundingSource);
+
+  return {
+    fundingSource: selectedFundingSource,
+    fundingSourceCount: fundingSources.length
+  };
 }
 
 async function getParticipantCapitalLedger(
@@ -6363,6 +6577,107 @@ export async function submitCapitalDepositRequest(userId, input) {
   };
 }
 
+export async function submitDwollaAchDepositRequest(userId, input) {
+  assertDwollaConfigured();
+  const normalizedUserId = String(userId ?? "").trim();
+  const amount = normalizePositiveCurrencyAmount(input?.amount, "ACH deposit amount");
+  const notes = normalizeOptionalText(input?.notes);
+  const authorizationAccepted = normalizeBooleanInput(input?.authorizationAccepted);
+
+  if (!authorizationAccepted) {
+    throw new Error("ACH authorization must be accepted before initiating a Dwolla transfer.");
+  }
+
+  let user = await getUserAccountById(normalizedUserId);
+
+  if (!user || user.role === "manager") {
+    throw new Error("Only investor accounts can submit Dwolla ACH deposits.");
+  }
+
+  if (!["investor", "pool_member"].includes(user.category)) {
+    throw new Error("Dwolla ACH deposits are available for investor funding accounts.");
+  }
+
+  if (!user.dwollaCustomerUrl) {
+    throw new Error("Set up your Dwolla ACH profile before submitting a deposit.");
+  }
+
+  if (user.dwollaFundingSourceStatus !== "verified" || !user.dwollaFundingSourceUrl) {
+    await refreshDwollaFundingSourcesForUser(user.id);
+    user = await getUserAccountById(normalizedUserId);
+  }
+
+  if (user.dwollaFundingSourceStatus !== "verified" || !user.dwollaFundingSourceUrl) {
+    throw new Error("A verified Dwolla bank account is required before starting an ACH deposit.");
+  }
+
+  const timestamp = nowTimestamp();
+  const depositId = createId("capital-deposit");
+  const transfer = await initiateDwollaAchTransfer({
+    depositId,
+    sourceFundingSourceUrl: user.dwollaFundingSourceUrl,
+    amount,
+    notes
+  });
+
+  await pool.query(
+    `
+      INSERT INTO user_capital_deposits (
+        id,
+        user_id,
+        participant_id,
+        amount,
+        status,
+        proof_file_name,
+        proof_file_mime_type,
+        proof_file_data_url,
+        payment_method,
+        provider_name,
+        provider_transfer_id,
+        provider_transfer_url,
+        provider_transfer_status,
+        provider_correlation_id,
+        notes,
+        manager_notes,
+        submitted_by_user_id,
+        reviewed_by_user_id,
+        reviewed_at,
+        created_at,
+        updated_at
+      )
+      VALUES (
+        $1, $2, $3, $4, 'pending', NULL, NULL, NULL,
+        'dwolla_ach', 'dwolla', $5, $6, $7, $1,
+        $8, 'Dwolla ACH transfer initiated. Funds become available after Dwolla reports the transfer as processed.',
+        $2, NULL, NULL, $9, $9
+      )
+    `,
+    [
+      depositId,
+      user.id,
+      user.participantId,
+      amount,
+      transfer.transferId,
+      transfer.transferUrl,
+      transfer.transferStatus,
+      notes,
+      timestamp
+    ]
+  );
+
+  const deposit = await getCapitalDepositById(depositId);
+  await notifyManagersAboutCapitalDeposit(deposit);
+
+  return {
+    deposit,
+    provider: {
+      name: "dwolla",
+      transferId: transfer.transferId,
+      transferStatus: transfer.transferStatus
+    }
+  };
+}
+
 export async function createCapitalDepositForParticipant(input, actingUserId) {
   const participantId = String(input?.participantId ?? "").trim();
   const amount = normalizePositiveCurrencyAmount(input?.amount, "Deposit amount");
@@ -6451,7 +6766,7 @@ export async function reviewCapitalDeposit(depositId, input, actingUserId) {
   await withTransaction(async (client) => {
     const existing = await queryOne(
       `
-        SELECT id, status
+        SELECT id, status, payment_method AS "paymentMethod"
         FROM user_capital_deposits
         WHERE id = $1
         FOR UPDATE
@@ -6466,6 +6781,10 @@ export async function reviewCapitalDeposit(depositId, input, actingUserId) {
 
     if (existing.status !== "pending") {
       throw new Error("Only pending account-funds deposits can be reviewed.");
+    }
+
+    if (existing.paymentMethod !== "manual") {
+      throw new Error("Dwolla ACH deposits are settled by provider webhook and cannot be manually approved.");
     }
 
     await client.query(
@@ -6490,6 +6809,199 @@ export async function reviewCapitalDeposit(depositId, input, actingUserId) {
   return {
     deposit,
     notification
+  };
+}
+
+function mapDwollaTransferStatus(providerStatus, topic) {
+  const normalizedStatus = String(providerStatus ?? "").trim().toLowerCase();
+  const normalizedTopic = String(topic ?? "").trim().toLowerCase();
+
+  if (["processed", "completed"].includes(normalizedStatus) || normalizedTopic.includes("completed")) {
+    return "approved";
+  }
+
+  if (
+    ["failed", "cancelled", "canceled", "returned"].includes(normalizedStatus) ||
+    normalizedTopic.includes("failed") ||
+    normalizedTopic.includes("cancel") ||
+    normalizedTopic.includes("returned")
+  ) {
+    return "rejected";
+  }
+
+  return "pending";
+}
+
+async function applyDwollaTransferWebhook({ transfer, topic, payload }) {
+  const transferUrl = transfer?._links?.self?.href ?? payload?._links?.resource?.href ?? "";
+  const transferId = transfer?.id ?? payload?.resourceId ?? extractDwollaIdFromUrl(transferUrl);
+  const correlationId = transfer?.correlationId ?? payload?.correlationId ?? "";
+  const transferStatus = transfer?.status ?? "";
+  const depositStatus = mapDwollaTransferStatus(transferStatus, topic);
+  const timestamp = nowTimestamp();
+  const reviewedAt = depositStatus === "pending" ? null : timestamp;
+  const managerNotes =
+    depositStatus === "approved"
+      ? "Dwolla ACH transfer processed and account funds were approved automatically."
+      : depositStatus === "rejected"
+        ? "Dwolla ACH transfer failed, returned, or was cancelled."
+        : "Dwolla ACH transfer is processing.";
+  const result = await pool.query(
+    `
+      UPDATE user_capital_deposits
+      SET
+        status = $1,
+        provider_transfer_status = COALESCE($2, provider_transfer_status),
+        provider_raw_event = $3,
+        manager_notes = $4,
+        reviewed_at = COALESCE($5, reviewed_at),
+        updated_at = $6
+      WHERE provider_name = 'dwolla'
+        AND (
+          provider_transfer_url = $7 OR
+          provider_transfer_id = $8 OR
+          provider_correlation_id = $9
+        )
+      RETURNING id
+    `,
+    [
+      depositStatus,
+      transferStatus || null,
+      payload,
+      managerNotes,
+      reviewedAt,
+      timestamp,
+      transferUrl,
+      transferId,
+      correlationId
+    ]
+  );
+  const updatedDepositId = result.rows[0]?.id;
+
+  if (!updatedDepositId || depositStatus === "pending") {
+    return null;
+  }
+
+  const deposit = await getCapitalDepositById(updatedDepositId);
+  const notification = await notifyCapitalDepositReview(deposit);
+
+  return {
+    deposit,
+    notification
+  };
+}
+
+async function applyDwollaFundingSourceWebhook({ fundingSource, payload }) {
+  const normalizedFundingSource = normalizeDwollaFundingSource(fundingSource);
+  const customerUrl =
+    normalizedFundingSource?.customerUrl ?? payload?._links?.customer?.href ?? "";
+
+  if (!normalizedFundingSource || !customerUrl) {
+    return null;
+  }
+
+  const row = await queryOne(
+    `
+      SELECT id
+      FROM users
+      WHERE dwolla_customer_url = $1
+      LIMIT 1
+    `,
+    [customerUrl]
+  );
+
+  if (!row?.id) {
+    return null;
+  }
+
+  await updateDwollaFundingSourceForUser(row.id, normalizedFundingSource);
+
+  return {
+    userId: row.id,
+    fundingSource: normalizedFundingSource
+  };
+}
+
+export async function processDwollaWebhook(rawBody, signature) {
+  const bodyText = String(rawBody ?? "");
+
+  if (!verifyDwollaWebhookSignature(bodyText, signature)) {
+    throw new Error("Dwolla webhook signature is invalid.");
+  }
+
+  let payload = null;
+
+  try {
+    payload = JSON.parse(bodyText);
+  } catch {
+    throw new Error("Dwolla webhook body must be valid JSON.");
+  }
+
+  const providerEventId = normalizeRequiredTextInput(payload?.id, "Dwolla webhook event ID");
+  const topic = normalizeRequiredTextInput(payload?.topic, "Dwolla webhook topic");
+  const resourceUrl = payload?._links?.resource?.href ?? null;
+  const timestamp = nowTimestamp();
+  const inserted = await queryOne(
+    `
+      INSERT INTO payment_webhook_events (
+        id,
+        provider,
+        provider_event_id,
+        topic,
+        resource_id,
+        resource_url,
+        raw_body,
+        payload,
+        processed_at,
+        created_at
+      )
+      VALUES ($1, 'dwolla', $2, $3, $4, $5, $6, $7, NULL, $8)
+      ON CONFLICT (provider_event_id) DO NOTHING
+      RETURNING id
+    `,
+    [
+      createId("webhook-event"),
+      providerEventId,
+      topic,
+      payload.resourceId ?? null,
+      resourceUrl,
+      bodyText,
+      payload,
+      timestamp
+    ]
+  );
+
+  if (!inserted) {
+    return {
+      ok: true,
+      duplicate: true
+    };
+  }
+
+  let applied = null;
+
+  if (resourceUrl && topic.toLowerCase().includes("transfer")) {
+    const transfer = await retrieveDwollaResource(resourceUrl);
+    applied = await applyDwollaTransferWebhook({ transfer, topic, payload });
+  } else if (resourceUrl && topic.toLowerCase().includes("funding_source")) {
+    const fundingSource = await retrieveDwollaResource(resourceUrl);
+    applied = await applyDwollaFundingSourceWebhook({ fundingSource, payload });
+  }
+
+  await pool.query(
+    `
+      UPDATE payment_webhook_events
+      SET processed_at = $1
+      WHERE provider_event_id = $2
+    `,
+    [nowTimestamp(), providerEventId]
+  );
+
+  return {
+    ok: true,
+    duplicate: false,
+    topic,
+    applied
   };
 }
 
