@@ -1,4 +1,4 @@
-import { state } from "./state.js?v=20260504-frontend-9";
+import { state } from "./state.js?v=20260504-frontend-11";
 import {
   clearAuthFeedback,
   clearMessages,
@@ -14,7 +14,7 @@ import {
   setMessage,
   titleCase,
   toggleSectionCollapsed
-} from "./helpers.js?v=20260504-frontend-9";
+} from "./helpers.js?v=20260504-frontend-11";
 import {
   applyArchivedProjectFilters,
   applyQuestionnaireFilters,
@@ -30,7 +30,7 @@ import {
   syncDealEditorField,
   updateCreateDealDraft,
   updateDealEditorDraft
-} from "./data.js?v=20260504-frontend-9";
+} from "./data.js?v=20260504-frontend-11";
 import {
   api,
   applyLoggedOutState,
@@ -38,10 +38,12 @@ import {
   loadSession,
   recordSessionActivity,
   refreshDashboard
-} from "./session.js?v=20260504-frontend-9";
-import { render } from "./renderers.js?v=20260504-frontend-9";
+} from "./session.js?v=20260504-frontend-11";
+import { render } from "./renderers.js?v=20260504-frontend-11";
 
 let listenersBound = false;
+let dwollaDropInRetryCount = 0;
+let dwollaDropInUnavailableNotified = false;
 
 function handleSessionActivity(event) {
   if (!state.session) {
@@ -101,14 +103,143 @@ function buildOnboardingAchFundingPayload(formData) {
 
 function getIdentitySubmissionMessage(achFunding) {
   if (achFunding?.status === "transfer_started") {
-    return "Identity information submitted and ACH transfer started. You will receive an email after manager review.";
+    return "Identity information submitted and ACH transfer started. Manager approval can proceed after Dwolla confirms processing.";
   }
 
   if (achFunding?.status === "bank_verification_required") {
-    return "Identity information submitted and ACH bank setup started. The transfer will start after bank verification.";
+    return "Identity information submitted and ACH bank setup started. The transfer will start after you verify the micro-deposits.";
   }
 
   return "Identity information submitted. You will receive an email after manager review.";
+}
+
+function getDwollaMessageKey() {
+  return state.dashboard ? "capital" : "identity";
+}
+
+function getDwollaUiConfig() {
+  return (
+    state.session?.paymentIntegrations?.dwolla ??
+    state.dashboard?.paymentIntegrations?.dwolla ??
+    {}
+  );
+}
+
+async function refreshDwollaUiState() {
+  if (state.dashboard) {
+    await refreshDashboard();
+    return;
+  }
+
+  await loadSession();
+}
+
+function getDwollaStylesheetHref() {
+  return document.querySelector("link[rel='stylesheet']")?.getAttribute("href") ?? "/styles.css";
+}
+
+async function requestDwollaDropInToken(request) {
+  const links = request?._links ?? request?.links ?? {};
+
+  return api("/api/payments/dwolla/client-token", {
+    method: "POST",
+    body: JSON.stringify({
+      action: request?.action,
+      _links: links
+    })
+  });
+}
+
+function getDwollaDropInErrorMessage(error) {
+  if (!error) {
+    return "Dwolla bank setup could not be completed.";
+  }
+
+  if (typeof error === "string") {
+    return error;
+  }
+
+  return error.message ?? error.response?.message ?? error.error ?? "Dwolla bank setup could not be completed.";
+}
+
+async function handleDwollaDropInSuccess(result) {
+  const messageKey = getDwollaMessageKey();
+  const resource = String(result?.resource ?? "");
+  const response = result?.response ?? {};
+  const responseMessage = String(response.message ?? "");
+  const shouldRefresh =
+    Boolean(response.location) || resource.includes("micro-deposits");
+
+  if (response.code || responseMessage.toLowerCase().includes("error")) {
+    setMessage(
+      messageKey,
+      "error",
+      responseMessage || "Dwolla bank setup could not be completed."
+    );
+    render();
+    return result;
+  }
+
+  if (!shouldRefresh) {
+    return result;
+  }
+
+  try {
+    await api("/api/payments/dwolla/funding-sources/refresh", {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+    await refreshDwollaUiState();
+    setMessage(messageKey, "success", "Dwolla bank setup updated. ACH status refreshed.");
+  } catch (error) {
+    setMessage(messageKey, "error", error.message);
+  }
+
+  render();
+  return result;
+}
+
+function handleDwollaDropInError(error) {
+  setMessage(getDwollaMessageKey(), "error", getDwollaDropInErrorMessage(error));
+  render();
+  return Promise.resolve(error);
+}
+
+function configureDwollaDropIns() {
+  const dropIns = document.querySelectorAll("[data-dwolla-dropin='true']");
+
+  if (!dropIns.length) {
+    return;
+  }
+
+  const dwollaConfig = getDwollaUiConfig();
+
+  if (!dwollaConfig.enabled) {
+    return;
+  }
+
+  if (!window.dwolla?.configure) {
+    if (dwollaDropInRetryCount < 20) {
+      dwollaDropInRetryCount += 1;
+      window.setTimeout(configureDwollaDropIns, 250);
+    } else if (!dwollaDropInUnavailableNotified) {
+      dwollaDropInUnavailableNotified = true;
+      setMessage(getDwollaMessageKey(), "error", "Dwolla guided setup is unavailable. Use the manual ACH form.");
+      render();
+    }
+
+    return;
+  }
+
+  dwollaDropInRetryCount = 0;
+  dwollaDropInUnavailableNotified = false;
+  window.dwolla.configure({
+    environment: dwollaConfig.environment || "sandbox",
+    styles: getDwollaStylesheetHref(),
+    token: (request) => Promise.resolve(requestDwollaDropInToken(request)),
+    success: (result) => Promise.resolve(handleDwollaDropInSuccess(result)),
+    error: (error) => Promise.resolve(handleDwollaDropInError(error))
+  });
 }
 
 function buildArchivedProjectsCsv(archivedProjects = []) {
@@ -330,6 +461,8 @@ export function setupEventListeners() {
   }
 
   listenersBound = true;
+
+  window.addEventListener("njinko:rendered", configureDwollaDropIns);
 
   document.addEventListener("submit", async (event) => {
     if (event.target.id === "login-form") {
@@ -1080,6 +1213,7 @@ export function setupEventListeners() {
     if (event.target.id === "dwolla-bank-link-form") {
       event.preventDefault();
       const formData = new FormData(event.target);
+      const messageKey = getDwollaMessageKey();
 
       try {
         const result = await api("/api/payments/dwolla/funding-sources", {
@@ -1091,9 +1225,9 @@ export function setupEventListeners() {
             accountNumber: formData.get("accountNumber")
           })
         });
-        await refreshDashboard();
+        await refreshDwollaUiState();
         setMessage(
-          "capital",
+          messageKey,
           "success",
           result.microDepositsInitiated
             ? "Bank linked. Dwolla micro-deposits have been initiated for verification."
@@ -1101,7 +1235,7 @@ export function setupEventListeners() {
         );
         event.target.reset();
       } catch (error) {
-        setMessage("capital", "error", error.message);
+        setMessage(messageKey, "error", error.message);
       }
 
       render();
@@ -1170,39 +1304,36 @@ export function setupEventListeners() {
       return;
     }
 
-    if (event.target.dataset.adminDwollaMicroDepositForm === "true") {
+    if (event.target.dataset.dwollaMicroDepositForm === "true") {
       event.preventDefault();
       const formData = new FormData(event.target);
-      const userId = String(event.target.dataset.userId ?? "");
-
-      if (!userId) {
-        setMessage("capital", "error", "A valid user account is required.");
-        render();
-        return;
-      }
+      const messageKey = state.dashboard ? "capital" : "identity";
 
       try {
-        const result = await api(`/api/admin/users/${encodeURIComponent(userId)}/dwolla/micro-deposits/verify`, {
+        const result = await api("/api/payments/dwolla/micro-deposits/verify", {
           method: "POST",
           body: JSON.stringify({
             amount1: Number(formData.get("amount1")),
             amount2: Number(formData.get("amount2"))
           })
         });
-        await refreshDashboard();
+        await loadSession();
         const startedCount = result.startedDeposits?.length ?? 0;
+        const failedCount = result.failedDeposits?.length ?? 0;
         setMessage(
-          "capital",
-          "success",
-          startedCount
-            ? `Dwolla ACH bank account verified. Started ${startedCount} pending ACH transfer${
-                startedCount === 1 ? "" : "s"
-              }.`
-            : "Dwolla ACH bank account verified."
+          messageKey,
+          failedCount ? "error" : "success",
+          failedCount
+            ? "ACH bank verified, but the pending transfer could not be started. Contact the manager."
+            : startedCount
+              ? `Dwolla ACH bank account verified. Started ${startedCount} pending ACH transfer${
+                  startedCount === 1 ? "" : "s"
+                }.`
+              : "Dwolla ACH bank account verified."
         );
         event.target.reset();
       } catch (error) {
-        setMessage("capital", "error", error.message);
+        setMessage(messageKey, "error", error.message);
       }
 
       render();
@@ -1657,15 +1788,17 @@ export function setupEventListeners() {
     const dwollaCreateCustomerButton = event.target.closest("#dwolla-create-customer-button");
 
     if (dwollaCreateCustomerButton) {
+      const messageKey = getDwollaMessageKey();
+
       try {
         await api("/api/payments/dwolla/customer", {
           method: "POST",
           body: JSON.stringify({})
         });
-        await refreshDashboard();
-        setMessage("capital", "success", "Dwolla ACH profile is ready for bank setup.");
+        await refreshDwollaUiState();
+        setMessage(messageKey, "success", "Dwolla ACH profile is ready for bank setup.");
       } catch (error) {
-        setMessage("capital", "error", error.message);
+        setMessage(messageKey, "error", error.message);
       }
 
       render();
@@ -1675,15 +1808,17 @@ export function setupEventListeners() {
     const dwollaRefreshButton = event.target.closest("#dwolla-refresh-funding-sources-button");
 
     if (dwollaRefreshButton) {
+      const messageKey = getDwollaMessageKey();
+
       try {
         await api("/api/payments/dwolla/funding-sources/refresh", {
           method: "POST",
           body: JSON.stringify({})
         });
-        await refreshDashboard();
-        setMessage("capital", "success", "Dwolla ACH bank and deposit status refreshed.");
+        await refreshDwollaUiState();
+        setMessage(messageKey, "success", "Dwolla ACH bank and deposit status refreshed.");
       } catch (error) {
-        setMessage("capital", "error", error.message);
+        setMessage(messageKey, "error", error.message);
       }
 
       render();

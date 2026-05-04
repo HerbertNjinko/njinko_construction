@@ -40,6 +40,7 @@ import {
   ensureDwollaCustomerForUser,
   getUserByEmail,
   getUserById,
+  getUserAccountFundingSummary,
   getUserIdentityDocumentDownload,
   markUserNotificationsRead,
   markUserLogin,
@@ -931,11 +932,31 @@ async function requireUnlockedUser(request, response) {
   return user;
 }
 
+async function requireDwollaSetupUser(request, response, actionLabel = "continuing") {
+  const user = await requireUser(request, response);
+
+  if (!user) {
+    return null;
+  }
+
+  if (user.mustChangePassword) {
+    sendJson(response, 403, {
+      error: `Password change required before ${actionLabel}.`,
+      code: "PASSWORD_CHANGE_REQUIRED"
+    });
+    return null;
+  }
+
+  return user;
+}
+
 async function stripUserSecrets(user) {
   const pendingLegalDocuments =
     user.role !== "manager" && (user.accountApprovalStatus ?? "approved") === "approved"
       ? await getPendingLegalAcknowledgementDocuments(user.id, user.category)
       : [];
+  const accountFunding =
+    user.role !== "manager" ? await getUserAccountFundingSummary(user.id) : null;
 
   return {
     id: user.id,
@@ -951,6 +972,19 @@ async function stripUserSecrets(user) {
     pendingLegalDocuments,
     hasPendingLegalAcknowledgements: pendingLegalDocuments.length > 0,
     requiresInvestorQuestionnaire: isInvestorQuestionnaireRequired(user.category),
+    dwolla: {
+      customerId: user.dwollaCustomerId ?? "",
+      customerUrl: user.dwollaCustomerUrl ?? "",
+      customerStatus: user.dwollaCustomerStatus ?? "",
+      fundingSourceId: user.dwollaFundingSourceId ?? "",
+      fundingSourceUrl: user.dwollaFundingSourceUrl ?? "",
+      fundingSourceStatus: user.dwollaFundingSourceStatus ?? "",
+      fundingSourceName: user.dwollaFundingSourceName ?? "",
+      fundingSourceBankName: user.dwollaFundingSourceBankName ?? "",
+      fundingSourceType: user.dwollaFundingSourceType ?? "",
+      syncedAt: user.dwollaSyncedAt ?? null
+    },
+    accountFunding,
     paymentIntegrations: {
       dwolla: getDwollaPublicConfig()
     }
@@ -1103,15 +1137,6 @@ const server = createServer(async (request, response) => {
 
       if (!user || !verifyPassword(user, body.password)) {
         sendJson(response, 401, { error: "Invalid credentials." });
-        return;
-      }
-
-      if (user.role !== "manager" && user.accountApprovalStatus === "pending_review") {
-        sendJson(response, 403, {
-          error:
-            "Your account information is waiting for manager approval. You will receive an email after review.",
-          code: "ACCOUNT_PENDING_REVIEW"
-        });
         return;
       }
 
@@ -1604,7 +1629,7 @@ const server = createServer(async (request, response) => {
     }
 
     if (method === "POST" && url.pathname === "/api/payments/dwolla/customer") {
-      const user = await requireUnlockedUser(request, response);
+      const user = await requireDwollaSetupUser(request, response, "setting up ACH");
 
       if (!user) {
         return;
@@ -1623,7 +1648,7 @@ const server = createServer(async (request, response) => {
     }
 
     if (method === "POST" && url.pathname === "/api/payments/dwolla/client-token") {
-      const user = await requireUnlockedUser(request, response);
+      const user = await requireDwollaSetupUser(request, response, "using Dwolla bank setup");
 
       if (!user) {
         return;
@@ -1647,7 +1672,7 @@ const server = createServer(async (request, response) => {
     }
 
     if (method === "POST" && url.pathname === "/api/payments/dwolla/funding-sources/refresh") {
-      const user = await requireUnlockedUser(request, response);
+      const user = await requireDwollaSetupUser(request, response, "refreshing ACH status");
 
       if (!user) {
         return;
@@ -1668,7 +1693,7 @@ const server = createServer(async (request, response) => {
     }
 
     if (method === "POST" && url.pathname === "/api/payments/dwolla/funding-sources") {
-      const user = await requireUnlockedUser(request, response);
+      const user = await requireDwollaSetupUser(request, response, "linking an ACH bank account");
 
       if (!user) {
         return;
@@ -1694,15 +1719,33 @@ const server = createServer(async (request, response) => {
     }
 
     if (method === "POST" && url.pathname === "/api/payments/dwolla/micro-deposits/verify") {
-      const user = await requireUnlockedUser(request, response);
+      const user = await requireUser(request, response);
 
       if (!user) {
         return;
       }
 
-      sendJson(response, 403, {
-        error: "Manager verification is required for Dwolla ACH micro-deposits."
-      });
+      if (user.mustChangePassword) {
+        sendJson(response, 403, {
+          error: "Password change required before verifying ACH micro-deposits.",
+          code: "PASSWORD_CHANGE_REQUIRED"
+        });
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const result = await verifyDwollaMicroDepositsForUser(user.id, body);
+        sendJson(response, 200, result);
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
       return;
     }
 
@@ -2259,23 +2302,9 @@ const server = createServer(async (request, response) => {
         return;
       }
 
-      const body = await readJsonBody(request);
-
-      if (!body) {
-        sendJson(response, 400, { error: "A valid request body is required." });
-        return;
-      }
-
-      try {
-        const result = await verifyDwollaMicroDepositsForUser(
-          decodeURIComponent(adminDwollaMicroDepositsMatch[1]),
-          body
-        );
-        sendJson(response, 200, result);
-      } catch (error) {
-        sendJson(response, 400, { error: error.message });
-      }
-
+      sendJson(response, 403, {
+        error: "ACH bank verification must be completed by the user."
+      });
       return;
     }
 

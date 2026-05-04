@@ -1,4 +1,4 @@
-import { RESET_TOKEN_PARAM, createInitialMessages, state } from "./state.js?v=20260504-frontend-9";
+import { RESET_TOKEN_PARAM, createInitialMessages, state } from "./state.js?v=20260504-frontend-11";
 
 const currency = new Intl.NumberFormat("en-US", {
   style: "currency",

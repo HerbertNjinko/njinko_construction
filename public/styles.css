@@ -1232,6 +1232,26 @@ td {
   display: grid;
   gap: 0.8rem;
   min-height: 5rem;
+  padding: 0.95rem;
+  border: 1px solid rgba(13, 110, 99, 0.16);
+  border-radius: 8px;
+  background: rgba(13, 110, 99, 0.06);
+}
+
+.dwolla-dropin-shell h4 {
+  margin: 0.2rem 0 0;
+  font-size: 1rem;
+}
+
+.dwolla-dropin-shell dwolla-funding-source-create,
+.dwolla-dropin-shell dwolla-micro-deposits-verify {
+  display: block;
+}
+
+.dwolla-fallback-form {
+  display: grid;
+  gap: 0.7rem;
+  padding-top: 0.3rem;
 }
 
 .resource-grid {

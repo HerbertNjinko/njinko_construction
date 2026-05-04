@@ -420,7 +420,7 @@ function buildCapitalAccountLedger(data, participantId) {
       .filter((request) => request.participantId === participantId && request.status === "pending")
       .reduce((sum, request) => sum + Number(request.amount ?? 0), 0)
   );
-  const totalAccountFunds = roundCurrency(enrollmentInvestmentAmount + approvedDepositAmount);
+  const totalAccountFunds = approvedDepositAmount;
   const totalAllocatedFunds = roundCurrency(
     allocatedToProjects + committedToPools + committedToProjectPools + pendingAllocationRequestAmount
   );
@@ -3326,17 +3326,19 @@ export function buildManagerDashboard(user, data = seedData) {
                 : ""
             }`
           : ""
-        : capitalLedger.totalAccountFunds > 0 || capitalLedger.pendingDepositAmount > 0
-          ? `Account funds: ${formatCurrencyLabel(capitalLedger.totalAccountFunds)}; Available: ${formatCurrencyLabel(
+        : investmentAmount > 0 ||
+            capitalLedger.totalAccountFunds > 0 ||
+            capitalLedger.pendingDepositAmount > 0
+          ? `Target investment: ${formatCurrencyLabel(investmentAmount)}; Processed ACH: ${formatCurrencyLabel(
+              capitalLedger.totalAccountFunds
+            )}; Available: ${formatCurrencyLabel(
               capitalLedger.availableCapital
             )}${
               capitalLedger.pendingDepositAmount > 0
                 ? `; Pending deposits: ${formatCurrencyLabel(capitalLedger.pendingDepositAmount)}`
                 : ""
             }`
-          : investmentAmount > 0
-            ? `Investment Amount: ${formatCurrencyLabel(investmentAmount)}`
-            : "";
+          : "";
 
     return {
       enrollmentInvestmentAmount: investmentAmount || null,
@@ -3381,6 +3383,7 @@ export function buildManagerDashboard(user, data = seedData) {
         accountRejectionComment: account.accountRejectionComment ?? "",
         accountReviewedAt: account.accountReviewedAt ?? null,
         onboardingSubmittedAt: account.onboardingSubmittedAt ?? null,
+        dwolla: buildDwollaAccountPayload(account),
         legalAcknowledgements: legalAcknowledgementsByUserId.get(account.id) ?? [],
         investorQuestionnaire: investorQuestionnaireByUserId.get(account.id) ?? null,
         ...getEnrollmentFundingDetails(account.participantId, category),

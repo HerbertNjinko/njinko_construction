@@ -6385,10 +6385,18 @@ export async function refreshDwollaFundingSourcesForUser(userId) {
   const selectedFundingSource = chooseDwollaFundingSource(fundingSources);
 
   await updateDwollaFundingSourceForUser(user.id, selectedFundingSource);
+  const pendingDepositResult =
+    selectedFundingSource?.fundingSourceStatus === "verified"
+      ? await startPendingDwollaAchDepositIntentsForUser(user.id)
+      : {
+          startedDeposits: [],
+          failedDeposits: []
+        };
 
   return {
     fundingSource: selectedFundingSource,
-    fundingSourceCount: fundingSources.length
+    fundingSourceCount: fundingSources.length,
+    ...pendingDepositResult
   };
 }
 
@@ -6574,7 +6582,7 @@ async function getParticipantCapitalLedger(
     Number(row?.committedToPools ?? 0) + Number(row?.committedToProjectPools ?? 0)
   );
   const pendingAllocationRequestAmount = roundNumber(row?.pendingAllocationRequestAmount ?? 0);
-  const totalAccountFunds = roundNumber(enrollmentInvestmentAmount + approvedDepositAmount);
+  const totalAccountFunds = approvedDepositAmount;
   const totalAllocatedFunds = roundNumber(
     allocatedToProjects + committedToPools + pendingAllocationRequestAmount
   );
@@ -6591,6 +6599,67 @@ async function getParticipantCapitalLedger(
     pendingAllocationRequestAmount,
     totalAllocatedFunds,
     availableCapital
+  };
+}
+
+export async function getUserAccountFundingSummary(userId) {
+  const normalizedUserId = String(userId ?? "").trim();
+
+  if (!normalizedUserId) {
+    return {
+      approvedAmount: 0,
+      pendingAmount: 0,
+      rejectedAmount: 0,
+      targetAmount: 0,
+      latestStatus: "",
+      latestProviderTransferStatus: ""
+    };
+  }
+
+  const totals = await queryOne(
+    `
+      SELECT
+        COALESCE(SUM(CASE WHEN status = 'approved' THEN amount ELSE 0 END), 0)::float AS "approvedAmount",
+        COALESCE(SUM(CASE WHEN status = 'pending' THEN amount ELSE 0 END), 0)::float AS "pendingAmount",
+        COALESCE(SUM(CASE WHEN status = 'rejected' THEN amount ELSE 0 END), 0)::float AS "rejectedAmount"
+      FROM user_capital_deposits
+      WHERE user_id = $1
+        AND payment_method = 'dwolla_ach'
+    `,
+    [normalizedUserId]
+  );
+  const latest = await queryOne(
+    `
+      SELECT
+        status,
+        provider_transfer_status AS "providerTransferStatus"
+      FROM user_capital_deposits
+      WHERE user_id = $1
+        AND payment_method = 'dwolla_ach'
+      ORDER BY created_at DESC
+      LIMIT 1
+    `,
+    [normalizedUserId]
+  );
+  const target = await queryOne(
+    `
+      SELECT
+        COALESCE(MAX(investment_amount), 0)::float AS "targetAmount"
+      FROM user_legal_acknowledgements
+      WHERE user_id = $1
+        AND investment_amount IS NOT NULL
+        AND investment_amount > 0
+    `,
+    [normalizedUserId]
+  );
+
+  return {
+    approvedAmount: roundNumber(totals?.approvedAmount ?? 0),
+    pendingAmount: roundNumber(totals?.pendingAmount ?? 0),
+    rejectedAmount: roundNumber(totals?.rejectedAmount ?? 0),
+    targetAmount: roundNumber(target?.targetAmount ?? 0),
+    latestStatus: latest?.status ?? "",
+    latestProviderTransferStatus: latest?.providerTransferStatus ?? ""
   };
 }
 
@@ -11277,6 +11346,56 @@ async function assertUserIdentityReadyForApproval(targetUser) {
     if (!questionnaire) {
       throw new Error("This account is missing the investor questionnaire.");
     }
+  }
+
+  await assertUserDwollaFundingReadyForApproval(targetUser);
+}
+
+async function assertUserDwollaFundingReadyForApproval(targetUser) {
+  if (!isOnboardingAchFundingRequired(targetUser)) {
+    return;
+  }
+
+  let user = targetUser;
+
+  if (!user.dwollaCustomerUrl) {
+    throw new Error("This account is missing a Dwolla ACH profile.");
+  }
+
+  if (!user.dwollaFundingSourceUrl) {
+    throw new Error("This account is missing a linked Dwolla ACH bank account.");
+  }
+
+  if (user.dwollaFundingSourceStatus !== "verified") {
+    try {
+      await refreshDwollaFundingSourcesForUser(user.id);
+      user = await getUserAccountById(user.id, { includeInactive: true });
+    } catch {}
+  }
+
+  if (user?.dwollaFundingSourceStatus !== "verified") {
+    throw new Error("This account is waiting for the user to verify their Dwolla ACH bank account.");
+  }
+
+  await startPendingDwollaAchDepositIntentsForUser(user.id);
+
+  try {
+    await syncDwollaAchDepositStatusesForUser(user.id);
+  } catch {}
+
+  const ledger = await getParticipantCapitalLedger(user.participantId);
+  const requiredAmount = Number(ledger.enrollmentInvestmentAmount ?? 0);
+
+  if (requiredAmount > 0 && Number(ledger.approvedDepositAmount ?? 0) < requiredAmount) {
+    throw new Error(
+      `This account is waiting for processed Dwolla ACH funds. Processed funds must cover ${requiredAmount.toFixed(
+        2
+      )}.`
+    );
+  }
+
+  if (requiredAmount <= 0 && Number(ledger.approvedDepositAmount ?? 0) <= 0) {
+    throw new Error("This account is waiting for at least one processed Dwolla ACH deposit.");
   }
 }
 

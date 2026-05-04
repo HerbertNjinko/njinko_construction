@@ -5,7 +5,7 @@ import {
   LOGIN_PAGE_TITLE,
   app,
   state
-} from "./state.js?v=20260504-frontend-9";
+} from "./state.js?v=20260504-frontend-11";
 import {
   breakdownItem,
   escapeHtml,
@@ -21,7 +21,7 @@ import {
   renderSectionToggle,
   summaryItem,
   titleCase
-} from "./helpers.js?v=20260504-frontend-9";
+} from "./helpers.js?v=20260504-frontend-11";
 import {
   applyAllocationFilters,
   applyArchivedProjectFilters,
@@ -44,7 +44,7 @@ import {
   getInvestorProjectFilterOptions,
   getManagerEditableDeal,
   getUserFilterOptions
-} from "./data.js?v=20260504-frontend-9";
+} from "./data.js?v=20260504-frontend-11";
 
 function renderLogin() {
   const errorMarkup = state.loginError
@@ -271,6 +271,200 @@ function getDwollaConfig() {
     state.dashboard?.paymentIntegrations?.dwolla ??
     {}
   );
+}
+
+function renderDwollaMicroDepositVerificationForm() {
+  return `
+    <form data-dwolla-micro-deposit-form="true">
+      <div class="form-grid-2 compact-form-grid">
+        <label>
+          First
+          <input type="number" name="amount1" min="0" max="0.09" step="0.01" placeholder="0.03" required />
+        </label>
+        <label>
+          Second
+          <input type="number" name="amount2" min="0" max="0.09" step="0.01" placeholder="0.09" required />
+        </label>
+      </div>
+      <button class="button-primary button-inline" type="submit">Verify ACH bank</button>
+    </form>
+  `;
+}
+
+function renderDwollaManualBankLinkForm() {
+  return `
+    <form id="dwolla-bank-link-form">
+      <div class="form-grid-2">
+        <label>
+          Account nickname
+          <input type="text" name="name" maxlength="50" autocomplete="off" required />
+        </label>
+        <label>
+          Type
+          <select name="bankAccountType" required>
+            <option value="">Select type</option>
+            <option value="checking">Checking</option>
+            <option value="savings">Savings</option>
+          </select>
+        </label>
+        <label>
+          Routing number
+          <input type="text" name="routingNumber" inputmode="numeric" autocomplete="off" required />
+        </label>
+        <label>
+          Account number
+          <input type="password" name="accountNumber" inputmode="numeric" autocomplete="off" required />
+        </label>
+      </div>
+      <button class="button-primary" type="submit">Link bank account</button>
+    </form>
+  `;
+}
+
+function renderDwollaFundingSourceDropIn(dwolla) {
+  if (!dwolla?.customerId) {
+    return "";
+  }
+
+  return `
+    <div class="dwolla-dropin-shell" data-dwolla-dropin="true">
+      <div>
+        <p class="eyebrow">Dwolla Guided Setup</p>
+        <h4>Link bank with Dwolla</h4>
+      </div>
+      <dwolla-funding-source-create
+        customerId="${escapeHtml(dwolla.customerId)}"
+        initiateMicroDeposits
+      ></dwolla-funding-source-create>
+    </div>
+  `;
+}
+
+function renderDwollaMicroDepositDropIn(dwolla) {
+  if (!dwolla?.customerId || !dwolla?.fundingSourceId) {
+    return "";
+  }
+
+  return `
+    <div class="dwolla-dropin-shell" data-dwolla-dropin="true">
+      <div>
+        <p class="eyebrow">Dwolla Guided Verification</p>
+        <h4>Verify ACH bank</h4>
+      </div>
+      <dwolla-micro-deposits-verify
+        customerId="${escapeHtml(dwolla.customerId)}"
+        fundingSourceId="${escapeHtml(dwolla.fundingSourceId)}"
+      ></dwolla-micro-deposits-verify>
+    </div>
+  `;
+}
+
+function renderDwollaFallbackForm(title, formMarkup) {
+  return `
+    <div class="dwolla-fallback-form">
+      <p class="eyebrow">${escapeHtml(title)}</p>
+      ${formMarkup}
+    </div>
+  `;
+}
+
+function renderPendingReviewAchPanel() {
+  if (!isInvestorFundingAccount()) {
+    return "";
+  }
+
+  const dwollaConfig = getDwollaConfig();
+
+  if (!dwollaConfig.enabled) {
+    return "";
+  }
+
+  const dwolla = state.session?.dwolla ?? {};
+  const accountFunding = state.session?.accountFunding ?? {};
+  const hasFundingSource = Boolean(dwolla.fundingSourceId);
+  const isVerified = dwolla.fundingSourceStatus === "verified";
+  const bankLabel = [
+    dwolla.fundingSourceBankName,
+    dwolla.fundingSourceName,
+    titleCase(dwolla.fundingSourceType)
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  const approvedAmount = Number(accountFunding.approvedAmount ?? 0);
+  const pendingAmount = Number(accountFunding.pendingAmount ?? 0);
+  const targetAmount = Number(accountFunding.targetAmount ?? 0);
+  const hasProcessedRequiredFunds =
+    targetAmount > 0 ? approvedAmount >= targetAmount : approvedAmount > 0;
+  const fundingStatus = hasProcessedRequiredFunds
+    ? `Funds processed: ${formatCurrency(approvedAmount)}`
+    : targetAmount > 0
+      ? `Processed ${formatCurrency(approvedAmount)} of ${formatCurrency(targetAmount)}`
+    : pendingAmount > 0
+      ? `ACH transfer processing: ${formatCurrency(pendingAmount)} pending`
+      : "No processed ACH funds yet";
+
+  return `
+    <div class="questionnaire-card">
+      <div>
+        <p class="eyebrow">ACH Bank Verification</p>
+        <h3>Complete ACH funding</h3>
+        <p class="section-copy">
+          Manager approval unlocks after your bank is verified and Dwolla confirms the ACH transfer has processed.
+        </p>
+      </div>
+      ${
+        dwolla.customerId
+          ? `
+            <div class="button-row">
+              <button class="button-secondary button-inline" id="dwolla-refresh-funding-sources-button" type="button">
+                Refresh ACH status
+              </button>
+            </div>
+          `
+          : ""
+      }
+      <div class="summary-grid">
+        ${summaryItem("Bank status", titleCase(dwolla.fundingSourceStatus || "Not linked"))}
+        ${summaryItem("Linked bank", bankLabel || "No bank selected")}
+        ${summaryItem("Funding status", fundingStatus)}
+      </div>
+      ${
+        hasFundingSource && !isVerified
+          ? `
+            <p class="helper-copy">
+              Enter the two micro-deposit amounts that Dwolla posted to your bank account.
+            </p>
+            ${renderDwollaMicroDepositDropIn(dwolla)}
+            ${renderDwollaFallbackForm("Manual Verification", renderDwollaMicroDepositVerificationForm())}
+          `
+          : isVerified && pendingAmount > 0 && approvedAmount <= 0
+            ? `
+              <p class="helper-copy">
+                Your bank is verified. Your ACH transfer is still waiting for Dwolla processing confirmation.
+              </p>
+            `
+          : hasProcessedRequiredFunds
+            ? `
+              <p class="helper-copy">
+                ACH funds have processed. The manager can now complete account approval.
+              </p>
+            `
+          : isVerified && pendingAmount > 0
+            ? `
+              <p class="helper-copy">
+                Your bank is verified. The manager can approve after Dwolla processes the full ACH funding amount.
+              </p>
+            `
+            : `
+              <p class="helper-copy">
+                ACH bank setup is incomplete.
+              </p>
+              ${renderDwollaFundingSourceDropIn(dwolla)}
+              ${renderDwollaFallbackForm("Manual Bank Link", renderDwollaManualBankLinkForm())}
+            `
+      }
+    </div>
+  `;
 }
 
 function renderLegalDocumentSupplementFields(document) {
@@ -516,7 +710,7 @@ function renderIdentityReviewGate() {
               <p class="eyebrow">Manager Review Pending</p>
               <h2>${escapeHtml(state.session.name)}</h2>
               <p class="section-copy">
-                Your identity information has been submitted. You will receive an email after the manager reviews your account.
+                Your identity information has been submitted. Manager approval can proceed after Dwolla verifies your bank and confirms processed ACH funds.
               </p>
             </div>
             <div class="button-row">
@@ -525,6 +719,7 @@ function renderIdentityReviewGate() {
             </div>
           </div>
           ${renderMessage(state.messages.identity)}
+          ${renderPendingReviewAchPanel()}
         </section>
       </div>
     `;
@@ -2545,35 +2740,14 @@ function renderDwollaAchPanel(account) {
                     hasFundingSource
                       ? `
                         <p class="helper-copy">
-                          This bank is waiting for manager micro-deposit verification before ACH deposits can be started.
+                          Enter the two Dwolla micro-deposit amounts from your bank statement before ACH deposits can be started.
                         </p>
+                        ${renderDwollaMicroDepositDropIn(dwolla)}
+                        ${renderDwollaFallbackForm("Manual Verification", renderDwollaMicroDepositVerificationForm())}
                       `
                       : `
-                        <form id="dwolla-bank-link-form">
-                          <div class="form-grid-2">
-                            <label>
-                              Account nickname
-                              <input type="text" name="name" maxlength="50" autocomplete="off" required />
-                            </label>
-                            <label>
-                              Type
-                              <select name="bankAccountType" required>
-                                <option value="">Select type</option>
-                                <option value="checking">Checking</option>
-                                <option value="savings">Savings</option>
-                              </select>
-                            </label>
-                            <label>
-                              Routing number
-                              <input type="text" name="routingNumber" inputmode="numeric" autocomplete="off" required />
-                            </label>
-                            <label>
-                              Account number
-                              <input type="password" name="accountNumber" inputmode="numeric" autocomplete="off" required />
-                            </label>
-                          </div>
-                          <button class="button-primary" type="submit">Link bank account</button>
-                        </form>
+                        ${renderDwollaFundingSourceDropIn(dwolla)}
+                        ${renderDwollaFallbackForm("Manual Bank Link", renderDwollaManualBankLinkForm())}
                       `
                   }
                 `
@@ -3928,102 +4102,6 @@ function renderManagerAchBankCell(account) {
   `;
 }
 
-function renderManagerAchVerificationCell(account) {
-  const dwolla = account.dwolla ?? {};
-
-  if (!dwolla.customerId) {
-    return "No ACH profile";
-  }
-
-  if (!dwolla.fundingSourceId) {
-    return "No bank linked";
-  }
-
-  if (dwolla.fundingSourceStatus === "verified") {
-    return '<span class="read-only-tag">Verified</span>';
-  }
-
-  if (!account.userId) {
-    return "Missing login account";
-  }
-
-  return `
-    <form data-admin-dwolla-micro-deposit-form="true" data-user-id="${escapeHtml(account.userId)}">
-      <div class="form-grid-2 compact-form-grid">
-        <label>
-          First
-          <input type="number" name="amount1" min="0" max="0.09" step="0.01" placeholder="0.03" required />
-        </label>
-        <label>
-          Second
-          <input type="number" name="amount2" min="0" max="0.09" step="0.01" placeholder="0.09" required />
-        </label>
-      </div>
-      <button class="button-primary button-inline" type="submit">Verify ACH</button>
-    </form>
-  `;
-}
-
-function renderManagerAchVerificationPanel(accounts) {
-  const pendingAchAccounts = accounts.filter((account) => {
-    const dwolla = account.dwolla ?? {};
-
-    return Boolean(dwolla.customerId && dwolla.fundingSourceId && dwolla.fundingSourceStatus !== "verified");
-  });
-
-  return `
-    <div class="account-subsection ach-verification-panel">
-      <div class="section-head">
-        <div>
-          <h4>ACH Bank Verification</h4>
-          <p class="section-copy">
-            Enter the two Dwolla micro-deposit amounts for investor bank accounts that are linked but not verified.
-          </p>
-        </div>
-      </div>
-      ${
-        pendingAchAccounts.length
-          ? `
-            <div class="ach-verification-grid">
-              ${pendingAchAccounts
-                .map((account) => {
-                  const dwolla = account.dwolla ?? {};
-                  const bankLabel = [
-                    dwolla.fundingSourceBankName,
-                    dwolla.fundingSourceName,
-                    titleCase(dwolla.fundingSourceType)
-                  ]
-                    .filter(Boolean)
-                    .join(" · ");
-
-                  return `
-                    <article class="ach-verification-card">
-                      <div class="section-head">
-                        <div>
-                          <h4>${escapeHtml(account.name)}</h4>
-                          <p class="meta-line">${escapeHtml(account.email || "No email")}</p>
-                        </div>
-                        <span class="read-only-tag">${escapeHtml(
-                          titleCase(dwolla.fundingSourceStatus || "Not linked")
-                        )}</span>
-                      </div>
-                      <div class="summary-grid">
-                        ${summaryItem("Linked bank", bankLabel || "No bank selected")}
-                        ${summaryItem("Category", titleCase(account.category))}
-                      </div>
-                      ${renderManagerAchVerificationCell(account)}
-                    </article>
-                  `;
-                })
-                .join("")}
-            </div>
-          `
-          : '<div class="empty-state">No ACH bank accounts are waiting for micro-deposit verification.</div>'
-      }
-    </div>
-  `;
-}
-
 function renderManagerCapitalFundsPanel() {
   const accounts = state.dashboard.admin.capitalAccounts ?? [];
   const deposits = state.dashboard.admin.capitalDeposits ?? [];
@@ -4036,7 +4114,6 @@ function renderManagerCapitalFundsPanel() {
       "Track ACH deposits that belong to a user account before the money is assigned to a project or pooled-capital group.",
     message: renderMessage(state.messages.capital),
     body: `
-      ${renderManagerAchVerificationPanel(accounts)}
       <div class="section-head">
         <div>
           <h4>Pending ACH Transfers</h4>
@@ -4131,7 +4208,6 @@ function renderManagerCapitalFundsPanel() {
               <th>Available</th>
               <th>Pending</th>
               <th>ACH bank</th>
-              <th>ACH verification</th>
               <th>Latest proof</th>
             </tr>
           </thead>
@@ -4150,7 +4226,6 @@ function renderManagerCapitalFundsPanel() {
                           <td>${escapeHtml(formatCurrency(account.availableCapital || 0))}</td>
                           <td>${escapeHtml(formatCurrency(account.pendingDepositAmount || 0))}</td>
                           <td>${renderManagerAchBankCell(account)}</td>
-                          <td>${renderManagerAchVerificationCell(account)}</td>
                           <td>
                             ${
                               account.latestApprovedDepositId
@@ -4172,7 +4247,7 @@ function renderManagerCapitalFundsPanel() {
                       `
                     )
                     .join("")
-                : '<tr><td colspan="10">No investor or pooled-member account funds recorded yet.</td></tr>'
+                : '<tr><td colspan="9">No investor or pooled-member account funds recorded yet.</td></tr>'
             }
           </tbody>
         </table>
@@ -5741,15 +5816,15 @@ function renderIdentityReviewActions(row, { showDocumentLinks = true } = {}) {
     return documentLinks;
   }
 
-  const legalReviewIssues = getLegalReviewIssuesForUser(row);
-  const approvalDisabled = legalReviewIssues.length ? "disabled" : "";
+  const approvalBlockers = getAccountApprovalBlockersForUser(row);
+  const approvalDisabled = approvalBlockers.length ? "disabled" : "";
 
   return `
     ${documentLinks}
     ${
-      legalReviewIssues.length
+      approvalBlockers.length
         ? `<p class="table-note">${escapeHtml(
-            `Approval is locked until these legal items are complete: ${legalReviewIssues.join(", ")}.`
+            `Approval is locked until: ${approvalBlockers.join(", ")}.`
           )}</p>`
         : ""
     }
@@ -5833,6 +5908,74 @@ function getLegalReviewIssuesForUser(row) {
   }
 
   return issues;
+}
+
+function isDwollaFundingReviewRequired(row) {
+  return isInvestorFundingAccount(row.category) && Boolean(getDwollaConfig().enabled);
+}
+
+function getAchFundingReviewIssuesForUser(row) {
+  if (!isDwollaFundingReviewRequired(row)) {
+    return [];
+  }
+
+  const dwolla = row.dwolla ?? {};
+  const issues = [];
+
+  if (!dwolla.customerId) {
+    issues.push("Dwolla ACH profile");
+  }
+
+  if (!dwolla.fundingSourceId) {
+    issues.push("linked ACH bank");
+  } else if (dwolla.fundingSourceStatus !== "verified") {
+    issues.push("verified ACH bank");
+  }
+
+  const requiredAmount = Number(row.enrollmentInvestmentAmount ?? 0);
+  const processedAmount = Number(row.accountFundsTotal ?? 0);
+  const pendingAmount = Number(row.accountFundsPendingDeposits ?? 0);
+
+  if (requiredAmount > 0 && processedAmount < requiredAmount) {
+    issues.push(
+      `processed ACH funds of ${formatCurrency(requiredAmount)}${
+        pendingAmount > 0 ? ` (${formatCurrency(pendingAmount)} pending)` : ""
+      }`
+    );
+  } else if (requiredAmount <= 0 && processedAmount <= 0) {
+    issues.push(
+      `processed ACH funds${pendingAmount > 0 ? ` (${formatCurrency(pendingAmount)} pending)` : ""}`
+    );
+  }
+
+  return issues;
+}
+
+function getAccountApprovalBlockersForUser(row) {
+  return [...getLegalReviewIssuesForUser(row), ...getAchFundingReviewIssuesForUser(row)];
+}
+
+function renderAchFundingReviewStatus(row) {
+  if (!isDwollaFundingReviewRequired(row)) {
+    return "Not required";
+  }
+
+  const dwolla = row.dwolla ?? {};
+  const requiredAmount = Number(row.enrollmentInvestmentAmount ?? 0);
+  const processedAmount = Number(row.accountFundsTotal ?? 0);
+  const pendingAmount = Number(row.accountFundsPendingDeposits ?? 0);
+  const statusItems = [
+    dwolla.fundingSourceStatus === "verified"
+      ? "Bank verified"
+      : dwolla.fundingSourceId
+        ? `Bank ${titleCase(dwolla.fundingSourceStatus || "not verified")}`
+        : "No bank linked",
+    `Processed ${formatCurrency(processedAmount)}`,
+    pendingAmount > 0 ? `Pending ${formatCurrency(pendingAmount)}` : "",
+    requiredAmount > 0 ? `Required ${formatCurrency(requiredAmount)}` : ""
+  ].filter(Boolean);
+
+  return `<div class="cell-stack">${statusItems.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>`;
 }
 
 function renderLegalAcknowledgementDetails(acknowledgement) {
@@ -6241,7 +6384,7 @@ function renderPendingAccountApprovalsSection() {
     sectionId: "manager-pending-user-approvals",
     title: "Pending Account Approvals",
     copy:
-      "Review accounts that submitted identity information and are waiting for approval or a request for more information.",
+      "Review submitted accounts. Approval stays locked until required legal items are complete, the user's ACH bank is verified, and Dwolla has processed the funding transfer.",
     message: renderMessage(state.messages.directory),
     body: `
       <div class="metrics-grid">
@@ -6261,6 +6404,7 @@ function renderPendingAccountApprovalsSection() {
                     <th>ID card</th>
                     <th>ID dates</th>
                     <th>Questionnaire</th>
+                    <th>ACH funding</th>
                     <th>Submitted</th>
                     <th>Review</th>
                   </tr>
@@ -6281,6 +6425,7 @@ function renderPendingAccountApprovalsSection() {
                               : "—"
                           )}</td>
                           <td>${renderInvestorQuestionnaireStatus(row)}</td>
+                          <td>${renderAchFundingReviewStatus(row)}</td>
                           <td>${escapeHtml(formatDateTime(row.onboardingSubmittedAt))}</td>
                           <td>
                             <div class="table-actions identity-review-actions">
@@ -7678,29 +7823,40 @@ function renderLoading() {
   `;
 }
 
+function notifyRenderComplete() {
+  window.queueMicrotask(() => {
+    window.dispatchEvent(new CustomEvent("njinko:rendered"));
+  });
+}
+
 export function render() {
   if (state.loading) {
     app.innerHTML = renderLoading();
+    notifyRenderComplete();
     return;
   }
 
   if (!state.session) {
     app.innerHTML = renderLogin();
+    notifyRenderComplete();
     return;
   }
 
   if (state.session.mustChangePassword) {
     app.innerHTML = renderPasswordResetGate();
+    notifyRenderComplete();
     return;
   }
 
   if (requiresIdentityGate(state.session)) {
     app.innerHTML = renderIdentityReviewGate();
+    notifyRenderComplete();
     return;
   }
 
   if (requiresLegalAcknowledgementGate(state.session)) {
     app.innerHTML = renderLegalAcknowledgementGate();
+    notifyRenderComplete();
     return;
   }
 
@@ -7710,4 +7866,5 @@ export function render() {
       : state.dashboard?.viewer?.category === "pool_member"
         ? renderPoolMemberDashboard()
         : renderInvestorDashboard();
+  notifyRenderComplete();
 }

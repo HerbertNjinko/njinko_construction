@@ -49,6 +49,8 @@ https://investors.njinkofarm.com/api/webhooks/dwolla
 
 ACH deposits created through Dwolla stay pending in `user_capital_deposits` until a signed webhook confirms the transfer is processed. Failed, returned, or cancelled transfers are rejected automatically.
 
+The user ACH setup UI includes Dwolla drop-in components for guided bank linking and micro-deposit verification, while keeping the portal's manual ACH forms available as a fallback. The drop-ins use `https://cdn.dwolla.com/v3.0.0/dwolla-web.js` and `/api/payments/dwolla/client-token` for scoped client tokens.
+
 ## User service
 
 The investor portal is also installed as a user-level systemd service using:
@@ -148,5 +150,5 @@ New PDFs are discovered automatically from those folders. Dynamically discovered
 
 # I also added inference for special fields:
 
-Files with subscription and agreement in the name require an investment amount during onboarding. Investor account funding now uses ACH transfer setup instead of proof-of-payment uploads.
+Files with subscription and agreement in the name require an investment amount during onboarding. Investor account funding now uses ACH transfer setup instead of proof-of-payment uploads, and manager account approval waits until the user's bank is verified and Dwolla reports the ACH funds as processed.
 Contractor equity/election files require deferred amount during onboarding.
