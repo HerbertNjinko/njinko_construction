@@ -5,7 +5,7 @@ import {
   LOGIN_PAGE_TITLE,
   app,
   state
-} from "./state.js?v=20260504-frontend-16";
+} from "./state.js?v=20260504-frontend-17";
 import {
   breakdownItem,
   escapeHtml,
@@ -21,7 +21,7 @@ import {
   renderSectionToggle,
   summaryItem,
   titleCase
-} from "./helpers.js?v=20260504-frontend-16";
+} from "./helpers.js?v=20260504-frontend-17";
 import {
   applyAllocationFilters,
   applyArchivedProjectFilters,
@@ -44,7 +44,7 @@ import {
   getInvestorProjectFilterOptions,
   getManagerEditableDeal,
   getUserFilterOptions
-} from "./data.js?v=20260504-frontend-16";
+} from "./data.js?v=20260504-frontend-17";
 
 function renderLogin() {
   const errorMarkup = state.loginError
@@ -878,6 +878,10 @@ function formatCostVariance(amount, pct) {
 function renderProfilePanel() {
   const { profile, viewer } = state.dashboard;
   const isManager = viewer.role === "manager";
+  const dwolla = profile.dwolla ?? {};
+  const effectivePayoutMethod = profile.payoutMethod || (dwolla.fundingSourceId ? "bank" : "");
+  const effectiveBankName = profile.bankName || dwolla.fundingSourceBankName || "";
+  const effectiveBankAccountName = profile.bankAccountName || dwolla.fundingSourceName || "";
 
   const summaryItems = [
     summaryItem("Portal role", titleCase(viewer.role)),
@@ -887,6 +891,12 @@ function renderProfilePanel() {
   if (!isManager) {
     summaryItems.push(summaryItem("Driver's license", profile.driverLicenseNumber || "Not provided"));
     summaryItems.push(summaryItem("Attached ID", profile.idCardFileName || "No file attached"));
+    summaryItems.push(
+      summaryItem(
+        "ACH bank",
+        dwolla.fundingSourceBankName || dwolla.fundingSourceName || "Not linked"
+      )
+    );
   }
 
   return renderCollapsibleSection({
@@ -943,15 +953,16 @@ function renderProfilePanel() {
           isManager
             ? ""
             : `
+              ${renderProfileDwollaBankDetails(profile.dwolla)}
               <div class="form-grid-2">
                 <label>
                   Preferred payout method
                   <select name="payoutMethod">
-                    <option value="" ${!profile.payoutMethod ? "selected" : ""}>Select method</option>
-                    <option value="bank" ${profile.payoutMethod === "bank" ? "selected" : ""}>Bank account</option>
-                    <option value="zelle" ${profile.payoutMethod === "zelle" ? "selected" : ""}>Zelle</option>
-                    <option value="cash_app" ${profile.payoutMethod === "cash_app" ? "selected" : ""}>Cash App</option>
-                    <option value="other" ${profile.payoutMethod === "other" ? "selected" : ""}>Other</option>
+                    <option value="" ${!effectivePayoutMethod ? "selected" : ""}>Select method</option>
+                    <option value="bank" ${effectivePayoutMethod === "bank" ? "selected" : ""}>Bank account</option>
+                    <option value="zelle" ${effectivePayoutMethod === "zelle" ? "selected" : ""}>Zelle</option>
+                    <option value="cash_app" ${effectivePayoutMethod === "cash_app" ? "selected" : ""}>Cash App</option>
+                    <option value="other" ${effectivePayoutMethod === "other" ? "selected" : ""}>Other</option>
                   </select>
                 </label>
                 <label>
@@ -962,11 +973,11 @@ function renderProfilePanel() {
               <div class="form-grid-2">
                 <label>
                   Bank name
-                  <input type="text" name="bankName" value="${inputValue(profile.bankName)}" />
+                  <input type="text" name="bankName" value="${inputValue(effectiveBankName)}" />
                 </label>
                 <label>
                   Account name
-                  <input type="text" name="bankAccountName" value="${inputValue(profile.bankAccountName)}" />
+                  <input type="text" name="bankAccountName" value="${inputValue(effectiveBankAccountName)}" />
                 </label>
               </div>
               <div class="form-grid-2">
@@ -974,13 +985,13 @@ function renderProfilePanel() {
                   Routing number
                   <input type="text" name="bankRoutingNumber" value="${inputValue(
                     profile.bankRoutingNumber
-                  )}" />
+                  )}" placeholder="${dwolla.fundingSourceId ? "Stored in Dwolla" : ""}" />
                 </label>
                 <label>
                   Account number
                   <input type="text" name="bankAccountNumber" value="${inputValue(
                     profile.bankAccountNumber
-                  )}" />
+                  )}" placeholder="${dwolla.fundingSourceId ? "Stored in Dwolla" : ""}" />
                 </label>
               </div>
               <div class="form-grid-2">
@@ -1003,6 +1014,44 @@ function renderProfilePanel() {
       </form>
     `
   });
+}
+
+function renderProfileDwollaBankDetails(dwolla = {}) {
+  if (!dwolla.customerId && !dwolla.fundingSourceId) {
+    return "";
+  }
+
+  const bankLabel = [
+    dwolla.fundingSourceBankName,
+    dwolla.fundingSourceName,
+    titleCase(dwolla.fundingSourceType)
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return `
+    <div class="account-subsection">
+      <div class="section-head section-head-tight">
+        <div>
+          <h4>Dwolla ACH Bank</h4>
+          <p class="section-copy">
+            Routing and account numbers are stored by Dwolla and are not shown in this portal.
+          </p>
+        </div>
+      </div>
+      <div class="summary-grid">
+        ${summaryItem("Bank name", dwolla.fundingSourceBankName || "Not linked")}
+        ${summaryItem("Account name", dwolla.fundingSourceName || "Not linked")}
+        ${summaryItem("Account type", titleCase(dwolla.fundingSourceType || "Not linked"))}
+        ${summaryItem("Verification status", titleCase(dwolla.fundingSourceStatus || "Not linked"))}
+      </div>
+      ${
+        bankLabel
+          ? `<p class="helper-copy">${escapeHtml(bankLabel)}</p>`
+          : ""
+      }
+    </div>
+  `;
 }
 
 function renderIssueStatus(issue) {

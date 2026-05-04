@@ -1059,7 +1059,8 @@ function buildProfilePayload(user, participant) {
     bankAccountNumber: participant?.bankAccountNumber ?? "",
     zelleDetails: participant?.zelleDetails ?? "",
     cashAppHandle: participant?.cashAppHandle ?? "",
-    payoutNotes: participant?.payoutNotes ?? ""
+    payoutNotes: participant?.payoutNotes ?? "",
+    dwolla: buildDwollaAccountPayload(user)
   };
 }
 

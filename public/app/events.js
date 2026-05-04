@@ -1,4 +1,4 @@
-import { state } from "./state.js?v=20260504-frontend-16";
+import { state } from "./state.js?v=20260504-frontend-17";
 import {
   clearAuthFeedback,
   clearMessages,
@@ -14,7 +14,7 @@ import {
   setMessage,
   titleCase,
   toggleSectionCollapsed
-} from "./helpers.js?v=20260504-frontend-16";
+} from "./helpers.js?v=20260504-frontend-17";
 import {
   applyArchivedProjectFilters,
   applyQuestionnaireFilters,
@@ -30,7 +30,7 @@ import {
   syncDealEditorField,
   updateCreateDealDraft,
   updateDealEditorDraft
-} from "./data.js?v=20260504-frontend-16";
+} from "./data.js?v=20260504-frontend-17";
 import {
   api,
   applyLoggedOutState,
@@ -38,8 +38,8 @@ import {
   loadSession,
   recordSessionActivity,
   refreshDashboard
-} from "./session.js?v=20260504-frontend-16";
-import { render } from "./renderers.js?v=20260504-frontend-16";
+} from "./session.js?v=20260504-frontend-17";
+import { render } from "./renderers.js?v=20260504-frontend-17";
 
 let listenersBound = false;
 let dwollaDropInRetryCount = 0;

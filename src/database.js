@@ -7784,10 +7784,6 @@ function mapDwollaPayoutTransferStatus(providerStatus, topic) {
   const normalizedStatus = String(providerStatus ?? "").trim().toLowerCase();
   const normalizedTopic = String(topic ?? "").trim().toLowerCase();
 
-  if (["processed", "completed"].includes(normalizedStatus) || normalizedTopic.includes("completed")) {
-    return "paid";
-  }
-
   if (
     ["failed", "returned"].includes(normalizedStatus) ||
     normalizedTopic.includes("failed") ||
@@ -7803,7 +7799,18 @@ function mapDwollaPayoutTransferStatus(providerStatus, topic) {
     return "cancelled";
   }
 
+  if (
+    normalizedTopic.includes("customer_bank_transfer_completed") ||
+    normalizedTopic.includes("customer_bank_transfer_processed")
+  ) {
+    return "paid";
+  }
+
   return "pending";
+}
+
+function isDwollaCustomerBankTransferTopic(topic) {
+  return String(topic ?? "").trim().toLowerCase().includes("customer_bank_transfer");
 }
 
 async function applyDwollaTransferWebhook({ transfer, topic, payload }) {
@@ -7836,6 +7843,7 @@ async function applyDwollaTransferWebhook({ transfer, topic, payload }) {
           provider_transfer_id = $8 OR
           provider_correlation_id = $9
         )
+        AND ($1 <> 'pending' OR status = 'pending')
         AND (
           status <> $1 OR
           ($2::text IS NOT NULL AND provider_transfer_status IS DISTINCT FROM $2)
@@ -7870,8 +7878,38 @@ async function applyDwollaTransferWebhook({ transfer, topic, payload }) {
     };
   }
 
+  const payoutRecord = await queryOne(
+    `
+      SELECT
+        user_account_payouts.id,
+        user_account_payouts.status,
+        user_account_payouts.provider_transfer_id AS "providerTransferId",
+        user_account_payouts.provider_transfer_url AS "providerTransferUrl",
+        users.dwolla_customer_status AS "customerStatus"
+      FROM user_account_payouts
+      JOIN users ON users.id = user_account_payouts.user_id
+      WHERE user_account_payouts.provider_name = 'dwolla'
+        AND (
+          user_account_payouts.provider_transfer_url = $1 OR
+          user_account_payouts.provider_transfer_id = $2 OR
+          user_account_payouts.provider_correlation_id = $3
+        )
+      ORDER BY user_account_payouts.created_at DESC
+      LIMIT 1
+    `,
+    [transferUrl, transferId, correlationId]
+  );
+
+  if (!payoutRecord) {
+    return null;
+  }
+
   const payoutStatus = mapDwollaPayoutTransferStatus(transferStatus, topic);
   const payoutPaidAt = payoutStatus === "paid" ? timestamp : null;
+  const shouldCaptureCurrentTransfer =
+    isDwollaCustomerBankTransferTopic(topic) || !payoutRecord.providerTransferUrl;
+  const nextProviderTransferId = shouldCaptureCurrentTransfer ? transferId : null;
+  const nextProviderTransferUrl = shouldCaptureCurrentTransfer ? transferUrl : null;
   const payoutFailureReason =
     payoutStatus === "failed"
       ? "Dwolla ACH payout failed or was returned."
@@ -7885,27 +7923,33 @@ async function applyDwollaTransferWebhook({ transfer, topic, payload }) {
         ? "Dwolla ACH payout failed or was returned."
         : payoutStatus === "cancelled"
           ? "Dwolla ACH payout was cancelled."
-          : "Dwolla ACH payout is processing.";
+          : isDwollaCustomerBankTransferTopic(topic)
+            ? "Dwolla ACH payout is processing. Destination bank transfer is pending."
+            : "Dwolla ACH payout is processing.";
   const payoutResult = await pool.query(
     `
       UPDATE user_account_payouts
       SET
         status = $1,
+        provider_transfer_id = COALESCE($9, provider_transfer_id),
+        provider_transfer_url = COALESCE($10, provider_transfer_url),
         provider_transfer_status = COALESCE($2, provider_transfer_status),
         provider_failure_reason = COALESCE($3, provider_failure_reason),
         provider_raw_event = $4,
         manager_notes = $5,
-        paid_at = COALESCE($6, paid_at),
+        paid_at = CASE
+          WHEN $1 = 'paid' THEN COALESCE($6, paid_at)
+          WHEN $1 IN ('pending', 'failed', 'cancelled') THEN NULL
+          ELSE paid_at
+        END,
         updated_at = $7
-      WHERE provider_name = 'dwolla'
-        AND (
-          provider_transfer_url = $8 OR
-          provider_transfer_id = $9 OR
-          provider_correlation_id = $10
-        )
+      WHERE id = $8
+        AND ($1 <> 'pending' OR status = 'pending')
         AND (
           status <> $1 OR
-          ($2::text IS NOT NULL AND provider_transfer_status IS DISTINCT FROM $2)
+          ($2::text IS NOT NULL AND provider_transfer_status IS DISTINCT FROM $2) OR
+          ($9::text IS NOT NULL AND provider_transfer_id IS DISTINCT FROM $9) OR
+          ($10::text IS NOT NULL AND provider_transfer_url IS DISTINCT FROM $10)
         )
       RETURNING id
     `,
@@ -7917,9 +7961,9 @@ async function applyDwollaTransferWebhook({ transfer, topic, payload }) {
       payoutManagerNotes,
       payoutPaidAt,
       timestamp,
-      transferUrl,
-      transferId,
-      correlationId
+      payoutRecord.id,
+      nextProviderTransferId,
+      nextProviderTransferUrl
     ]
   );
   const updatedPayoutId = payoutResult.rows[0]?.id;
@@ -8008,6 +8052,7 @@ export async function syncDwollaPayoutStatusesForUser(userId) {
     `
       SELECT
         id,
+        provider_transfer_id AS "providerTransferId",
         provider_transfer_url AS "providerTransferUrl"
       FROM user_account_payouts
       WHERE user_id = $1
@@ -8022,9 +8067,26 @@ export async function syncDwollaPayoutStatusesForUser(userId) {
 
   for (const payout of pendingPayouts) {
     const transfer = await retrieveDwollaResource(payout.providerTransferUrl);
+    const bankTransferEvent = await queryOne(
+      `
+        SELECT topic
+        FROM payment_webhook_events
+        WHERE provider = 'dwolla'
+          AND resource_id = $1
+          AND topic LIKE 'customer_bank_transfer_%'
+        ORDER BY created_at DESC
+        LIMIT 1
+      `,
+      [transfer?.id ?? payout.providerTransferId]
+    );
+    const statusSyncTopic = bankTransferEvent?.topic
+      ? `customer_bank_transfer_${
+          transfer?.status === "processed" ? "completed" : transfer?.status || "pending"
+        }:status-sync`
+      : "transfer:status-sync";
     const applied = await applyDwollaTransferWebhook({
       transfer,
-      topic: "transfer:status-sync",
+      topic: statusSyncTopic,
       payload: {
         source: "manual-status-sync",
         resourceId: transfer?.id ?? "",
