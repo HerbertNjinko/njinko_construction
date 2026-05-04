@@ -50,11 +50,24 @@ function getCredentialConfig() {
 
 export function getDwollaPublicConfig() {
   const config = getCredentialConfig();
+  let hasValidDestinationFundingSource = false;
+
+  if (config.destinationFundingSourceUrl) {
+    try {
+      validateDwollaFundingSourceUrl(
+        config.destinationFundingSourceUrl,
+        config,
+        "DWOLLA_COMPANY_FUNDING_SOURCE_URL"
+      );
+      hasValidDestinationFundingSource = true;
+    } catch {}
+  }
+
   const configured = Boolean(
     config.enabled &&
       config.key &&
       config.secret &&
-      config.destinationFundingSourceUrl &&
+      hasValidDestinationFundingSource &&
       config.webhookSecret
   );
 
@@ -80,7 +93,14 @@ export function assertDwollaConfigured() {
     throw new Error("Dwolla ACH is missing DWOLLA_COMPANY_FUNDING_SOURCE_URL.");
   }
 
-  return config;
+  return {
+    ...config,
+    destinationFundingSourceUrl: validateDwollaFundingSourceUrl(
+      config.destinationFundingSourceUrl,
+      config,
+      "DWOLLA_COMPANY_FUNDING_SOURCE_URL"
+    )
+  };
 }
 
 export function assertDwollaWebhookConfigured() {
@@ -107,6 +127,71 @@ function extractIdFromUrl(url) {
   return String(url ?? "").split("/").filter(Boolean).at(-1) ?? "";
 }
 
+function validateDwollaFundingSourceUrl(value, config, label) {
+  let parsedUrl = null;
+
+  try {
+    parsedUrl = new URL(String(value ?? "").trim());
+  } catch {
+    throw new Error(`${label} must be a valid Dwolla API funding-source URL.`);
+  }
+
+  const expectedHost = new URL(config.baseUrl).host;
+  const pathParts = parsedUrl.pathname.split("/").filter(Boolean);
+
+  if (
+    parsedUrl.protocol !== "https:" ||
+    parsedUrl.host !== expectedHost ||
+    pathParts.length !== 2 ||
+    pathParts[0] !== "funding-sources" ||
+    !pathParts[1]
+  ) {
+    throw new Error(
+      `${label} must be a Dwolla API funding-source URL like ${config.baseUrl}/funding-sources/{id}. ` +
+        `The current value points to ${parsedUrl.host || "an invalid host"}.`
+    );
+  }
+
+  return `${config.baseUrl}/funding-sources/${pathParts[1]}`;
+}
+
+function formatDwollaError(payload, fallbackText, statusCode) {
+  const message = payload?.message || payload?.error_description || "";
+  const embeddedErrors = Array.isArray(payload?._embedded?.errors)
+    ? payload._embedded.errors
+    : [];
+  const details = embeddedErrors
+    .map((error) =>
+      [error.path, error.code, error.message]
+        .filter(Boolean)
+        .map((value) => String(value).trim())
+        .filter(Boolean)
+        .join(" - ")
+    )
+    .filter(Boolean)
+    .join("; ");
+
+  if (message && details) {
+    return `${message} ${details}`;
+  }
+
+  if (message) {
+    return message;
+  }
+
+  const text = String(fallbackText ?? "").trim();
+
+  if (/^</.test(text)) {
+    return `Dwolla returned a non-JSON response${statusCode ? ` (${statusCode})` : ""}. Check that Dwolla resource URLs point to the API host, not the dashboard.`;
+  }
+
+  if (text) {
+    return text.length > 300 ? `${text.slice(0, 300)}...` : text;
+  }
+
+  return "Dwolla request failed.";
+}
+
 async function getAccessToken(config = assertDwollaConfigured()) {
   const now = Date.now();
 
@@ -127,7 +212,7 @@ async function getAccessToken(config = assertDwollaConfigured()) {
   const payload = await response.json().catch(() => ({}));
 
   if (!response.ok || !payload.access_token) {
-    throw new Error(payload.message || payload.error_description || "Dwolla authentication failed.");
+    throw new Error(formatDwollaError(payload, "", response.status) || "Dwolla authentication failed.");
   }
 
   cachedAccessToken = {
@@ -161,12 +246,12 @@ export async function dwollaRequest(pathOrUrl, options = {}) {
     try {
       payload = JSON.parse(text);
     } catch {
-      payload = { message: text };
+      payload = null;
     }
   }
 
   if (!response.ok) {
-    throw new Error(payload?.message || payload?.error_description || "Dwolla request failed.");
+    throw new Error(formatDwollaError(payload, text, response.status));
   }
 
   return {
@@ -212,6 +297,56 @@ export async function listDwollaFundingSources(customerUrl) {
   return response.body?._embedded?.["funding-sources"] ?? [];
 }
 
+export async function createDwollaFundingSource({ customerUrl, name, bankAccountType, routingNumber, accountNumber }) {
+  const response = await dwollaRequest(
+    `${String(customerUrl).replace(/\/+$/, "")}/funding-sources`,
+    {
+      method: "POST",
+      body: {
+        routingNumber,
+        accountNumber,
+        bankAccountType,
+        name
+      }
+    }
+  );
+  const location = response.headers.get("location") ?? "";
+
+  return {
+    fundingSourceUrl: location,
+    fundingSourceId: extractIdFromUrl(location)
+  };
+}
+
+export async function initiateDwollaMicroDeposits(fundingSourceUrl) {
+  const response = await dwollaRequest(`${String(fundingSourceUrl).replace(/\/+$/, "")}/micro-deposits`, {
+    method: "POST"
+  });
+
+  return {
+    status: response.status,
+    microDepositsUrl: response.headers.get("location") ?? ""
+  };
+}
+
+export async function verifyDwollaMicroDeposits({ fundingSourceUrl, amount1, amount2 }) {
+  const response = await dwollaRequest(`${String(fundingSourceUrl).replace(/\/+$/, "")}/micro-deposits`, {
+    method: "POST",
+    body: {
+      amount1: {
+        value: Number(amount1).toFixed(2),
+        currency: "USD"
+      },
+      amount2: {
+        value: Number(amount2).toFixed(2),
+        currency: "USD"
+      }
+    }
+  });
+
+  return response.body;
+}
+
 export async function createDwollaClientToken(body) {
   const response = await dwollaRequest("/client-tokens", {
     method: "POST",
@@ -225,27 +360,43 @@ export async function createDwollaClientToken(body) {
 
 export async function initiateDwollaAchTransfer({ depositId, sourceFundingSourceUrl, amount, notes }) {
   const config = assertDwollaConfigured();
+  const sourceUrl = validateDwollaFundingSourceUrl(
+    sourceFundingSourceUrl,
+    config,
+    "Dwolla source funding source URL"
+  );
+  const destinationUrl = validateDwollaFundingSourceUrl(
+    config.destinationFundingSourceUrl,
+    config,
+    "DWOLLA_COMPANY_FUNDING_SOURCE_URL"
+  );
   const amountValue = Number(amount).toFixed(2);
+  const metadata = {
+    depositId
+  };
+  const normalizedNotes = String(notes ?? "").trim().slice(0, 255);
+
+  if (normalizedNotes) {
+    metadata.notes = normalizedNotes;
+  }
+
   const response = await dwollaRequest("/transfers", {
     method: "POST",
     idempotencyKey: depositId,
     body: {
       _links: {
         source: {
-          href: sourceFundingSourceUrl
+          href: sourceUrl
         },
         destination: {
-          href: config.destinationFundingSourceUrl
+          href: destinationUrl
         }
       },
       amount: {
         currency: "USD",
         value: amountValue
       },
-      metadata: {
-        depositId,
-        notes: String(notes ?? "").slice(0, 255)
-      },
+      metadata,
       correlationId: depositId
     }
   });

@@ -5,7 +5,7 @@ import {
   LOGIN_PAGE_TITLE,
   app,
   state
-} from "./state.js?v=20260502-frontend-1";
+} from "./state.js?v=20260504-frontend-9";
 import {
   breakdownItem,
   escapeHtml,
@@ -21,7 +21,7 @@ import {
   renderSectionToggle,
   summaryItem,
   titleCase
-} from "./helpers.js?v=20260502-frontend-1";
+} from "./helpers.js?v=20260504-frontend-9";
 import {
   applyAllocationFilters,
   applyArchivedProjectFilters,
@@ -44,7 +44,7 @@ import {
   getInvestorProjectFilterOptions,
   getManagerEditableDeal,
   getUserFilterOptions
-} from "./data.js?v=20260502-frontend-1";
+} from "./data.js?v=20260504-frontend-9";
 
 function renderLogin() {
   const errorMarkup = state.loginError
@@ -261,6 +261,18 @@ function getRequiredLegalDocumentsForCurrentSession() {
     : [];
 }
 
+function isInvestorFundingAccount(category = state.session?.category) {
+  return ["investor", "pool_member"].includes(String(category ?? ""));
+}
+
+function getDwollaConfig() {
+  return (
+    state.session?.paymentIntegrations?.dwolla ??
+    state.dashboard?.paymentIntegrations?.dwolla ??
+    {}
+  );
+}
+
 function renderLegalDocumentSupplementFields(document) {
   const key = escapeHtml(document.key);
   const fields = [];
@@ -289,20 +301,6 @@ function renderLegalDocumentSupplementFields(document) {
           name="legalDeferredAmount:${key}"
           min="0.01"
           step="0.01"
-          required
-        />
-      </label>
-    `);
-  }
-
-  if (document.requiresPaymentProof) {
-    fields.push(`
-      <label>
-        Proof of payment
-        <input
-          type="file"
-          name="legalPaymentProof:${key}"
-          accept="image/*,.pdf"
           required
         />
       </label>
@@ -375,6 +373,74 @@ function renderLegalAcknowledgementFields({
           `
         )
         .join("")}
+    </div>
+  `;
+}
+
+function renderOnboardingAchFundingFields() {
+  if (!isInvestorFundingAccount()) {
+    return "";
+  }
+
+  const dwollaConfig = getDwollaConfig();
+
+  if (!dwollaConfig.enabled) {
+    return `
+      <div class="questionnaire-card">
+        <div>
+          <p class="eyebrow">ACH Account Funding</p>
+          <h3>Fund your account by ACH</h3>
+          <p class="section-copy">
+            ACH transfers are not enabled yet. The manager must finish Dwolla setup before profile funding can be started.
+          </p>
+        </div>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="questionnaire-card">
+      <div>
+        <p class="eyebrow">ACH Account Funding</p>
+        <h3>Fund your account by ACH</h3>
+        <p class="section-copy">
+          Use a bank transfer instead of uploading proof of payment. If bank verification is required, the transfer starts after micro-deposit verification.
+        </p>
+      </div>
+      <div class="form-grid-2">
+        <label>
+          Account nickname
+          <input type="text" name="achFundingSourceName" maxlength="50" autocomplete="off" required />
+        </label>
+        <label>
+          Account type
+          <select name="achBankAccountType" required>
+            <option value="">Select type</option>
+            <option value="checking">Checking</option>
+            <option value="savings">Savings</option>
+          </select>
+        </label>
+        <label>
+          Routing number
+          <input type="text" name="achRoutingNumber" inputmode="numeric" autocomplete="off" required />
+        </label>
+        <label>
+          Account number
+          <input type="password" name="achAccountNumber" inputmode="numeric" autocomplete="off" required />
+        </label>
+        <label>
+          Initial ACH funding amount
+          <input type="number" name="achAmount" min="0.01" step="0.01" required />
+        </label>
+      </div>
+      <label>
+        Notes
+        <textarea name="achNotes" rows="3" placeholder="Optional payment memo"></textarea>
+      </label>
+      <label class="checkbox-field">
+        I authorize this ACH debit from my bank account.
+        <input type="checkbox" name="achAuthorizationAccepted" required />
+      </label>
     </div>
   `;
 }
@@ -525,6 +591,7 @@ function renderIdentityReviewGate() {
           </label>
           ${renderInvestorQuestionnaireFields()}
           ${renderLegalAcknowledgementFields()}
+          ${renderOnboardingAchFundingFields()}
           <button class="button-primary" type="submit">Submit for review</button>
         </form>
       </section>
@@ -2413,6 +2480,10 @@ function renderDwollaAchPanel(account) {
   const hasCustomer = Boolean(dwolla.customerId);
   const hasFundingSource = Boolean(dwolla.fundingSourceId);
   const hasVerifiedFundingSource = dwolla.fundingSourceStatus === "verified";
+  const customerLabel =
+    dwolla.customerStatus === "unverified"
+      ? "Unverified customer"
+      : titleCase(dwolla.customerStatus || "Created");
   const bankLabel = [
     dwolla.fundingSourceBankName,
     dwolla.fundingSourceName,
@@ -2444,7 +2515,7 @@ function renderDwollaAchPanel(account) {
         hasCustomer
           ? `
             <div class="summary-grid">
-              ${summaryItem("Dwolla profile", titleCase(dwolla.customerStatus || "Created"))}
+              ${summaryItem("Dwolla customer", customerLabel)}
               ${summaryItem("Bank status", titleCase(dwolla.fundingSourceStatus || "Not linked"))}
               ${summaryItem("Linked bank", bankLabel || "No bank selected")}
             </div>
@@ -2470,23 +2541,41 @@ function renderDwollaAchPanel(account) {
                   </form>
                 `
                 : `
-                  <div class="dwolla-dropin-shell">
-                    ${
-                      hasFundingSource
-                        ? `
-                          <dwolla-micro-deposits-verify
-                            customerId="${escapeHtml(dwolla.customerId)}"
-                            fundingSourceId="${escapeHtml(dwolla.fundingSourceId)}"
-                          ></dwolla-micro-deposits-verify>
-                        `
-                        : `
-                          <dwolla-funding-source-create
-                            customerId="${escapeHtml(dwolla.customerId)}"
-                            initiateMicroDeposits
-                          ></dwolla-funding-source-create>
-                        `
-                    }
-                  </div>
+                  ${
+                    hasFundingSource
+                      ? `
+                        <p class="helper-copy">
+                          This bank is waiting for manager micro-deposit verification before ACH deposits can be started.
+                        </p>
+                      `
+                      : `
+                        <form id="dwolla-bank-link-form">
+                          <div class="form-grid-2">
+                            <label>
+                              Account nickname
+                              <input type="text" name="name" maxlength="50" autocomplete="off" required />
+                            </label>
+                            <label>
+                              Type
+                              <select name="bankAccountType" required>
+                                <option value="">Select type</option>
+                                <option value="checking">Checking</option>
+                                <option value="savings">Savings</option>
+                              </select>
+                            </label>
+                            <label>
+                              Routing number
+                              <input type="text" name="routingNumber" inputmode="numeric" autocomplete="off" required />
+                            </label>
+                            <label>
+                              Account number
+                              <input type="password" name="accountNumber" inputmode="numeric" autocomplete="off" required />
+                            </label>
+                          </div>
+                          <button class="button-primary" type="submit">Link bank account</button>
+                        </form>
+                      `
+                  }
                 `
             }
           `
@@ -2514,7 +2603,7 @@ function renderUserCapitalAccountPanel() {
     copy:
       isContractor
         ? "Choose where to request placement of your approved deferred contractor amount."
-        : "Choose where to request placement of approved account funds, or submit another deposit for review.",
+        : "Choose where to request placement of approved account funds, or start an ACH transfer.",
     message: renderMessage(state.messages.capital),
     body: `
       <div class="metrics-grid">
@@ -2531,7 +2620,7 @@ function renderUserCapitalAccountPanel() {
               ${metricCard("Available to request", formatCurrency(account.availableCapital || 0))}
               ${metricCard("Allocated to projects", formatCurrency(account.allocatedToProjects || 0))}
               ${metricCard("Committed to pools", formatCurrency(account.committedToPools || 0))}
-              ${metricCard("Pending deposit review", formatCurrency(account.pendingDepositAmount || 0))}
+              ${metricCard("Pending ACH transfers", formatCurrency(account.pendingDepositAmount || 0))}
               ${metricCard("Pending allocation requests", formatCurrency(account.pendingAllocationRequestAmount || 0))}
           `
         }
@@ -2613,29 +2702,6 @@ function renderUserCapitalAccountPanel() {
             </p>
           `
       }
-      ${
-        isContractor
-          ? ""
-          : `
-      <form id="capital-deposit-form">
-        <div class="form-grid-2">
-          <label>
-            Additional deposit amount
-            <input type="number" name="amount" min="0" step="0.01" required />
-          </label>
-          <label>
-            Proof of payment
-            <input type="file" name="proofFile" accept="application/pdf,image/*" required />
-          </label>
-        </div>
-        <label>
-          Notes
-          <textarea name="notes" rows="3" placeholder="Wire, check, Zelle, or reference details"></textarea>
-        </label>
-        <button class="button-primary" type="submit">Submit deposit for review</button>
-      </form>
-          `
-      }
       <div class="table-wrap">
         <table>
           <thead>
@@ -2701,7 +2767,7 @@ function renderUserCapitalAccountPanel() {
                       `
                     )
                     .join("")
-                : '<tr><td colspan="4">No additional account-funds deposits submitted yet.</td></tr>'
+                : '<tr><td colspan="4">No ACH account-funds transfers submitted yet.</td></tr>'
             }
           </tbody>
         </table>
@@ -3839,6 +3905,125 @@ function renderCreateUserPanel() {
   });
 }
 
+function renderManagerAchBankCell(account) {
+  const dwolla = account.dwolla ?? {};
+
+  if (!dwolla.customerId) {
+    return "No ACH profile";
+  }
+
+  const bankLabel = [
+    dwolla.fundingSourceBankName,
+    dwolla.fundingSourceName,
+    titleCase(dwolla.fundingSourceType)
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return `
+    <div class="cell-stack">
+      <strong>${escapeHtml(titleCase(dwolla.fundingSourceStatus || "Not linked"))}</strong>
+      <span>${escapeHtml(bankLabel || "No bank linked")}</span>
+    </div>
+  `;
+}
+
+function renderManagerAchVerificationCell(account) {
+  const dwolla = account.dwolla ?? {};
+
+  if (!dwolla.customerId) {
+    return "No ACH profile";
+  }
+
+  if (!dwolla.fundingSourceId) {
+    return "No bank linked";
+  }
+
+  if (dwolla.fundingSourceStatus === "verified") {
+    return '<span class="read-only-tag">Verified</span>';
+  }
+
+  if (!account.userId) {
+    return "Missing login account";
+  }
+
+  return `
+    <form data-admin-dwolla-micro-deposit-form="true" data-user-id="${escapeHtml(account.userId)}">
+      <div class="form-grid-2 compact-form-grid">
+        <label>
+          First
+          <input type="number" name="amount1" min="0" max="0.09" step="0.01" placeholder="0.03" required />
+        </label>
+        <label>
+          Second
+          <input type="number" name="amount2" min="0" max="0.09" step="0.01" placeholder="0.09" required />
+        </label>
+      </div>
+      <button class="button-primary button-inline" type="submit">Verify ACH</button>
+    </form>
+  `;
+}
+
+function renderManagerAchVerificationPanel(accounts) {
+  const pendingAchAccounts = accounts.filter((account) => {
+    const dwolla = account.dwolla ?? {};
+
+    return Boolean(dwolla.customerId && dwolla.fundingSourceId && dwolla.fundingSourceStatus !== "verified");
+  });
+
+  return `
+    <div class="account-subsection ach-verification-panel">
+      <div class="section-head">
+        <div>
+          <h4>ACH Bank Verification</h4>
+          <p class="section-copy">
+            Enter the two Dwolla micro-deposit amounts for investor bank accounts that are linked but not verified.
+          </p>
+        </div>
+      </div>
+      ${
+        pendingAchAccounts.length
+          ? `
+            <div class="ach-verification-grid">
+              ${pendingAchAccounts
+                .map((account) => {
+                  const dwolla = account.dwolla ?? {};
+                  const bankLabel = [
+                    dwolla.fundingSourceBankName,
+                    dwolla.fundingSourceName,
+                    titleCase(dwolla.fundingSourceType)
+                  ]
+                    .filter(Boolean)
+                    .join(" · ");
+
+                  return `
+                    <article class="ach-verification-card">
+                      <div class="section-head">
+                        <div>
+                          <h4>${escapeHtml(account.name)}</h4>
+                          <p class="meta-line">${escapeHtml(account.email || "No email")}</p>
+                        </div>
+                        <span class="read-only-tag">${escapeHtml(
+                          titleCase(dwolla.fundingSourceStatus || "Not linked")
+                        )}</span>
+                      </div>
+                      <div class="summary-grid">
+                        ${summaryItem("Linked bank", bankLabel || "No bank selected")}
+                        ${summaryItem("Category", titleCase(account.category))}
+                      </div>
+                      ${renderManagerAchVerificationCell(account)}
+                    </article>
+                  `;
+                })
+                .join("")}
+            </div>
+          `
+          : '<div class="empty-state">No ACH bank accounts are waiting for micro-deposit verification.</div>'
+      }
+    </div>
+  `;
+}
+
 function renderManagerCapitalFundsPanel() {
   const accounts = state.dashboard.admin.capitalAccounts ?? [];
   const deposits = state.dashboard.admin.capitalDeposits ?? [];
@@ -3848,124 +4033,91 @@ function renderManagerCapitalFundsPanel() {
     sectionId: "manager-account-funds",
     title: "User Account Funds",
     copy:
-      "Track cleared deposits that belong to a user account before the money is assigned to a project or pooled-capital group.",
+      "Track ACH deposits that belong to a user account before the money is assigned to a project or pooled-capital group.",
     message: renderMessage(state.messages.capital),
     body: `
-      <div class="admin-grid">
-        <form id="admin-capital-deposit-form" class="admin-card-inner">
-          <p class="eyebrow">Manager Control</p>
-          <label>
-            User account
-            <select name="participantId" required>
-              <option value="">Select user</option>
-              ${accounts
-                .map(
-                  (account) => `
-                    <option value="${escapeHtml(account.id)}">
-                      ${escapeHtml(
-                        `${account.name} · ${titleCase(account.category)} · available ${formatCurrency(
-                          account.availableCapital || 0
-                        )}`
-                      )}
-                    </option>
-                  `
-                )
-                .join("")}
-            </select>
-          </label>
-          <div class="form-grid-2">
-            <label>
-              Cleared deposit amount
-              <input type="number" name="amount" min="0" step="0.01" required />
-            </label>
-            <label>
-              Proof of payment
-              <input type="file" name="proofFile" accept="application/pdf,image/*" required />
-            </label>
-          </div>
-          <label>
-            Notes
-            <textarea name="notes" rows="3" placeholder="Payment reference or source details"></textarea>
-          </label>
-          <label>
-            Manager note
-            <textarea name="managerNotes" rows="3" placeholder="Internal verification note"></textarea>
-          </label>
-          <button class="button-primary" type="submit">Record approved funds</button>
-        </form>
+      ${renderManagerAchVerificationPanel(accounts)}
+      <div class="section-head">
         <div>
-          <div class="section-head">
-            <div>
-              <h4>Pending Deposit Requests</h4>
-              <p class="section-copy">Investor-submitted deposits become available only after approval.</p>
-            </div>
-          </div>
-          <div class="table-wrap">
-            <table>
-              <thead>
-                <tr>
-                  <th>User</th>
-                  <th>Amount</th>
-                  <th>Proof</th>
-                  <th>Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${
-                  pendingDeposits.length
-                    ? pendingDeposits
-                        .map(
-                          (deposit) => `
-                            <tr>
-                              <td>${escapeHtml(
-                                `${deposit.participantName} · ${deposit.userEmail || "No email"}`
-                              )}</td>
-                              <td>${escapeHtml(formatCurrency(deposit.amount))}</td>
-                              <td>
-                                ${
-                                  deposit.paymentMethod === "dwolla_ach"
-                                    ? `Dwolla ACH · ${escapeHtml(titleCase(deposit.providerTransferStatus || "pending"))}`
-                                    : deposit.hasProof
-                                    ? `
-                                      <a class="button-secondary button-inline" target="_blank" rel="noreferrer" href="/api/admin/capital-deposits/${encodeURIComponent(
-                                        deposit.id
-                                      )}/proof?view=1">View proof</a>
-                                      <a class="button-secondary button-inline" href="/api/admin/capital-deposits/${encodeURIComponent(
-                                        deposit.id
-                                      )}/proof" download="${escapeHtml(
-                                        deposit.proofFileName || "payment-proof"
-                                      )}">Download</a>
-                                    `
-                                    : "No proof"
-                                }
-                              </td>
-                              <td>
-                                ${
-                                  deposit.paymentMethod === "dwolla_ach"
-                                    ? '<span class="read-only-tag">Awaiting webhook</span>'
-                                    : `
-                                      <form data-capital-deposit-review-form="true" data-deposit-id="${escapeHtml(
-                                        deposit.id
-                                      )}">
-                                        <textarea name="managerNotes" rows="2" placeholder="Manager note"></textarea>
-                                        <div class="button-row">
-                                          <button class="button-primary button-inline" type="submit" name="decision" value="approved">Approve</button>
-                                          <button class="button-danger button-inline" type="submit" name="decision" value="rejected">Reject</button>
-                                        </div>
-                                      </form>
-                                    `
-                                }
-                              </td>
-                            </tr>
-                          `
-                        )
-                        .join("")
-                    : '<tr><td colspan="4">No pending account-funds deposits.</td></tr>'
-                }
-              </tbody>
-            </table>
-          </div>
+          <h4>Pending ACH Transfers</h4>
+          <p class="section-copy">Investor ACH deposits become available after Dwolla confirms processing.</p>
         </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>User</th>
+              <th>Amount</th>
+              <th>Source</th>
+              <th>Action</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${
+              pendingDeposits.length
+                ? pendingDeposits
+                    .map(
+                      (deposit) => `
+                        <tr>
+                          <td>${escapeHtml(
+                            `${deposit.participantName} · ${deposit.userEmail || "No email"}`
+                          )}</td>
+                          <td>${escapeHtml(formatCurrency(deposit.amount))}</td>
+                          <td>
+                            ${
+                              deposit.paymentMethod === "dwolla_ach"
+                                ? `Dwolla ACH · ${escapeHtml(
+                                    titleCase(
+                                      deposit.providerTransferStatus ||
+                                        (deposit.providerTransferId
+                                          ? "pending"
+                                          : "bank verification required")
+                                    )
+                                  )}`
+                                : deposit.hasProof
+                                ? `
+                                  <a class="button-secondary button-inline" target="_blank" rel="noreferrer" href="/api/admin/capital-deposits/${encodeURIComponent(
+                                    deposit.id
+                                  )}/proof?view=1">View proof</a>
+                                  <a class="button-secondary button-inline" href="/api/admin/capital-deposits/${encodeURIComponent(
+                                    deposit.id
+                                  )}/proof" download="${escapeHtml(
+                                    deposit.proofFileName || "payment-proof"
+                                  )}">Download</a>
+                                `
+                                : "No proof"
+                            }
+                          </td>
+                          <td>
+                            ${
+                              deposit.paymentMethod === "dwolla_ach"
+                                ? `<span class="read-only-tag">${
+                                    deposit.providerTransferId
+                                      ? "Awaiting webhook"
+                                      : "Bank verification"
+                                  }</span>`
+                                : `
+                                  <form data-capital-deposit-review-form="true" data-deposit-id="${escapeHtml(
+                                    deposit.id
+                                  )}">
+                                    <textarea name="managerNotes" rows="2" placeholder="Manager note"></textarea>
+                                    <div class="button-row">
+                                      <button class="button-primary button-inline" type="submit" name="decision" value="approved">Approve</button>
+                                      <button class="button-danger button-inline" type="submit" name="decision" value="rejected">Reject</button>
+                                    </div>
+                                  </form>
+                                `
+                            }
+                          </td>
+                        </tr>
+                      `
+                    )
+                    .join("")
+                : '<tr><td colspan="4">No pending ACH transfers.</td></tr>'
+            }
+          </tbody>
+        </table>
       </div>
       <div class="table-wrap">
         <table>
@@ -3978,6 +4130,8 @@ function renderManagerCapitalFundsPanel() {
               <th>Pool commitments</th>
               <th>Available</th>
               <th>Pending</th>
+              <th>ACH bank</th>
+              <th>ACH verification</th>
               <th>Latest proof</th>
             </tr>
           </thead>
@@ -3995,6 +4149,8 @@ function renderManagerCapitalFundsPanel() {
                           <td>${escapeHtml(formatCurrency(account.committedToPools || 0))}</td>
                           <td>${escapeHtml(formatCurrency(account.availableCapital || 0))}</td>
                           <td>${escapeHtml(formatCurrency(account.pendingDepositAmount || 0))}</td>
+                          <td>${renderManagerAchBankCell(account)}</td>
+                          <td>${renderManagerAchVerificationCell(account)}</td>
                           <td>
                             ${
                               account.latestApprovedDepositId
@@ -4016,7 +4172,7 @@ function renderManagerCapitalFundsPanel() {
                       `
                     )
                     .join("")
-                : '<tr><td colspan="8">No investor or pooled-member account funds recorded yet.</td></tr>'
+                : '<tr><td colspan="10">No investor or pooled-member account funds recorded yet.</td></tr>'
             }
           </tbody>
         </table>
@@ -5671,10 +5827,6 @@ function getLegalReviewIssuesForUser(row) {
       issues.push(`${document.title} investment amount`);
     }
 
-    if (document.requiresPaymentProof && !acknowledgement.proofOfPaymentFileName) {
-      issues.push(`${document.title} proof of payment`);
-    }
-
     if (document.requiresDeferredAmount && !(Number(acknowledgement.deferredAmount) > 0)) {
       issues.push(`${document.title} deferred amount`);
     }
@@ -6165,7 +6317,7 @@ function renderDocumentAcknowledgementsSection() {
     sectionId: "manager-document-acknowledgements",
     title: "Document Acknowledgements",
     copy:
-      "Review signed legal documents, proof uploads, and ID files without crowding the user directory.",
+      "Review signed legal documents, funding amounts, and ID files without crowding the user directory.",
     body: `
       <div class="metrics-grid">
         ${metricCard("Users with acknowledgements", String(rows.length))}
@@ -6740,6 +6892,14 @@ function renderNotificationPanel(notificationCenter) {
               : "No unread alerts"
           )}</h4>
         </div>
+        <button
+          class="button-secondary button-inline"
+          type="button"
+          data-notification-action="clear-read"
+          ${notifications.length ? "" : "disabled"}
+        >
+          Clear old
+        </button>
       </div>
       ${
         managerCounts
@@ -6788,7 +6948,7 @@ function renderNotificationPanel(notificationCenter) {
             : '<div class="empty-state compact-empty-state">No email notifications have been recorded yet.</div>'
         }
       </div>
-      <p class="helper-copy">Unread email notices are marked read when this panel opens.</p>
+      <p class="helper-copy">Unread email notices are marked read when this panel opens. Clear old hides read notices from this list.</p>
     </div>
   `;
 }
@@ -7518,82 +7678,29 @@ function renderLoading() {
   `;
 }
 
-function configureDwollaDropInsAfterRender() {
-  const dwollaConfig = state.dashboard?.paymentIntegrations?.dwolla ?? {};
-  const hasDwollaElement = Boolean(
-    document.querySelector("dwolla-funding-source-create, dwolla-micro-deposits-verify")
-  );
-
-  if (!dwollaConfig.enabled || !hasDwollaElement) {
-    return;
-  }
-
-  if (!window.dwolla) {
-    window.__njinkoDwollaRetryCount = Number(window.__njinkoDwollaRetryCount ?? 0) + 1;
-
-    if (window.__njinkoDwollaRetryCount <= 20) {
-      window.setTimeout(configureDwollaDropInsAfterRender, 250);
-    }
-
-    return;
-  }
-
-  window.__njinkoDwollaRetryCount = 0;
-  const configurationKey = `${dwollaConfig.environment}:investor-ach`;
-
-  if (window.__njinkoDwollaConfigurationKey === configurationKey) {
-    return;
-  }
-
-  window.dwolla.configure({
-    environment: dwollaConfig.environment,
-    tokenUrl: "/api/payments/dwolla/client-token",
-    success: () => {
-      document.dispatchEvent(new CustomEvent("njinko:dwolla-success"));
-      return Promise.resolve();
-    },
-    error: (error) => {
-      document.dispatchEvent(new CustomEvent("njinko:dwolla-error", { detail: error }));
-      return Promise.resolve();
-    }
-  });
-  window.__njinkoDwollaConfigurationKey = configurationKey;
-}
-
-function schedulePostRenderWork() {
-  window.queueMicrotask(() => {
-    configureDwollaDropInsAfterRender();
-  });
-}
-
 export function render() {
   if (state.loading) {
     app.innerHTML = renderLoading();
-    schedulePostRenderWork();
     return;
   }
 
   if (!state.session) {
     app.innerHTML = renderLogin();
-    schedulePostRenderWork();
     return;
   }
 
   if (state.session.mustChangePassword) {
     app.innerHTML = renderPasswordResetGate();
-    schedulePostRenderWork();
     return;
   }
 
   if (requiresIdentityGate(state.session)) {
     app.innerHTML = renderIdentityReviewGate();
-    schedulePostRenderWork();
     return;
   }
 
   if (requiresLegalAcknowledgementGate(state.session)) {
     app.innerHTML = renderLegalAcknowledgementGate();
-    schedulePostRenderWork();
     return;
   }
 
@@ -7603,5 +7710,4 @@ export function render() {
       : state.dashboard?.viewer?.category === "pool_member"
         ? renderPoolMemberDashboard()
         : renderInvestorDashboard();
-  schedulePostRenderWork();
 }

@@ -1038,6 +1038,7 @@ function buildNotificationCenter(user, data = seedData) {
   ];
   const items = (data.emailNotifications ?? [])
     .filter((notification) => notification.userId === user.id)
+    .filter((notification) => !notification.clearedAt)
     .filter(
       (notification) =>
         user.role !== "manager" ||
@@ -1062,6 +1063,7 @@ function buildNotificationCenter(user, data = seedData) {
         createdAt: notification.createdAt ?? null,
         sentAt: notification.sentAt ?? null,
         readAt: notification.readAt ?? null,
+        clearedAt: notification.clearedAt ?? null,
         isUnread: !notification.readAt
       };
     })
@@ -3418,6 +3420,7 @@ export function buildManagerDashboard(user, data = seedData) {
         name: participant.name,
         category: participant.category,
         hasUser: Boolean(linkedUser),
+        userId: linkedUser?.id ?? null,
         email: linkedUser?.email ?? null,
         dwolla: buildDwollaAccountPayload(linkedUser),
         contactPhone: participant.contactPhone ?? "",

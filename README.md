@@ -148,5 +148,5 @@ New PDFs are discovered automatically from those folders. Dynamically discovered
 
 # I also added inference for special fields:
 
-Files with subscription and agreement in the name require investment amount and proof of payment during onboarding.
+Files with subscription and agreement in the name require an investment amount during onboarding. Investor account funding now uses ACH transfer setup instead of proof-of-payment uploads.
 Contractor equity/election files require deferred amount during onboarding.

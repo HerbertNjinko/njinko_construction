@@ -565,6 +565,37 @@ button:disabled {
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 }
 
+.compact-form-grid {
+  gap: 0.55rem;
+  grid-template-columns: repeat(2, minmax(80px, 1fr));
+}
+
+.cell-stack {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 11rem;
+}
+
+.cell-stack span {
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.ach-verification-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.ach-verification-card {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.54);
+}
+
 .filter-grid-4 {
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 }

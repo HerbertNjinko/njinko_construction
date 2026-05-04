@@ -1,4 +1,4 @@
-import { state } from "./state.js?v=20260502-frontend-1";
+import { state } from "./state.js?v=20260504-frontend-9";
 import {
   clearAuthFeedback,
   clearMessages,
@@ -14,7 +14,7 @@ import {
   setMessage,
   titleCase,
   toggleSectionCollapsed
-} from "./helpers.js?v=20260502-frontend-1";
+} from "./helpers.js?v=20260504-frontend-9";
 import {
   applyArchivedProjectFilters,
   applyQuestionnaireFilters,
@@ -30,7 +30,7 @@ import {
   syncDealEditorField,
   updateCreateDealDraft,
   updateDealEditorDraft
-} from "./data.js?v=20260502-frontend-1";
+} from "./data.js?v=20260504-frontend-9";
 import {
   api,
   applyLoggedOutState,
@@ -38,8 +38,8 @@ import {
   loadSession,
   recordSessionActivity,
   refreshDashboard
-} from "./session.js?v=20260502-frontend-1";
-import { render } from "./renderers.js?v=20260502-frontend-1";
+} from "./session.js?v=20260504-frontend-9";
+import { render } from "./renderers.js?v=20260504-frontend-9";
 
 let listenersBound = false;
 
@@ -74,6 +74,41 @@ function syncEnrollmentAmountSelection(selectElement, amountFieldName) {
   }
 
   amountInput.value = suggestedAmount > 0 ? String(suggestedAmount) : "";
+}
+
+function canSubmitOnboardingAchFunding() {
+  const dwollaConfig = state.session?.paymentIntegrations?.dwolla ?? {};
+  const category = String(state.session?.category ?? "");
+
+  return dwollaConfig.enabled && ["investor", "pool_member"].includes(category);
+}
+
+function buildOnboardingAchFundingPayload(formData) {
+  if (!canSubmitOnboardingAchFunding()) {
+    return null;
+  }
+
+  return {
+    name: formData.get("achFundingSourceName"),
+    bankAccountType: formData.get("achBankAccountType"),
+    routingNumber: formData.get("achRoutingNumber"),
+    accountNumber: formData.get("achAccountNumber"),
+    amount: Number(formData.get("achAmount")),
+    authorizationAccepted: formData.get("achAuthorizationAccepted") === "on",
+    notes: formData.get("achNotes")
+  };
+}
+
+function getIdentitySubmissionMessage(achFunding) {
+  if (achFunding?.status === "transfer_started") {
+    return "Identity information submitted and ACH transfer started. You will receive an email after manager review.";
+  }
+
+  if (achFunding?.status === "bank_verification_required") {
+    return "Identity information submitted and ACH bank setup started. The transfer will start after bank verification.";
+  }
+
+  return "Identity information submitted. You will receive an email after manager review.";
 }
 
 function buildArchivedProjectsCsv(archivedProjects = []) {
@@ -296,30 +331,6 @@ export function setupEventListeners() {
 
   listenersBound = true;
 
-  document.addEventListener("njinko:dwolla-success", async () => {
-    try {
-      await api("/api/payments/dwolla/funding-sources/refresh", {
-        method: "POST",
-        body: JSON.stringify({})
-      });
-      await refreshDashboard();
-      setMessage("capital", "success", "Dwolla ACH bank status refreshed.");
-    } catch (error) {
-      setMessage("capital", "error", error.message);
-    }
-
-    render();
-  });
-
-  document.addEventListener("njinko:dwolla-error", (event) => {
-    setMessage(
-      "capital",
-      "error",
-      event.detail?.message ?? "Dwolla ACH setup could not be completed."
-    );
-    render();
-  });
-
   document.addEventListener("submit", async (event) => {
     if (event.target.id === "login-form") {
       event.preventDefault();
@@ -449,22 +460,14 @@ export function setupEventListeners() {
         const requiredLegalDocuments = Array.isArray(state.session?.requiredLegalDocuments)
           ? state.session.requiredLegalDocuments
           : [];
-        const legalAcknowledgements = await Promise.all(
-          requiredLegalDocuments.map(async (document) => {
-            const proofInput = event.target.elements[`legalPaymentProof:${document.key}`];
-            const proofOfPaymentFile = await readFileAsPayload(proofInput?.files?.[0]);
-
-            return {
-              documentKey: document.key,
-              documentVersion: document.version,
-              accepted: formData.get(`legalAck:${document.key}`) === "on",
-              signerName: formData.get(`legalSigner:${document.key}`),
-              investmentAmount: formData.get(`legalInvestmentAmount:${document.key}`),
-              deferredAmount: formData.get(`legalDeferredAmount:${document.key}`),
-              proofOfPaymentFile
-            };
-          })
-        );
+        const legalAcknowledgements = requiredLegalDocuments.map((document) => ({
+          documentKey: document.key,
+          documentVersion: document.version,
+          accepted: formData.get(`legalAck:${document.key}`) === "on",
+          signerName: formData.get(`legalSigner:${document.key}`),
+          investmentAmount: formData.get(`legalInvestmentAmount:${document.key}`),
+          deferredAmount: formData.get(`legalDeferredAmount:${document.key}`)
+        }));
         const result = await api("/api/profile/identity-review", {
           method: "POST",
           body: JSON.stringify({
@@ -487,15 +490,12 @@ export function setupEventListeners() {
                   investmentExperience: formData.get("questionnaireInvestmentExperience")
                 }
               : null,
-            legalAcknowledgements
+            legalAcknowledgements,
+            achFunding: buildOnboardingAchFundingPayload(formData)
           })
         });
         state.session = result.user;
-        setMessage(
-          "identity",
-          "success",
-          "Identity information submitted. You will receive an email after manager review."
-        );
+        setMessage("identity", "success", getIdentitySubmissionMessage(result.achFunding));
         render();
       } catch (error) {
         setMessage("identity", "error", error.message);
@@ -1077,6 +1077,37 @@ export function setupEventListeners() {
       return;
     }
 
+    if (event.target.id === "dwolla-bank-link-form") {
+      event.preventDefault();
+      const formData = new FormData(event.target);
+
+      try {
+        const result = await api("/api/payments/dwolla/funding-sources", {
+          method: "POST",
+          body: JSON.stringify({
+            name: formData.get("name"),
+            bankAccountType: formData.get("bankAccountType"),
+            routingNumber: formData.get("routingNumber"),
+            accountNumber: formData.get("accountNumber")
+          })
+        });
+        await refreshDashboard();
+        setMessage(
+          "capital",
+          "success",
+          result.microDepositsInitiated
+            ? "Bank linked. Dwolla micro-deposits have been initiated for verification."
+            : "Bank linked. Refresh ACH status before verifying micro-deposits."
+        );
+        event.target.reset();
+      } catch (error) {
+        setMessage("capital", "error", error.message);
+      }
+
+      render();
+      return;
+    }
+
     if (event.target.id === "allocation-request-form") {
       event.preventDefault();
       const formData = new FormData(event.target);
@@ -1094,37 +1125,6 @@ export function setupEventListeners() {
         });
         await refreshDashboard();
         setMessage("capital", "success", "Allocation request submitted for manager review.");
-        event.target.reset();
-      } catch (error) {
-        setMessage("capital", "error", error.message);
-      }
-
-      render();
-      return;
-    }
-
-    if (event.target.id === "admin-capital-deposit-form") {
-      event.preventDefault();
-      const formData = new FormData(event.target);
-
-      try {
-        const proofFile = await readFileAsPayload(event.target.elements.proofFile.files[0]);
-        const result = await api("/api/admin/capital-deposits", {
-          method: "POST",
-          body: JSON.stringify({
-            participantId: formData.get("participantId"),
-            amount: Number(formData.get("amount")),
-            proofFile,
-            notes: formData.get("notes"),
-            managerNotes: formData.get("managerNotes")
-          })
-        });
-        await refreshDashboard();
-        setMessage(
-          "capital",
-          "success",
-          `Approved account funds recorded. ${formatNotificationStatus(result.notification)}`
-        );
         event.target.reset();
       } catch (error) {
         setMessage("capital", "error", error.message);
@@ -1162,6 +1162,45 @@ export function setupEventListeners() {
             result.notification
           )}`
         );
+      } catch (error) {
+        setMessage("capital", "error", error.message);
+      }
+
+      render();
+      return;
+    }
+
+    if (event.target.dataset.adminDwollaMicroDepositForm === "true") {
+      event.preventDefault();
+      const formData = new FormData(event.target);
+      const userId = String(event.target.dataset.userId ?? "");
+
+      if (!userId) {
+        setMessage("capital", "error", "A valid user account is required.");
+        render();
+        return;
+      }
+
+      try {
+        const result = await api(`/api/admin/users/${encodeURIComponent(userId)}/dwolla/micro-deposits/verify`, {
+          method: "POST",
+          body: JSON.stringify({
+            amount1: Number(formData.get("amount1")),
+            amount2: Number(formData.get("amount2"))
+          })
+        });
+        await refreshDashboard();
+        const startedCount = result.startedDeposits?.length ?? 0;
+        setMessage(
+          "capital",
+          "success",
+          startedCount
+            ? `Dwolla ACH bank account verified. Started ${startedCount} pending ACH transfer${
+                startedCount === 1 ? "" : "s"
+              }.`
+            : "Dwolla ACH bank account verified."
+        );
+        event.target.reset();
       } catch (error) {
         setMessage("capital", "error", error.message);
       }
@@ -1588,6 +1627,24 @@ export function setupEventListeners() {
       return;
     }
 
+    const notificationClearButton = event.target.closest("[data-notification-action='clear-read']");
+
+    if (notificationClearButton) {
+      try {
+        await api("/api/notifications/clear", {
+          method: "POST",
+          body: JSON.stringify({})
+        });
+        await refreshDashboard();
+        state.notificationPanelOpen = true;
+      } catch (error) {
+        setMessage("profile", "error", error.message);
+      }
+
+      render();
+      return;
+    }
+
     const accountDetailsButton = event.target.closest("#account-details-button");
 
     if (accountDetailsButton) {
@@ -1624,7 +1681,7 @@ export function setupEventListeners() {
           body: JSON.stringify({})
         });
         await refreshDashboard();
-        setMessage("capital", "success", "Dwolla ACH bank status refreshed.");
+        setMessage("capital", "success", "Dwolla ACH bank and deposit status refreshed.");
       } catch (error) {
         setMessage("capital", "error", error.message);
       }

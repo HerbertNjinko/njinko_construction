@@ -421,6 +421,8 @@ CREATE TABLE IF NOT EXISTS email_notifications (
   error_message TEXT,
   created_at TEXT NOT NULL,
   sent_at TEXT,
+  read_at TEXT,
+  cleared_at TEXT,
   FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
   FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE
 );
@@ -551,6 +553,8 @@ CREATE INDEX IF NOT EXISTS idx_contractor_deal_id ON contractor_participation(de
 CREATE INDEX IF NOT EXISTS idx_timeline_deal_id ON deal_timeline_items(deal_id);
 CREATE INDEX IF NOT EXISTS idx_promote_tiers_deal_id ON promote_tiers(deal_id);
 CREATE INDEX IF NOT EXISTS idx_email_notifications_user_id ON email_notifications(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_email_notifications_user_unread ON email_notifications(user_id, read_at, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_email_notifications_user_visible ON email_notifications(user_id, cleared_at, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_company_resources_published_at
   ON company_resources(published_at DESC, created_at DESC);
 

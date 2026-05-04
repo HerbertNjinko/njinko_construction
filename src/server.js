@@ -12,6 +12,7 @@ import {
   castDealIssueVote,
   castInvestorPoolVote,
   castProjectPoolVote,
+  clearUserNotifications,
   createCapitalDepositForParticipant,
   createCompanyResource,
   createDeal,
@@ -35,6 +36,7 @@ import {
   getUserDocumentAcknowledgementReport,
   isInvestorQuestionnaireRequired,
   createDwollaClientTokenForUser,
+  createDwollaFundingSourceForUser,
   ensureDwollaCustomerForUser,
   getUserByEmail,
   getUserById,
@@ -48,12 +50,13 @@ import {
   reviewUserIdentity,
   processDwollaWebhook,
   refreshDwollaFundingSourcesForUser,
+  syncDwollaAchDepositStatusesForUser,
+  verifyDwollaMicroDepositsForUser,
   resetPasswordWithToken,
   setUserAccountActive,
   submitIdentityReview,
   submitAllocationRequest,
   submitDwollaAchDepositRequest,
-  submitCapitalDepositRequest,
   submitRequiredLegalAcknowledgements,
   updateUserCategory,
   upsertInvestorPoolCommitment,
@@ -947,7 +950,10 @@ async function stripUserSecrets(user) {
     requiredLegalDocuments: getRequiredLegalDocumentsForCategory(user.category),
     pendingLegalDocuments,
     hasPendingLegalAcknowledgements: pendingLegalDocuments.length > 0,
-    requiresInvestorQuestionnaire: isInvestorQuestionnaireRequired(user.category)
+    requiresInvestorQuestionnaire: isInvestorQuestionnaireRequired(user.category),
+    paymentIntegrations: {
+      dwolla: getDwollaPublicConfig()
+    }
   };
 }
 
@@ -975,6 +981,9 @@ const server = createServer(async (request, response) => {
     );
     const legalPaymentProofMatch = url.pathname.match(
       /^\/api\/admin\/legal-acknowledgements\/([^/]+)\/proof$/
+    );
+    const adminDwollaMicroDepositsMatch = url.pathname.match(
+      /^\/api\/admin\/users\/([^/]+)\/dwolla\/micro-deposits\/verify$/
     );
     const capitalDepositProofMatch = url.pathname.match(
       /^\/api\/admin\/capital-deposits\/([^/]+)\/proof$/
@@ -1144,6 +1153,23 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    if (method === "POST" && url.pathname === "/api/notifications/clear") {
+      const user = await requireUser(request, response);
+
+      if (!user) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+      const result = await clearUserNotifications(
+        user.id,
+        Array.isArray(body?.notificationIds) ? body.notificationIds : []
+      );
+
+      sendJson(response, 200, result);
+      return;
+    }
+
     if (method === "GET" && url.pathname === "/api/session") {
       const { user, expired } = await getCurrentUser(request);
       sendJson(
@@ -1174,6 +1200,12 @@ const server = createServer(async (request, response) => {
 
       if (!user) {
         return;
+      }
+
+      if (user.role !== "manager") {
+        try {
+          await syncDwollaAchDepositStatusesForUser(user.id);
+        } catch {}
       }
 
       const snapshot = await getAppDataSnapshot();
@@ -1410,8 +1442,13 @@ const server = createServer(async (request, response) => {
       }
 
       try {
-        const updatedUser = await submitIdentityReview(user.id, body);
-        sendJson(response, 200, { user: await stripUserSecrets(updatedUser) });
+        const result = await submitIdentityReview(user.id, body, {
+          ipAddress: getClientAddress(request)
+        });
+        sendJson(response, 200, {
+          user: await stripUserSecrets(result.user),
+          achFunding: result.achFunding
+        });
       } catch (error) {
         sendJson(response, 400, { error: error.message });
       }
@@ -1560,20 +1597,9 @@ const server = createServer(async (request, response) => {
         return;
       }
 
-      const body = await readJsonBody(request);
-
-      if (!body) {
-        sendJson(response, 400, { error: "A valid request body is required." });
-        return;
-      }
-
-      try {
-        const result = await submitCapitalDepositRequest(user.id, body);
-        sendJson(response, 201, result);
-      } catch (error) {
-        sendJson(response, 400, { error: error.message });
-      }
-
+      sendJson(response, 410, {
+        error: "Manual proof-of-payment deposits have been replaced by ACH transfers."
+      });
       return;
     }
 
@@ -1628,12 +1654,55 @@ const server = createServer(async (request, response) => {
       }
 
       try {
-        const result = await refreshDwollaFundingSourcesForUser(user.id);
-        sendJson(response, 200, result);
+        const fundingSources = await refreshDwollaFundingSourcesForUser(user.id);
+        const deposits = await syncDwollaAchDepositStatusesForUser(user.id);
+        sendJson(response, 200, {
+          ...fundingSources,
+          deposits
+        });
       } catch (error) {
         sendJson(response, 400, { error: error.message });
       }
 
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/payments/dwolla/funding-sources") {
+      const user = await requireUnlockedUser(request, response);
+
+      if (!user) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const result = await createDwollaFundingSourceForUser(user.id, body, {
+          ipAddress: getClientAddress(request)
+        });
+        sendJson(response, 201, result);
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/payments/dwolla/micro-deposits/verify") {
+      const user = await requireUnlockedUser(request, response);
+
+      if (!user) {
+        return;
+      }
+
+      sendJson(response, 403, {
+        error: "Manager verification is required for Dwolla ACH micro-deposits."
+      });
       return;
     }
 
@@ -2178,6 +2247,33 @@ const server = createServer(async (request, response) => {
         response.end(decoded.buffer);
       } catch (error) {
         sendJson(response, 404, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "POST" && adminDwollaMicroDepositsMatch) {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const result = await verifyDwollaMicroDepositsForUser(
+          decodeURIComponent(adminDwollaMicroDepositsMatch[1]),
+          body
+        );
+        sendJson(response, 200, result);
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
       }
 
       return;
