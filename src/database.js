@@ -12,6 +12,7 @@ import {
   getDwollaPublicConfig,
   initiateDwollaMicroDeposits,
   initiateDwollaAchTransfer,
+  initiateDwollaPayoutTransfer,
   listDwollaFundingSources,
   retrieveDwollaResource,
   verifyDwollaMicroDeposits,
@@ -56,6 +57,8 @@ const PAYMENT_PROOF_UPLOAD_MAX_BYTES = readPositiveIntegerEnv(
   10 * 1024 * 1024
 );
 const DEFAULT_EARLY_WITHDRAWAL_PENALTY_RATE = 0.3;
+const DWOLLA_UNVERIFIED_WEEKLY_SEND_LIMIT = 5000;
+const DWOLLA_VERIFIED_DEFAULT_TRANSFER_LIMIT = 10000;
 const DISTRIBUTION_ELECTION_DEADLINE_DAYS = readPositiveIntegerEnv(
   "DISTRIBUTION_ELECTION_DEADLINE_DAYS",
   14
@@ -1360,6 +1363,40 @@ function mapCapitalDepositRow(row) {
   };
 }
 
+function mapUserAccountPayoutRow(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    userId: row.userId,
+    participantId: row.participantId,
+    participantName: row.participantName ?? "",
+    userEmail: row.userEmail ?? "",
+    category: row.category ?? "",
+    dealId: row.dealId ?? null,
+    dealName: row.dealName ?? "",
+    sourceType: row.sourceType,
+    sourceId: row.sourceId ?? null,
+    amount: Number(row.amount ?? 0),
+    status: row.status,
+    providerName: row.providerName ?? "",
+    providerTransferId: row.providerTransferId ?? "",
+    providerTransferUrl: row.providerTransferUrl ?? "",
+    providerTransferStatus: row.providerTransferStatus ?? "",
+    providerCorrelationId: row.providerCorrelationId ?? "",
+    providerFailureReason: row.providerFailureReason ?? "",
+    notes: row.notes ?? "",
+    managerNotes: row.managerNotes ?? "",
+    requestedByUserId: row.requestedByUserId ?? null,
+    approvedByUserId: row.approvedByUserId ?? null,
+    paidAt: row.paidAt ?? null,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  };
+}
+
 function mapAllocationRequestRow(row) {
   if (!row) {
     return null;
@@ -2357,6 +2394,41 @@ export async function getAppDataSnapshot({ skipAutomation = false } = {}) {
       ORDER BY user_capital_deposits.created_at DESC, user_capital_deposits.id
     `
   )).map((row) => mapCapitalDepositRow(row));
+  const userAccountPayouts = (await queryAll(
+    `
+      SELECT
+        user_account_payouts.id AS id,
+        user_account_payouts.user_id AS "userId",
+        user_account_payouts.participant_id AS "participantId",
+        participants.name AS "participantName",
+        participants.category AS category,
+        users.email AS "userEmail",
+        user_account_payouts.deal_id AS "dealId",
+        deals.name AS "dealName",
+        user_account_payouts.source_type AS "sourceType",
+        user_account_payouts.source_id AS "sourceId",
+        user_account_payouts.amount AS amount,
+        user_account_payouts.status AS status,
+        user_account_payouts.provider_name AS "providerName",
+        user_account_payouts.provider_transfer_id AS "providerTransferId",
+        user_account_payouts.provider_transfer_url AS "providerTransferUrl",
+        user_account_payouts.provider_transfer_status AS "providerTransferStatus",
+        user_account_payouts.provider_correlation_id AS "providerCorrelationId",
+        user_account_payouts.provider_failure_reason AS "providerFailureReason",
+        user_account_payouts.notes AS notes,
+        user_account_payouts.manager_notes AS "managerNotes",
+        user_account_payouts.requested_by_user_id AS "requestedByUserId",
+        user_account_payouts.approved_by_user_id AS "approvedByUserId",
+        user_account_payouts.paid_at AS "paidAt",
+        user_account_payouts.created_at AS "createdAt",
+        user_account_payouts.updated_at AS "updatedAt"
+      FROM user_account_payouts
+      JOIN participants ON participants.id = user_account_payouts.participant_id
+      JOIN users ON users.id = user_account_payouts.user_id
+      LEFT JOIN deals ON deals.id = user_account_payouts.deal_id
+      ORDER BY user_account_payouts.created_at DESC, user_account_payouts.id
+    `
+  )).map((row) => mapUserAccountPayoutRow(row));
   const userAllocationRequests = (await queryAll(
     `
       SELECT
@@ -2877,6 +2949,7 @@ export async function getAppDataSnapshot({ skipAutomation = false } = {}) {
     users,
     userLegalAcknowledgements,
     userCapitalDeposits,
+    userAccountPayouts,
     userAllocationRequests,
     investorQuestionnaires,
     deals,
@@ -6089,6 +6162,54 @@ async function getCapitalDepositById(depositId, executor = pool) {
   return mapCapitalDepositRow(row);
 }
 
+async function getUserAccountPayoutById(payoutId, executor = pool) {
+  const normalizedPayoutId = String(payoutId ?? "").trim();
+
+  if (!normalizedPayoutId) {
+    return null;
+  }
+
+  const row = await queryOne(
+    `
+      SELECT
+        user_account_payouts.id AS id,
+        user_account_payouts.user_id AS "userId",
+        user_account_payouts.participant_id AS "participantId",
+        participants.name AS "participantName",
+        participants.category AS category,
+        users.email AS "userEmail",
+        user_account_payouts.deal_id AS "dealId",
+        deals.name AS "dealName",
+        user_account_payouts.source_type AS "sourceType",
+        user_account_payouts.source_id AS "sourceId",
+        user_account_payouts.amount AS amount,
+        user_account_payouts.status AS status,
+        user_account_payouts.provider_name AS "providerName",
+        user_account_payouts.provider_transfer_id AS "providerTransferId",
+        user_account_payouts.provider_transfer_url AS "providerTransferUrl",
+        user_account_payouts.provider_transfer_status AS "providerTransferStatus",
+        user_account_payouts.provider_correlation_id AS "providerCorrelationId",
+        user_account_payouts.provider_failure_reason AS "providerFailureReason",
+        user_account_payouts.notes AS notes,
+        user_account_payouts.manager_notes AS "managerNotes",
+        user_account_payouts.requested_by_user_id AS "requestedByUserId",
+        user_account_payouts.approved_by_user_id AS "approvedByUserId",
+        user_account_payouts.paid_at AS "paidAt",
+        user_account_payouts.created_at AS "createdAt",
+        user_account_payouts.updated_at AS "updatedAt"
+      FROM user_account_payouts
+      JOIN participants ON participants.id = user_account_payouts.participant_id
+      JOIN users ON users.id = user_account_payouts.user_id
+      LEFT JOIN deals ON deals.id = user_account_payouts.deal_id
+      WHERE user_account_payouts.id = $1
+    `,
+    [normalizedPayoutId],
+    executor
+  );
+
+  return mapUserAccountPayoutRow(row);
+}
+
 async function getCapitalAccountParticipant(participantId, executor = pool) {
   return queryOne(
     `
@@ -6110,6 +6231,24 @@ async function getCapitalAccountParticipant(participantId, executor = pool) {
 
 function extractDwollaIdFromUrl(url) {
   return String(url ?? "").split("/").filter(Boolean).at(-1) ?? "";
+}
+
+function normalizeDwollaCustomer(customer, fallbackUrl = "") {
+  if (!customer || typeof customer !== "object") {
+    return null;
+  }
+
+  const customerUrl = customer._links?.self?.href ?? fallbackUrl;
+
+  if (!customerUrl) {
+    return null;
+  }
+
+  return {
+    customerId: customer.id ?? extractDwollaIdFromUrl(customerUrl),
+    customerUrl,
+    customerStatus: customer.status ?? ""
+  };
 }
 
 function normalizeDwollaFundingSource(fundingSource) {
@@ -6194,6 +6333,72 @@ function normalizeDwollaMicroDepositAmount(value, fieldLabel) {
   return amount;
 }
 
+function getDwollaKnownSendLimitForUser(user) {
+  return user?.dwollaCustomerStatus === "verified"
+    ? DWOLLA_VERIFIED_DEFAULT_TRANSFER_LIMIT
+    : DWOLLA_UNVERIFIED_WEEKLY_SEND_LIMIT;
+}
+
+function assertDwollaTransferAmountWithinKnownLimit(user, amount) {
+  const limit = getDwollaKnownSendLimitForUser(user);
+  const normalizedAmount = roundNumber(Number(amount ?? 0));
+
+  if (normalizedAmount <= limit) {
+    return;
+  }
+
+  if (user?.dwollaCustomerStatus === "verified") {
+    throw new Error(
+      `Dwolla's default verified customer transfer limit is $${limit.toLocaleString(
+        "en-US"
+      )} per transfer. Start multiple smaller ACH transfers or ask Dwolla to increase the limit.`
+    );
+  }
+
+  throw new Error(
+    `Dwolla's unverified customer limit is $${limit.toLocaleString(
+      "en-US"
+    )} per week. Complete Dwolla identity verification before funding a larger amount.`
+  );
+}
+
+async function assertUserCanReceiveDwollaPayout(targetUser, {
+  allowCategories = ["investor", "pool_member"]
+} = {}) {
+  assertDwollaConfigured();
+
+  if (!targetUser || targetUser.role === "manager") {
+    throw new Error("A linked investor account is required before starting a payout.");
+  }
+
+  if (!allowCategories.includes(targetUser.category)) {
+    throw new Error("Dwolla payouts are available for investor funding accounts.");
+  }
+
+  let user = targetUser;
+
+  if (!user.dwollaCustomerUrl) {
+    throw new Error("The investor must set up a Dwolla ACH profile before a payout can be approved.");
+  }
+
+  if (user.dwollaFundingSourceStatus !== "verified" || !user.dwollaFundingSourceUrl) {
+    await refreshDwollaFundingSourcesForUser(user.id);
+    user = await getUserAccountById(user.id);
+  }
+
+  if (user.dwollaFundingSourceStatus !== "verified" || !user.dwollaFundingSourceUrl) {
+    throw new Error("A verified Dwolla bank account is required before sending a payout.");
+  }
+
+  const latestCustomer = normalizeDwollaCustomer(
+    await retrieveDwollaResource(user.dwollaCustomerUrl),
+    user.dwollaCustomerUrl
+  );
+  await updateDwollaCustomerForUser(user.id, latestCustomer);
+
+  return getUserAccountById(user.id);
+}
+
 async function updateDwollaFundingSourceForUser(userId, fundingSource, executor = pool) {
   const timestamp = nowTimestamp();
 
@@ -6218,6 +6423,34 @@ async function updateDwollaFundingSourceForUser(userId, fundingSource, executor 
       fundingSource?.fundingSourceName ?? null,
       fundingSource?.fundingSourceBankName ?? null,
       fundingSource?.fundingSourceType ?? null,
+      timestamp,
+      userId
+    ]
+  );
+}
+
+async function updateDwollaCustomerForUser(userId, customer, executor = pool) {
+  if (!customer) {
+    return;
+  }
+
+  const timestamp = nowTimestamp();
+
+  await executor.query(
+    `
+      UPDATE users
+      SET
+        dwolla_customer_id = $1,
+        dwolla_customer_url = $2,
+        dwolla_customer_status = $3,
+        dwolla_synced_at = $4,
+        updated_at = $4
+      WHERE id = $5
+    `,
+    [
+      customer.customerId,
+      customer.customerUrl,
+      customer.customerStatus,
       timestamp,
       userId
     ]
@@ -6321,6 +6554,7 @@ export async function createDwollaClientTokenForUser(userId, input) {
 
   const action = String(input?.action ?? "").trim();
   const allowedActions = new Set([
+    "customer.update",
     "customer.fundingsources.create",
     "customer.fundingsources.read",
     "customer.microdeposits.create",
@@ -6380,6 +6614,12 @@ export async function refreshDwollaFundingSourcesForUser(userId) {
   if (!user?.dwollaCustomerUrl) {
     throw new Error("Set up your Dwolla ACH profile before refreshing linked bank accounts.");
   }
+
+  const customer = normalizeDwollaCustomer(
+    await retrieveDwollaResource(user.dwollaCustomerUrl),
+    user.dwollaCustomerUrl
+  );
+  await updateDwollaCustomerForUser(user.id, customer);
 
   const fundingSources = await listDwollaFundingSources(user.dwollaCustomerUrl);
   const selectedFundingSource = chooseDwollaFundingSource(fundingSources);
@@ -6535,6 +6775,35 @@ async function getParticipantCapitalLedger(
         )::float AS "pendingDepositAmount",
         COALESCE(
           (
+            SELECT SUM(amount)
+            FROM user_account_payouts
+            WHERE participant_id = $1
+              AND source_type = 'unallocated_funds'
+              AND status = 'pending'
+          ),
+          0
+        )::float AS "pendingUnallocatedPayoutAmount",
+        COALESCE(
+          (
+            SELECT SUM(amount)
+            FROM user_account_payouts
+            WHERE participant_id = $1
+              AND source_type = 'unallocated_funds'
+              AND status = 'paid'
+          ),
+          0
+        )::float AS "paidUnallocatedPayoutAmount",
+        COALESCE(
+          (
+            SELECT SUM(requested_capital_amount)
+            FROM early_withdrawal_requests
+            WHERE participant_id = $1
+              AND request_status = 'approved'
+          ),
+          0
+        )::float AS "approvedEarlyWithdrawalCapitalAmount",
+        COALESCE(
+          (
             SELECT SUM(contribution_amount)
             FROM positions
             WHERE participant_id = $1
@@ -6577,14 +6846,27 @@ async function getParticipantCapitalLedger(
   const enrollmentInvestmentAmount = roundNumber(row?.enrollmentInvestmentAmount ?? 0);
   const approvedDepositAmount = roundNumber(row?.approvedDepositAmount ?? 0);
   const pendingDepositAmount = roundNumber(row?.pendingDepositAmount ?? 0);
+  const pendingUnallocatedPayoutAmount = roundNumber(row?.pendingUnallocatedPayoutAmount ?? 0);
+  const paidUnallocatedPayoutAmount = roundNumber(row?.paidUnallocatedPayoutAmount ?? 0);
+  const approvedEarlyWithdrawalCapitalAmount = roundNumber(
+    row?.approvedEarlyWithdrawalCapitalAmount ?? 0
+  );
   const allocatedToProjects = roundNumber(row?.allocatedToProjects ?? 0);
   const committedToPools = roundNumber(
     Number(row?.committedToPools ?? 0) + Number(row?.committedToProjectPools ?? 0)
   );
   const pendingAllocationRequestAmount = roundNumber(row?.pendingAllocationRequestAmount ?? 0);
-  const totalAccountFunds = approvedDepositAmount;
+  const totalAccountFunds = roundNumber(
+    Math.max(
+      approvedDepositAmount - paidUnallocatedPayoutAmount - approvedEarlyWithdrawalCapitalAmount,
+      0
+    )
+  );
   const totalAllocatedFunds = roundNumber(
-    allocatedToProjects + committedToPools + pendingAllocationRequestAmount
+    allocatedToProjects +
+      committedToPools +
+      pendingAllocationRequestAmount +
+      pendingUnallocatedPayoutAmount
   );
   const availableCapital = roundNumber(Math.max(totalAccountFunds - totalAllocatedFunds, 0));
 
@@ -6593,6 +6875,9 @@ async function getParticipantCapitalLedger(
     enrollmentInvestmentAmount,
     approvedDepositAmount,
     pendingDepositAmount,
+    pendingPayoutAmount: pendingUnallocatedPayoutAmount,
+    paidPayoutAmount: paidUnallocatedPayoutAmount,
+    approvedEarlyWithdrawalCapitalAmount,
     totalAccountFunds,
     allocatedToProjects,
     committedToPools,
@@ -6934,6 +7219,15 @@ export async function submitDwollaAchDepositRequest(userId, input) {
     throw new Error("A verified Dwolla bank account is required before starting an ACH deposit.");
   }
 
+  const latestCustomer = normalizeDwollaCustomer(
+    await retrieveDwollaResource(user.dwollaCustomerUrl),
+    user.dwollaCustomerUrl
+  );
+  await updateDwollaCustomerForUser(user.id, latestCustomer);
+  user = await getUserAccountById(normalizedUserId);
+
+  assertDwollaTransferAmountWithinKnownLimit(user, amount);
+
   const timestamp = nowTimestamp();
   const depositId = createId("capital-deposit");
   const transfer = await initiateDwollaAchTransfer({
@@ -6997,6 +7291,156 @@ export async function submitDwollaAchDepositRequest(userId, input) {
       name: "dwolla",
       transferId: transfer.transferId,
       transferStatus: transfer.transferStatus
+    }
+  };
+}
+
+async function createAndStartDwollaPayout({
+  user,
+  amount,
+  sourceType,
+  sourceId = null,
+  dealId = null,
+  notes = null,
+  managerNotes = null,
+  requestedByUserId = null,
+  approvedByUserId = null
+}, executor = pool) {
+  const normalizedAmount = normalizePositiveCurrencyAmount(amount, "Payout amount");
+  const payoutId = createId("account-payout");
+  const timestamp = nowTimestamp();
+  const baseManagerNotes =
+    managerNotes ??
+    "Dwolla ACH payout initiated. Funds will be sent to the investor's verified bank account after Dwolla processes the transfer.";
+
+  await executor.query(
+    `
+      INSERT INTO user_account_payouts (
+        id,
+        user_id,
+        participant_id,
+        deal_id,
+        source_type,
+        source_id,
+        amount,
+        status,
+        provider_name,
+        provider_transfer_id,
+        provider_transfer_url,
+        provider_transfer_status,
+        provider_correlation_id,
+        provider_failure_reason,
+        notes,
+        manager_notes,
+        requested_by_user_id,
+        approved_by_user_id,
+        paid_at,
+        created_at,
+        updated_at
+      )
+      VALUES (
+        $1, $2, $3, $4, $5, $6, $7, 'pending',
+        'dwolla', NULL, NULL, 'pending', $1, NULL,
+        $8, $9, $10, $11, NULL, $12, $12
+      )
+    `,
+    [
+      payoutId,
+      user.id,
+      user.participantId,
+      dealId,
+      sourceType,
+      sourceId,
+      normalizedAmount,
+      notes,
+      baseManagerNotes,
+      requestedByUserId,
+      approvedByUserId,
+      timestamp
+    ]
+  );
+
+  const transfer = await initiateDwollaPayoutTransfer({
+    payoutId,
+    destinationFundingSourceUrl: user.dwollaFundingSourceUrl,
+    amount: normalizedAmount,
+    notes
+  });
+
+  await executor.query(
+    `
+      UPDATE user_account_payouts
+      SET
+        provider_transfer_id = $1,
+        provider_transfer_url = $2,
+        provider_transfer_status = $3,
+        manager_notes = $4,
+        updated_at = $5
+      WHERE id = $6
+    `,
+    [
+      transfer.transferId,
+      transfer.transferUrl,
+      transfer.transferStatus,
+      baseManagerNotes,
+      nowTimestamp(),
+      payoutId
+    ]
+  );
+
+  return getUserAccountPayoutById(payoutId, executor);
+}
+
+export async function submitUnallocatedAccountPayout(userId, input) {
+  const normalizedUserId = String(userId ?? "").trim();
+  const amount = normalizePositiveCurrencyAmount(input?.amount, "Withdrawal amount");
+  const notes = normalizeOptionalText(input?.notes);
+  const authorizationAccepted = normalizeBooleanInput(input?.authorizationAccepted);
+
+  if (!authorizationAccepted) {
+    throw new Error("ACH payout authorization must be accepted before requesting a withdrawal.");
+  }
+
+  let user = await getUserAccountById(normalizedUserId);
+
+  if (!user || user.role === "manager") {
+    throw new Error("Only investor accounts can withdraw unallocated funds.");
+  }
+
+  user = await assertUserCanReceiveDwollaPayout(user);
+
+  const payout = await withTransaction(async (client) => {
+    const ledger = await getParticipantCapitalLedger(user.participantId, client);
+
+    if (amount > Number(ledger.availableCapital ?? 0) + 0.001) {
+      throw new Error(
+        `Withdrawal amount exceeds available unallocated funds (${formatCurrencyForError(
+          ledger.availableCapital
+        )}).`
+      );
+    }
+
+    return createAndStartDwollaPayout(
+      {
+        user,
+        amount,
+        sourceType: "unallocated_funds",
+        sourceId: null,
+        dealId: null,
+        notes,
+        requestedByUserId: user.id,
+        approvedByUserId: user.id
+      },
+      client
+    );
+  });
+
+  return {
+    payout,
+    provider: {
+      name: "dwolla",
+      transferId: payout?.providerTransferId ?? "",
+      transferStatus: payout?.providerTransferStatus ?? ""
     }
   };
 }
@@ -7085,6 +7529,8 @@ async function startPendingDwollaAchDepositIntentsForUser(userId) {
     const timestamp = nowTimestamp();
 
     try {
+      assertDwollaTransferAmountWithinKnownLimit(user, pendingDeposit.amount);
+
       const transfer = await initiateDwollaAchTransfer({
         depositId: pendingDeposit.id,
         sourceFundingSourceUrl: user.dwollaFundingSourceUrl,
@@ -7334,6 +7780,32 @@ function mapDwollaTransferStatus(providerStatus, topic) {
   return "pending";
 }
 
+function mapDwollaPayoutTransferStatus(providerStatus, topic) {
+  const normalizedStatus = String(providerStatus ?? "").trim().toLowerCase();
+  const normalizedTopic = String(topic ?? "").trim().toLowerCase();
+
+  if (["processed", "completed"].includes(normalizedStatus) || normalizedTopic.includes("completed")) {
+    return "paid";
+  }
+
+  if (
+    ["failed", "returned"].includes(normalizedStatus) ||
+    normalizedTopic.includes("failed") ||
+    normalizedTopic.includes("returned")
+  ) {
+    return "failed";
+  }
+
+  if (
+    ["cancelled", "canceled"].includes(normalizedStatus) ||
+    normalizedTopic.includes("cancel")
+  ) {
+    return "cancelled";
+  }
+
+  return "pending";
+}
+
 async function applyDwollaTransferWebhook({ transfer, topic, payload }) {
   const transferUrl = transfer?._links?.self?.href ?? payload?._links?.resource?.href ?? "";
   const transferId = transfer?.id ?? payload?.resourceId ?? extractDwollaIdFromUrl(transferUrl);
@@ -7384,16 +7856,80 @@ async function applyDwollaTransferWebhook({ transfer, topic, payload }) {
   );
   const updatedDepositId = result.rows[0]?.id;
 
-  if (!updatedDepositId || depositStatus === "pending") {
+  if (updatedDepositId && depositStatus === "pending") {
     return null;
   }
 
-  const deposit = await getCapitalDepositById(updatedDepositId);
-  const notification = await notifyCapitalDepositReview(deposit);
+  if (updatedDepositId) {
+    const deposit = await getCapitalDepositById(updatedDepositId);
+    const notification = await notifyCapitalDepositReview(deposit);
+
+    return {
+      deposit,
+      notification
+    };
+  }
+
+  const payoutStatus = mapDwollaPayoutTransferStatus(transferStatus, topic);
+  const payoutPaidAt = payoutStatus === "paid" ? timestamp : null;
+  const payoutFailureReason =
+    payoutStatus === "failed"
+      ? "Dwolla ACH payout failed or was returned."
+      : payoutStatus === "cancelled"
+        ? "Dwolla ACH payout was cancelled."
+        : null;
+  const payoutManagerNotes =
+    payoutStatus === "paid"
+      ? "Dwolla ACH payout processed and was marked paid automatically."
+      : payoutStatus === "failed"
+        ? "Dwolla ACH payout failed or was returned."
+        : payoutStatus === "cancelled"
+          ? "Dwolla ACH payout was cancelled."
+          : "Dwolla ACH payout is processing.";
+  const payoutResult = await pool.query(
+    `
+      UPDATE user_account_payouts
+      SET
+        status = $1,
+        provider_transfer_status = COALESCE($2, provider_transfer_status),
+        provider_failure_reason = COALESCE($3, provider_failure_reason),
+        provider_raw_event = $4,
+        manager_notes = $5,
+        paid_at = COALESCE($6, paid_at),
+        updated_at = $7
+      WHERE provider_name = 'dwolla'
+        AND (
+          provider_transfer_url = $8 OR
+          provider_transfer_id = $9 OR
+          provider_correlation_id = $10
+        )
+        AND (
+          status <> $1 OR
+          ($2::text IS NOT NULL AND provider_transfer_status IS DISTINCT FROM $2)
+        )
+      RETURNING id
+    `,
+    [
+      payoutStatus,
+      transferStatus || null,
+      payoutFailureReason,
+      payload,
+      payoutManagerNotes,
+      payoutPaidAt,
+      timestamp,
+      transferUrl,
+      transferId,
+      correlationId
+    ]
+  );
+  const updatedPayoutId = payoutResult.rows[0]?.id;
+
+  if (!updatedPayoutId) {
+    return null;
+  }
 
   return {
-    deposit,
-    notification
+    payout: await getUserAccountPayoutById(updatedPayoutId)
   };
 }
 
@@ -7453,6 +7989,68 @@ export async function syncDwollaAchDepositStatusesForUser(userId) {
     approved: results.filter((result) => result.transferStatus === "processed").length,
     pending: results.filter((result) => result.transferStatus === "pending").length,
     rejected: results.filter((result) =>
+      ["failed", "cancelled", "canceled", "returned"].includes(result.transferStatus)
+    ).length,
+    results
+  };
+}
+
+export async function syncDwollaPayoutStatusesForUser(userId) {
+  assertDwollaConfigured();
+  const normalizedUserId = String(userId ?? "").trim();
+  const user = await getUserAccountById(normalizedUserId);
+
+  if (!user || user.role === "manager") {
+    throw new Error("Only investor accounts can refresh Dwolla payout status.");
+  }
+
+  const pendingPayouts = await queryAll(
+    `
+      SELECT
+        id,
+        provider_transfer_url AS "providerTransferUrl"
+      FROM user_account_payouts
+      WHERE user_id = $1
+        AND provider_name = 'dwolla'
+        AND status = 'pending'
+        AND provider_transfer_url IS NOT NULL
+      ORDER BY created_at DESC
+    `,
+    [user.id]
+  );
+  const results = [];
+
+  for (const payout of pendingPayouts) {
+    const transfer = await retrieveDwollaResource(payout.providerTransferUrl);
+    const applied = await applyDwollaTransferWebhook({
+      transfer,
+      topic: "transfer:status-sync",
+      payload: {
+        source: "manual-status-sync",
+        resourceId: transfer?.id ?? "",
+        correlationId: transfer?.correlationId ?? payout.id,
+        syncedAt: nowTimestamp(),
+        _links: {
+          resource: {
+            href: transfer?._links?.self?.href ?? payout.providerTransferUrl
+          }
+        }
+      }
+    });
+
+    results.push({
+      payoutId: payout.id,
+      transferId: transfer?.id ?? "",
+      transferStatus: transfer?.status ?? "",
+      updated: Boolean(applied?.payout)
+    });
+  }
+
+  return {
+    synced: results.length,
+    paid: results.filter((result) => result.transferStatus === "processed").length,
+    pending: results.filter((result) => result.transferStatus === "pending").length,
+    failed: results.filter((result) =>
       ["failed", "cancelled", "canceled", "returned"].includes(result.transferStatus)
     ).length,
     results
@@ -9995,11 +10593,9 @@ export async function upsertEarlyWithdrawalRequest(dealId, userId, input) {
 
   const position = withdrawalContext.position;
 
-  if (!participantHasPayoutInstructions(participant)) {
-    throw new Error(
-      "Save your payout method or payout instructions in Profile & Payout Details before submitting a withdrawal request."
-    );
-  }
+  await assertUserCanReceiveDwollaPayout(user, {
+    allowCategories: ["investor", "pool_member", "contractor"]
+  });
 
   const existingRequest = await queryOne(
     `
@@ -10181,6 +10777,11 @@ export async function reviewEarlyWithdrawalRequest(dealId, participantId, userId
     throw new Error("Only participant positions with portal access can be reviewed for early withdrawal.");
   }
 
+  const linkedInvestorUser = snapshot.users.find(
+    (account) => account.participantId === normalizedParticipantId && account.role === "investor"
+  );
+  let linkedPayoutUser = linkedInvestorUser;
+
   const existingRequest = await queryOne(
     `
       SELECT
@@ -10246,11 +10847,9 @@ export async function reviewEarlyWithdrawalRequest(dealId, participantId, userId
       throw new Error("Requested withdrawal exceeds the active capital remaining on this position.");
     }
 
-    if (!participantHasPayoutInstructions(participant)) {
-      throw new Error(
-        "The investor must save payout instructions before the request can be approved."
-      );
-    }
+    linkedPayoutUser = await assertUserCanReceiveDwollaPayout(linkedInvestorUser, {
+      allowCategories: ["investor", "pool_member", "contractor"]
+    });
 
     if (!review.payoutExpectedOn) {
       throw new Error("Expected payout date is required when approving a withdrawal request.");
@@ -10258,6 +10857,7 @@ export async function reviewEarlyWithdrawalRequest(dealId, participantId, userId
   }
 
   const timestamp = nowTimestamp();
+  let payout = null;
 
   await withTransaction(async (client) => {
     await client.query(
@@ -10296,12 +10896,25 @@ export async function reviewEarlyWithdrawalRequest(dealId, participantId, userId
       );
 
       await syncDealEquity(normalizedDealId, client);
+
+      if (payoutAmount > 0 && linkedPayoutUser) {
+        payout = await createAndStartDwollaPayout(
+          {
+            user: linkedPayoutUser,
+            amount: payoutAmount,
+            sourceType: "early_withdrawal",
+            sourceId: existingRequest.id,
+            dealId: normalizedDealId,
+            notes: existingRequest.investorNotes,
+            managerNotes: review.managerNotes,
+            requestedByUserId: existingRequest.requestedByUserId,
+            approvedByUserId: user.id
+          },
+          client
+        );
+      }
     }
   });
-
-  const linkedInvestorUser = snapshot.users.find(
-    (account) => account.participantId === normalizedParticipantId && account.role === "investor"
-  );
   let notifications = [];
 
   if (linkedInvestorUser?.email) {
@@ -10367,6 +10980,7 @@ export async function reviewEarlyWithdrawalRequest(dealId, participantId, userId
     investorNotes: existingRequest.investorNotes ?? null,
     managerNotes: review.managerNotes,
     reviewedAt: timestamp,
+    payout,
     notifications
   };
 }
@@ -10421,6 +11035,10 @@ export async function upsertDistributionElection(dealId, userId, input) {
   );
   const participant = distributionContext.participant;
   const position = distributionContext.position;
+  const linkedInvestorUser = snapshot.users.find(
+    (account) => account.participantId === targetParticipantId && account.role === "investor"
+  );
+  let linkedPayoutUser = linkedInvestorUser;
 
   const { totalPayout, reinvestAmount, cashPayoutAmount } = computeDistributionAmounts(
     election,
@@ -10446,12 +11064,6 @@ export async function upsertDistributionElection(dealId, userId, input) {
     if (rolloverTarget.status === "sold") {
       throw new Error("Reinvestment target must still be an active project.");
     }
-  }
-
-  if (cashPayoutAmount > 0 && !participantHasPayoutInstructions(participant)) {
-    throw new Error(
-      "Save your payout method or payout instructions in Profile & Payout Details before requesting a cash payout."
-    );
   }
 
   if (isManagerActing && cashPayoutAmount > 0 && !payoutExpectedOn) {
@@ -10485,6 +11097,7 @@ export async function upsertDistributionElection(dealId, userId, input) {
   );
 
   const timestamp = nowTimestamp();
+  const distributionElectionId = existingElection?.id ?? createId("distribution");
   const hasInstructionChange =
     !existingElection ||
     existingElection.electionMode !== election.electionMode ||
@@ -10566,7 +11179,7 @@ export async function upsertDistributionElection(dealId, userId, input) {
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULL, NULL, 0, NULL, $12, $13)
           `,
           [
-            createId("distribution"),
+            distributionElectionId,
             normalizedDealId,
             targetParticipantId,
             election.electionMode,
@@ -10634,6 +11247,10 @@ export async function upsertDistributionElection(dealId, userId, input) {
     throw new Error("This distribution election has already been approved and applied.");
   }
 
+  if (isManagerActing && cashPayoutAmount > 0) {
+    linkedPayoutUser = await assertUserCanReceiveDwollaPayout(linkedInvestorUser);
+  }
+
   const submittedByUserId = existingElection?.submittedByUserId ?? user.id;
   const submittedByRole = existingElection?.submittedByRole ?? "manager";
   const managerOverride = Boolean(
@@ -10641,7 +11258,10 @@ export async function upsertDistributionElection(dealId, userId, input) {
       existingElection.submittedByRole === "investor" &&
       hasInstructionChange
   );
-  const approvedTargetPositionId = await withTransaction(async (client) => {
+  let approvedTargetPositionId = null;
+  let payout = null;
+
+  await withTransaction(async (client) => {
     if (existingElection) {
       await client.query(
         `
@@ -10715,7 +11335,7 @@ export async function upsertDistributionElection(dealId, userId, input) {
           )
         `,
         [
-          createId("distribution"),
+          distributionElectionId,
           normalizedDealId,
           targetParticipantId,
           election.electionMode,
@@ -10769,18 +11389,31 @@ export async function upsertDistributionElection(dealId, userId, input) {
       );
     }
 
-    return applyApprovedReinvestmentAllocation({
+    approvedTargetPositionId = await applyApprovedReinvestmentAllocation({
       client,
       targetDealId: rolloverTargetDealId,
       participantId: targetParticipantId,
       classType: distributionContext.classType,
       amount: reinvestAmount
     });
-  });
 
-  const linkedInvestorUser = snapshot.users.find(
-    (account) => account.participantId === targetParticipantId && account.role === "investor"
-  );
+    if (cashPayoutAmount > 0 && linkedPayoutUser) {
+      payout = await createAndStartDwollaPayout(
+        {
+          user: linkedPayoutUser,
+          amount: cashPayoutAmount,
+          sourceType: "distribution_cash",
+          sourceId: distributionElectionId,
+          dealId: normalizedDealId,
+          notes: election.notes,
+          managerNotes: overrideNotes,
+          requestedByUserId: submittedByUserId,
+          approvedByUserId: user.id
+        },
+        client
+      );
+    }
+  });
 
   if (linkedInvestorUser?.email) {
     try {
@@ -10829,6 +11462,7 @@ export async function upsertDistributionElection(dealId, userId, input) {
     managerOverride,
     reviewedAt: timestamp,
     payoutExpectedOn: cashPayoutAmount > 0 ? payoutExpectedOn : null,
+    payout,
     notifications
   };
 }

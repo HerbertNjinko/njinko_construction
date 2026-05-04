@@ -52,12 +52,14 @@ import {
   processDwollaWebhook,
   refreshDwollaFundingSourcesForUser,
   syncDwollaAchDepositStatusesForUser,
+  syncDwollaPayoutStatusesForUser,
   verifyDwollaMicroDepositsForUser,
   resetPasswordWithToken,
   setUserAccountActive,
   submitIdentityReview,
   submitAllocationRequest,
   submitDwollaAchDepositRequest,
+  submitUnallocatedAccountPayout,
   submitRequiredLegalAcknowledgements,
   updateUserCategory,
   upsertInvestorPoolCommitment,
@@ -1681,9 +1683,11 @@ const server = createServer(async (request, response) => {
       try {
         const fundingSources = await refreshDwollaFundingSourcesForUser(user.id);
         const deposits = await syncDwollaAchDepositStatusesForUser(user.id);
+        const payouts = await syncDwollaPayoutStatusesForUser(user.id);
         sendJson(response, 200, {
           ...fundingSources,
-          deposits
+          deposits,
+          payouts
         });
       } catch (error) {
         sendJson(response, 400, { error: error.message });
@@ -1765,6 +1769,30 @@ const server = createServer(async (request, response) => {
 
       try {
         const result = await submitDwollaAchDepositRequest(user.id, body);
+        sendJson(response, 201, result);
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/payments/dwolla/payouts/unallocated") {
+      const user = await requireUnlockedUser(request, response);
+
+      if (!user) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const result = await submitUnallocatedAccountPayout(user.id, body);
         sendJson(response, 201, result);
       } catch (error) {
         sendJson(response, 400, { error: error.message });

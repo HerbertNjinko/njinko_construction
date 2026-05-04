@@ -5,7 +5,7 @@ import {
   LOGIN_PAGE_TITLE,
   app,
   state
-} from "./state.js?v=20260504-frontend-11";
+} from "./state.js?v=20260504-frontend-16";
 import {
   breakdownItem,
   escapeHtml,
@@ -21,7 +21,7 @@ import {
   renderSectionToggle,
   summaryItem,
   titleCase
-} from "./helpers.js?v=20260504-frontend-11";
+} from "./helpers.js?v=20260504-frontend-16";
 import {
   applyAllocationFilters,
   applyArchivedProjectFilters,
@@ -44,7 +44,7 @@ import {
   getInvestorProjectFilterOptions,
   getManagerEditableDeal,
   getUserFilterOptions
-} from "./data.js?v=20260504-frontend-11";
+} from "./data.js?v=20260504-frontend-16";
 
 function renderLogin() {
   const errorMarkup = state.loginError
@@ -359,6 +359,31 @@ function renderDwollaMicroDepositDropIn(dwolla) {
   `;
 }
 
+function renderDwollaCustomerUpgradeDropIn(dwolla) {
+  if (!dwolla?.customerId || dwolla.customerStatus === "verified") {
+    return "";
+  }
+
+  const dwollaConfig = getDwollaConfig();
+
+  return `
+    <div class="dwolla-dropin-shell" data-dwolla-dropin="true">
+      <div>
+        <p class="eyebrow">Dwolla Identity Verification</p>
+        <h4>Increase ACH transfer limit</h4>
+        <p class="section-copy">
+          Dwolla limits unverified customers to $5,000 per week. Complete this verification for larger ACH funding.
+        </p>
+      </div>
+      <dwolla-customer-update
+        customerId="${escapeHtml(dwolla.customerId)}"
+        terms="${escapeHtml(dwollaConfig.termsUrl || window.location.origin)}"
+        privacy="${escapeHtml(dwollaConfig.privacyUrl || window.location.origin)}"
+      ></dwolla-customer-update>
+    </div>
+  `;
+}
+
 function renderDwollaFallbackForm(title, formMarkup) {
   return `
     <div class="dwolla-fallback-form">
@@ -428,6 +453,7 @@ function renderPendingReviewAchPanel() {
         ${summaryItem("Linked bank", bankLabel || "No bank selected")}
         ${summaryItem("Funding status", fundingStatus)}
       </div>
+      ${renderDwollaCustomerUpgradeDropIn(dwolla)}
       ${
         hasFundingSource && !isVerified
           ? `
@@ -1895,6 +1921,7 @@ function renderManagerDistributionReviewCard(review) {
                   formatCurrency(review.approvedReinvestedAmount)
                 )}
                 ${summaryItem("Actual payout recorded", formatCurrency(review.actualPayoutAmount))}
+                ${summaryItem("ACH payout status", renderDwollaPayoutStatus(review.payout))}
                 ${summaryItem(
                   "Election deadline",
                   review.distributionElectionDueOn
@@ -1921,6 +1948,7 @@ function renderManagerDistributionReviewCard(review) {
                 <p><strong>Expected payout date:</strong> ${escapeHtml(
                   review.payoutExpectedOn ? formatDate(review.payoutExpectedOn) : "Not scheduled"
                 )}</p>
+                <p><strong>ACH payout:</strong> ${escapeHtml(renderDwollaPayoutStatus(review.payout))}</p>
                 ${renderPayoutInstructionMeta(review)}
                 <p><strong>Investor notes:</strong> ${escapeHtml(review.notes || "None provided.")}</p>
                 <p><strong>Manager notes:</strong> ${escapeHtml(review.overrideNotes || "None recorded.")}</p>
@@ -2023,8 +2051,8 @@ function renderManagerDistributionReviewCard(review) {
                       </label>
                       <p class="helper-copy">
                         Approval applies the reinvestment to the selected target project immediately.
-                        Any cash portion is scheduled using the expected payout date and the investor
-                        receives an approval email with that timestamp.
+                        Any cash portion starts a Dwolla ACH payout to the investor's verified bank account,
+                        and the investor receives an approval email with the expected payout date.
                       </p>
                       <button class="button-primary" type="submit">Approve election</button>
                     </form>
@@ -2091,6 +2119,7 @@ function renderManagerEarlyWithdrawalReviewCard(review) {
                 ${summaryItem("Forfeited capital", formatCurrency(review.penaltyAmount))}
                 ${summaryItem("Estimated payout", formatCurrency(review.estimatedPayoutAmount))}
                 ${summaryItem("Approved payout", formatCurrency(review.approvedPayoutAmount))}
+                ${summaryItem("ACH payout status", renderDwollaPayoutStatus(review.payout))}
                 ${summaryItem(
                   "Expected payout date",
                   review.payoutExpectedOn ? formatDate(review.payoutExpectedOn) : "Not scheduled"
@@ -2103,6 +2132,7 @@ function renderManagerEarlyWithdrawalReviewCard(review) {
                 <p><strong>Status:</strong> ${escapeHtml(
                   earlyWithdrawalStatusLabel(review.requestStatus)
                 )}</p>
+                <p><strong>ACH payout:</strong> ${escapeHtml(renderDwollaPayoutStatus(review.payout))}</p>
                 <p><strong>Withdrawal source:</strong> ${escapeHtml(
                   review.sourceName || "Direct investor position"
                 )}</p>
@@ -2142,7 +2172,7 @@ function renderManagerEarlyWithdrawalReviewCard(review) {
                         </label>
                       </div>
                       <p class="helper-copy">
-                        Approval removes the investor’s active capital from the deal immediately and schedules the net payout after the policy penalty.
+                        Approval removes the investor's active capital from the deal immediately and starts the net Dwolla ACH payout after the policy penalty.
                       </p>
                       <div class="button-row">
                         <button class="button-primary" type="submit" name="decision" value="approve">
@@ -2714,6 +2744,7 @@ function renderDwollaAchPanel(account) {
               ${summaryItem("Bank status", titleCase(dwolla.fundingSourceStatus || "Not linked"))}
               ${summaryItem("Linked bank", bankLabel || "No bank selected")}
             </div>
+            ${renderDwollaCustomerUpgradeDropIn(dwolla)}
             ${
               hasVerifiedFundingSource
                 ? `
@@ -2763,9 +2794,101 @@ function renderDwollaAchPanel(account) {
   `;
 }
 
+function payoutSourceLabel(sourceType) {
+  if (sourceType === "unallocated_funds") {
+    return "Available funds";
+  }
+
+  if (sourceType === "early_withdrawal") {
+    return "Early withdrawal";
+  }
+
+  if (sourceType === "distribution_cash") {
+    return "Cash distribution";
+  }
+
+  return titleCase(sourceType || "Payout");
+}
+
+function renderDwollaPayoutStatus(payout) {
+  if (!payout) {
+    return "Not started";
+  }
+
+  const providerStatus = payout.providerTransferStatus
+    ? ` · Dwolla ${titleCase(payout.providerTransferStatus)}`
+    : "";
+
+  return `${titleCase(payout.status || "pending")}${providerStatus}`;
+}
+
+function renderUnallocatedPayoutPanel(account) {
+  const dwollaConfig = state.dashboard?.paymentIntegrations?.dwolla ?? {};
+  const dwolla = account.dwolla ?? {};
+
+  if (!dwollaConfig.enabled) {
+    return "";
+  }
+
+  const availableCapital = Number(account.availableCapital ?? 0);
+  const hasVerifiedFundingSource = dwolla.fundingSourceStatus === "verified";
+
+  return `
+    <div class="account-subsection">
+      <div class="section-head">
+        <div>
+          <h4>Withdraw Available Funds</h4>
+          <p class="section-copy">
+            Available unallocated funds can be sent to your verified ACH bank account.
+          </p>
+        </div>
+      </div>
+      ${
+        hasVerifiedFundingSource && availableCapital > 0
+          ? `
+            <form id="unallocated-payout-form">
+              <div class="form-grid-2">
+                <label>
+                  Withdrawal amount
+                  <input
+                    type="number"
+                    name="amount"
+                    min="0"
+                    max="${escapeHtml(String(availableCapital))}"
+                    step="0.01"
+                    required
+                  />
+                </label>
+                <label class="checkbox-row">
+                  <input type="checkbox" name="authorizationAccepted" required />
+                  <span>I authorize this ACH payout to my verified bank account.</span>
+                </label>
+              </div>
+              <label>
+                Notes
+                <textarea name="notes" rows="3" placeholder="Optional withdrawal memo"></textarea>
+              </label>
+              <button class="button-primary" type="submit">Withdraw available funds</button>
+            </form>
+          `
+          : `
+            <p class="helper-copy">
+              ${
+                hasVerifiedFundingSource
+                  ? "No unallocated funds are currently available to withdraw."
+                  : "Verify your Dwolla ACH bank account before requesting a withdrawal."
+              }
+            </p>
+          `
+      }
+    </div>
+  `;
+}
+
 function renderUserCapitalAccountPanel() {
   const account = state.dashboard.capitalAccount ?? {};
   const deposits = account.deposits ?? [];
+  const payouts = account.payouts ?? [];
   const allocationRequests = account.allocationRequests ?? [];
   const allocationTargets = state.dashboard.allocationTargets ?? [];
   const viewerCategory = state.dashboard.viewer?.category ?? "investor";
@@ -2795,11 +2918,14 @@ function renderUserCapitalAccountPanel() {
               ${metricCard("Allocated to projects", formatCurrency(account.allocatedToProjects || 0))}
               ${metricCard("Committed to pools", formatCurrency(account.committedToPools || 0))}
               ${metricCard("Pending ACH transfers", formatCurrency(account.pendingDepositAmount || 0))}
+              ${metricCard("Pending withdrawals", formatCurrency(account.pendingPayoutAmount || 0))}
+              ${metricCard("Paid withdrawals", formatCurrency(account.paidPayoutAmount || 0))}
               ${metricCard("Pending allocation requests", formatCurrency(account.pendingAllocationRequestAmount || 0))}
           `
         }
       </div>
       ${isContractor ? "" : renderDwollaAchPanel(account)}
+      ${isContractor ? "" : renderUnallocatedPayoutPanel(account)}
       <form id="allocation-request-form">
         <div class="${isContractor ? "form-grid-2" : "form-grid-3"}">
           <label>
@@ -2916,6 +3042,46 @@ function renderUserCapitalAccountPanel() {
         isContractor
           ? ""
           : `
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Requested</th>
+              <th>Amount</th>
+              <th>Source</th>
+              <th>Status</th>
+              <th>Project</th>
+              <th>Note</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${
+              payouts.length
+                ? payouts
+                    .map(
+                      (payout) => `
+                        <tr>
+                          <td>${escapeHtml(formatDateTime(payout.createdAt))}</td>
+                          <td>${escapeHtml(formatCurrency(payout.amount))}</td>
+                          <td>${escapeHtml(payoutSourceLabel(payout.sourceType))}</td>
+                          <td>${escapeHtml(renderDwollaPayoutStatus(payout))}</td>
+                          <td>${escapeHtml(payout.dealName || "—")}</td>
+                          <td>${escapeHtml(payout.managerNotes || payout.notes || "—")}</td>
+                        </tr>
+                      `
+                    )
+                    .join("")
+                : '<tr><td colspan="6">No ACH payouts requested yet.</td></tr>'
+            }
+          </tbody>
+        </table>
+      </div>
+      <div class="section-head section-head-tight">
+        <div>
+          <h4>ACH Payouts</h4>
+          <p class="section-copy">Track investor withdrawals and approved payout transfers sent through Dwolla.</p>
+        </div>
+      </div>
       <div class="table-wrap">
         <table>
           <thead>
@@ -4105,7 +4271,9 @@ function renderManagerAchBankCell(account) {
 function renderManagerCapitalFundsPanel() {
   const accounts = state.dashboard.admin.capitalAccounts ?? [];
   const deposits = state.dashboard.admin.capitalDeposits ?? [];
+  const payouts = state.dashboard.admin.capitalPayouts ?? [];
   const pendingDeposits = deposits.filter((deposit) => deposit.status === "pending");
+  const pendingPayouts = payouts.filter((payout) => payout.status === "pending");
 
   return renderCollapsibleSection({
     sectionId: "manager-account-funds",
@@ -4119,6 +4287,10 @@ function renderManagerCapitalFundsPanel() {
           <h4>Pending ACH Transfers</h4>
           <p class="section-copy">Investor ACH deposits become available after Dwolla confirms processing.</p>
         </div>
+      </div>
+      <div class="metrics-grid">
+        ${metricCard("Pending ACH deposits", String(pendingDeposits.length))}
+        ${metricCard("Pending ACH payouts", String(pendingPayouts.length))}
       </div>
       <div class="table-wrap">
         <table>
@@ -4201,12 +4373,49 @@ function renderManagerCapitalFundsPanel() {
           <thead>
             <tr>
               <th>User</th>
+              <th>Amount</th>
+              <th>Source</th>
+              <th>Project</th>
+              <th>Status</th>
+              <th>Updated</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${
+              payouts.length
+                ? payouts
+                    .map(
+                      (payout) => `
+                        <tr>
+                          <td>${escapeHtml(
+                            `${payout.participantName} · ${payout.userEmail || "No email"}`
+                          )}</td>
+                          <td>${escapeHtml(formatCurrency(payout.amount))}</td>
+                          <td>${escapeHtml(payoutSourceLabel(payout.sourceType))}</td>
+                          <td>${escapeHtml(payout.dealName || "—")}</td>
+                          <td>${escapeHtml(renderDwollaPayoutStatus(payout))}</td>
+                          <td>${escapeHtml(formatDateTime(payout.updatedAt || payout.createdAt))}</td>
+                        </tr>
+                      `
+                    )
+                    .join("")
+                : '<tr><td colspan="6">No ACH payouts have been started yet.</td></tr>'
+            }
+          </tbody>
+        </table>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>User</th>
               <th>Category</th>
               <th>Total funds</th>
               <th>Project allocations</th>
               <th>Pool commitments</th>
               <th>Available</th>
-              <th>Pending</th>
+              <th>Pending deposits</th>
+              <th>Pending payouts</th>
               <th>ACH bank</th>
               <th>Latest proof</th>
             </tr>
@@ -4225,6 +4434,7 @@ function renderManagerCapitalFundsPanel() {
                           <td>${escapeHtml(formatCurrency(account.committedToPools || 0))}</td>
                           <td>${escapeHtml(formatCurrency(account.availableCapital || 0))}</td>
                           <td>${escapeHtml(formatCurrency(account.pendingDepositAmount || 0))}</td>
+                          <td>${escapeHtml(formatCurrency(account.pendingPayoutAmount || 0))}</td>
                           <td>${renderManagerAchBankCell(account)}</td>
                           <td>
                             ${
@@ -4247,7 +4457,7 @@ function renderManagerCapitalFundsPanel() {
                       `
                     )
                     .join("")
-                : '<tr><td colspan="9">No investor or pooled-member account funds recorded yet.</td></tr>'
+                : '<tr><td colspan="10">No investor or pooled-member account funds recorded yet.</td></tr>'
             }
           </tbody>
         </table>

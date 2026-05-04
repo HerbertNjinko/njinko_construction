@@ -1,4 +1,4 @@
-import { state } from "./state.js?v=20260504-frontend-11";
+import { state } from "./state.js?v=20260504-frontend-16";
 import {
   clearAuthFeedback,
   clearMessages,
@@ -14,7 +14,7 @@ import {
   setMessage,
   titleCase,
   toggleSectionCollapsed
-} from "./helpers.js?v=20260504-frontend-11";
+} from "./helpers.js?v=20260504-frontend-16";
 import {
   applyArchivedProjectFilters,
   applyQuestionnaireFilters,
@@ -30,7 +30,7 @@ import {
   syncDealEditorField,
   updateCreateDealDraft,
   updateDealEditorDraft
-} from "./data.js?v=20260504-frontend-11";
+} from "./data.js?v=20260504-frontend-16";
 import {
   api,
   applyLoggedOutState,
@@ -38,8 +38,8 @@ import {
   loadSession,
   recordSessionActivity,
   refreshDashboard
-} from "./session.js?v=20260504-frontend-11";
-import { render } from "./renderers.js?v=20260504-frontend-11";
+} from "./session.js?v=20260504-frontend-16";
+import { render } from "./renderers.js?v=20260504-frontend-16";
 
 let listenersBound = false;
 let dwollaDropInRetryCount = 0;
@@ -168,7 +168,7 @@ async function handleDwollaDropInSuccess(result) {
   const response = result?.response ?? {};
   const responseMessage = String(response.message ?? "");
   const shouldRefresh =
-    Boolean(response.location) || resource.includes("micro-deposits");
+    Boolean(response.location) || resource.includes("customers") || resource.includes("micro-deposits");
 
   if (response.code || responseMessage.toLowerCase().includes("error")) {
     setMessage(
@@ -1200,6 +1200,34 @@ export function setupEventListeners() {
           "capital",
           "success",
           "ACH transfer started. Funds will stay pending until Dwolla confirms processing."
+        );
+        event.target.reset();
+      } catch (error) {
+        setMessage("capital", "error", error.message);
+      }
+
+      render();
+      return;
+    }
+
+    if (event.target.id === "unallocated-payout-form") {
+      event.preventDefault();
+      const formData = new FormData(event.target);
+
+      try {
+        await api("/api/payments/dwolla/payouts/unallocated", {
+          method: "POST",
+          body: JSON.stringify({
+            amount: Number(formData.get("amount")),
+            authorizationAccepted: formData.get("authorizationAccepted") === "on",
+            notes: formData.get("notes")
+          })
+        });
+        await refreshDashboard();
+        setMessage(
+          "capital",
+          "success",
+          "Withdrawal started. Funds will stay reserved until Dwolla confirms the payout."
         );
         event.target.reset();
       } catch (error) {

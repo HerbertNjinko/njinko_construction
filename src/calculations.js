@@ -387,12 +387,39 @@ function buildCapitalAccountLedger(data, participantId) {
   const pendingDeposits = (data.userCapitalDeposits ?? []).filter(
     (deposit) => deposit.participantId === participantId && deposit.status === "pending"
   );
+  const pendingUnallocatedPayouts = (data.userAccountPayouts ?? []).filter(
+    (payout) =>
+      payout.participantId === participantId &&
+      payout.sourceType === "unallocated_funds" &&
+      payout.status === "pending"
+  );
+  const paidUnallocatedPayouts = (data.userAccountPayouts ?? []).filter(
+    (payout) =>
+      payout.participantId === participantId &&
+      payout.sourceType === "unallocated_funds" &&
+      payout.status === "paid"
+  );
+  const approvedEarlyWithdrawals = (data.earlyWithdrawalRequests ?? []).filter(
+    (request) => request.participantId === participantId && request.requestStatus === "approved"
+  );
   const enrollmentInvestmentAmount = getEnrollmentInvestmentAmount(data, participantId);
   const approvedDepositAmount = roundCurrency(
     approvedDeposits.reduce((sum, deposit) => sum + Number(deposit.amount ?? 0), 0)
   );
   const pendingDepositAmount = roundCurrency(
     pendingDeposits.reduce((sum, deposit) => sum + Number(deposit.amount ?? 0), 0)
+  );
+  const pendingPayoutAmount = roundCurrency(
+    pendingUnallocatedPayouts.reduce((sum, payout) => sum + Number(payout.amount ?? 0), 0)
+  );
+  const paidPayoutAmount = roundCurrency(
+    paidUnallocatedPayouts.reduce((sum, payout) => sum + Number(payout.amount ?? 0), 0)
+  );
+  const approvedEarlyWithdrawalCapitalAmount = roundCurrency(
+    approvedEarlyWithdrawals.reduce(
+      (sum, request) => sum + Number(request.requestedCapitalAmount ?? 0),
+      0
+    )
   );
   const allocatedToProjects = roundCurrency(
     (data.positions ?? [])
@@ -420,9 +447,15 @@ function buildCapitalAccountLedger(data, participantId) {
       .filter((request) => request.participantId === participantId && request.status === "pending")
       .reduce((sum, request) => sum + Number(request.amount ?? 0), 0)
   );
-  const totalAccountFunds = approvedDepositAmount;
+  const totalAccountFunds = roundCurrency(
+    Math.max(approvedDepositAmount - paidPayoutAmount - approvedEarlyWithdrawalCapitalAmount, 0)
+  );
   const totalAllocatedFunds = roundCurrency(
-    allocatedToProjects + committedToPools + committedToProjectPools + pendingAllocationRequestAmount
+    allocatedToProjects +
+      committedToPools +
+      committedToProjectPools +
+      pendingAllocationRequestAmount +
+      pendingPayoutAmount
   );
   const availableCapital = roundCurrency(Math.max(totalAccountFunds - totalAllocatedFunds, 0));
   const latestApprovedDeposit = approvedDeposits
@@ -444,6 +477,9 @@ function buildCapitalAccountLedger(data, participantId) {
     enrollmentInvestmentAmount,
     approvedDepositAmount,
     pendingDepositAmount,
+    pendingPayoutAmount,
+    paidPayoutAmount,
+    approvedEarlyWithdrawalCapitalAmount,
     totalAccountFunds,
     allocatedToProjects,
     committedToPools: roundCurrency(committedToPools + committedToProjectPools),
@@ -1187,6 +1223,7 @@ function buildDistributionPlan({ deal, position, participant, result, election, 
   );
 
   return {
+    id: election?.id ?? null,
     hasElection: Boolean(election),
     canSetDistributionElection:
       deal.status === "sold" && totalPayout > 0 && approvalStatus !== "approved",
@@ -2558,6 +2595,13 @@ export function buildPoolMemberDashboard(user, data = seedData) {
           .sort((left, right) =>
             String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? ""))
           ),
+    payouts: isContractorAccount
+      ? []
+      : (data.userAccountPayouts ?? [])
+          .filter((payout) => payout.participantId === user.participantId)
+          .sort((left, right) =>
+            String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? ""))
+          ),
     allocationRequests: buildParticipantAllocationRequests(data, user.participantId)
   };
   const allocationTargets = buildAllocationTargets(data);
@@ -3108,6 +3152,13 @@ export function buildInvestorDashboard(user, data = seedData) {
           .sort((left, right) =>
             String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? ""))
           ),
+    payouts: isContractorAccount
+      ? []
+      : (data.userAccountPayouts ?? [])
+          .filter((payout) => payout.participantId === user.participantId)
+          .sort((left, right) =>
+            String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? ""))
+          ),
     allocationRequests: buildParticipantAllocationRequests(data, user.participantId)
   };
   const allocationTargets = buildAllocationTargets(data);
@@ -3175,6 +3226,11 @@ export function buildManagerDashboard(user, data = seedData) {
       `${context.dealId}:${context.participantId}`,
       context
     ])
+  );
+  const payoutBySource = new Map(
+    (data.userAccountPayouts ?? [])
+      .filter((payout) => payout.sourceType && payout.sourceId)
+      .map((payout) => [`${payout.sourceType}:${payout.sourceId}`, payout])
   );
   const participant = participantMap.get(user.participantId);
   const governanceIssues = buildGovernanceIssues(data, user.participantId, {
@@ -3337,6 +3393,10 @@ export function buildManagerDashboard(user, data = seedData) {
               capitalLedger.pendingDepositAmount > 0
                 ? `; Pending deposits: ${formatCurrencyLabel(capitalLedger.pendingDepositAmount)}`
                 : ""
+            }${
+              capitalLedger.pendingPayoutAmount > 0
+                ? `; Pending withdrawals: ${formatCurrencyLabel(capitalLedger.pendingPayoutAmount)}`
+                : ""
             }`
           : "";
 
@@ -3349,6 +3409,7 @@ export function buildManagerDashboard(user, data = seedData) {
       accountFundsTotal: capitalLedger.totalAccountFunds,
       accountFundsAvailable: capitalLedger.availableCapital,
       accountFundsPendingDeposits: capitalLedger.pendingDepositAmount,
+      accountFundsPendingPayouts: capitalLedger.pendingPayoutAmount,
       accountFundsAllocatedToProjects: capitalLedger.allocatedToProjects,
       accountFundsCommittedToPools: capitalLedger.committedToPools,
       suggestedAllocationAmount: remainingAmount && remainingAmount > 0 ? remainingAmount : null,
@@ -3459,6 +3520,24 @@ export function buildManagerDashboard(user, data = seedData) {
       ...deposit,
       participantName: participantMap.get(deposit.participantId)?.name ?? deposit.participantName,
       category: participantMap.get(deposit.participantId)?.category ?? deposit.category
+    }))
+    .sort((left, right) => {
+      if (left.status === "pending" && right.status !== "pending") {
+        return -1;
+      }
+
+      if (left.status !== "pending" && right.status === "pending") {
+        return 1;
+      }
+
+      return String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? ""));
+    });
+  const capitalPayouts = (data.userAccountPayouts ?? [])
+    .map((payout) => ({
+      ...payout,
+      participantName: participantMap.get(payout.participantId)?.name ?? payout.participantName,
+      category: participantMap.get(payout.participantId)?.category ?? payout.category,
+      dealName: payout.dealId ? dealMap.get(payout.dealId)?.name ?? payout.dealName : payout.dealName
     }))
     .sort((left, right) => {
       if (left.status === "pending" && right.status !== "pending") {
@@ -3651,6 +3730,10 @@ export function buildManagerDashboard(user, data = seedData) {
         payoutExpectedOn: distribution.payoutExpectedOn,
         distributionElectionDueOn: distribution.electionDueOn,
         notes: distribution.notes,
+        payout:
+          distribution.id && payoutBySource.has(`distribution_cash:${distribution.id}`)
+            ? payoutBySource.get(`distribution_cash:${distribution.id}`)
+            : null,
         submittedByRole: distribution.submittedByRole,
         submittedByName: submittedBy?.name ?? null,
         reviewedByName: reviewedBy?.name ?? null,
@@ -3726,6 +3809,10 @@ export function buildManagerDashboard(user, data = seedData) {
       payoutExpectedOn: distribution.payoutExpectedOn,
       distributionElectionDueOn: distribution.electionDueOn,
       notes: distribution.notes,
+      payout:
+        distribution.id && payoutBySource.has(`distribution_cash:${distribution.id}`)
+          ? payoutBySource.get(`distribution_cash:${distribution.id}`)
+          : null,
       submittedByRole: distribution.submittedByRole,
       submittedByName: submittedBy?.name ?? null,
       reviewedByName: reviewedBy?.name ?? null,
@@ -3816,6 +3903,10 @@ export function buildManagerDashboard(user, data = seedData) {
         estimatedPayoutAmount: plan.estimatedPayoutAmount,
         approvedPayoutAmount: plan.approvedPayoutAmount,
         payoutExpectedOn: plan.payoutExpectedOn,
+        payout:
+          request.id && payoutBySource.has(`early_withdrawal:${request.id}`)
+            ? payoutBySource.get(`early_withdrawal:${request.id}`)
+            : null,
         investorNotes: plan.investorNotes,
         managerNotes: plan.managerNotes,
         submittedByName: submittedBy?.name ?? null,
@@ -3870,6 +3961,7 @@ export function buildManagerDashboard(user, data = seedData) {
       poolMembers,
       capitalAccounts,
       capitalDeposits,
+      capitalPayouts,
       allocationRequests,
       projectPooledRequests,
       investorPools,

@@ -23,8 +23,22 @@ function getBaseUrl(environment = normalizeEnvironment(process.env.DWOLLA_ENVIRO
   return environment === "production" ? "https://api.dwolla.com" : "https://api-sandbox.dwolla.com";
 }
 
+function normalizePublicUrl(value, fallback) {
+  const normalized = normalizeConfigValue(value) || fallback;
+
+  try {
+    return new URL(normalized).href;
+  } catch {
+    return fallback;
+  }
+}
+
 function getCredentialConfig() {
   const environment = normalizeEnvironment(process.env.DWOLLA_ENVIRONMENT);
+  const appUrl = normalizePublicUrl(
+    process.env.APP_URL,
+    "https://investors.njinkofarm.com/"
+  );
   const key = normalizeConfigValue(process.env.DWOLLA_KEY ?? process.env.DWOLLA_CLIENT_ID);
   const secret = normalizeConfigValue(
     process.env.DWOLLA_SECRET ?? process.env.DWOLLA_CLIENT_SECRET
@@ -40,6 +54,8 @@ function getCredentialConfig() {
     enabled,
     environment,
     baseUrl: getBaseUrl(environment),
+    termsUrl: normalizePublicUrl(process.env.DWOLLA_TERMS_URL, appUrl),
+    privacyUrl: normalizePublicUrl(process.env.DWOLLA_PRIVACY_URL, appUrl),
     key,
     secret,
     destinationFundingSourceUrl,
@@ -74,6 +90,8 @@ export function getDwollaPublicConfig() {
   return {
     enabled: configured,
     environment: config.environment,
+    termsUrl: config.termsUrl,
+    privacyUrl: config.privacyUrl,
     webhookPath: "/api/webhooks/dwolla"
   };
 }
@@ -351,7 +369,7 @@ export async function createDwollaClientToken(body) {
   const response = await dwollaRequest("/client-tokens", {
     method: "POST",
     body,
-    accept: DWOLLA_JSON_CONTENT_TYPE,
+    accept: DWOLLA_HAL_CONTENT_TYPE,
     contentType: DWOLLA_JSON_CONTENT_TYPE
   });
 
@@ -398,6 +416,62 @@ export async function initiateDwollaAchTransfer({ depositId, sourceFundingSource
       },
       metadata,
       correlationId: depositId
+    }
+  });
+  const location = response.headers.get("location") ?? "";
+
+  return {
+    transferUrl: location,
+    transferId: extractIdFromUrl(location),
+    transferStatus: "pending"
+  };
+}
+
+export async function initiateDwollaPayoutTransfer({
+  payoutId,
+  destinationFundingSourceUrl,
+  amount,
+  notes
+}) {
+  const config = assertDwollaConfigured();
+  const sourceUrl = validateDwollaFundingSourceUrl(
+    config.destinationFundingSourceUrl,
+    config,
+    "DWOLLA_COMPANY_FUNDING_SOURCE_URL"
+  );
+  const destinationUrl = validateDwollaFundingSourceUrl(
+    destinationFundingSourceUrl,
+    config,
+    "Dwolla destination funding source URL"
+  );
+  const amountValue = Number(amount).toFixed(2);
+  const metadata = {
+    payoutId
+  };
+  const normalizedNotes = String(notes ?? "").trim().slice(0, 255);
+
+  if (normalizedNotes) {
+    metadata.notes = normalizedNotes;
+  }
+
+  const response = await dwollaRequest("/transfers", {
+    method: "POST",
+    idempotencyKey: payoutId,
+    body: {
+      _links: {
+        source: {
+          href: sourceUrl
+        },
+        destination: {
+          href: destinationUrl
+        }
+      },
+      amount: {
+        currency: "USD",
+        value: amountValue
+      },
+      metadata,
+      correlationId: payoutId
     }
   });
   const location = response.headers.get("location") ?? "";
