@@ -1112,6 +1112,27 @@ function buildNotificationCenter(user, data = seedData) {
   };
 }
 
+function sortUserQuestions(left, right) {
+  if (left.status === "open" && right.status !== "open") {
+    return -1;
+  }
+
+  if (left.status !== "open" && right.status === "open") {
+    return 1;
+  }
+
+  return String(right.updatedAt ?? right.createdAt ?? "").localeCompare(
+    String(left.updatedAt ?? left.createdAt ?? "")
+  );
+}
+
+function buildParticipantQuestions(data, participantId) {
+  return (data.userQuestions ?? [])
+    .filter((question) => question.participantId === participantId)
+    .slice()
+    .sort(sortUserQuestions);
+}
+
 function buildPayoutInstructionPayload(participant) {
   return {
     payoutMethod: participant?.payoutMethod ?? "",
@@ -2618,6 +2639,7 @@ export function buildPoolMemberDashboard(user, data = seedData) {
     profile: buildProfilePayload(user, participant),
     notifications: buildNotificationCenter(user, data),
     companyResources: data.companyResources ?? [],
+    questions: buildParticipantQuestions(data, user.participantId),
     capitalAccount,
     allocationTargets,
     poolPortfolio: {
@@ -3175,6 +3197,7 @@ export function buildInvestorDashboard(user, data = seedData) {
     profile: buildProfilePayload(user, participant),
     notifications: buildNotificationCenter(user, data),
     capitalAccount,
+    questions: buildParticipantQuestions(data, user.participantId),
     portfolio: {
       totalInvested,
       totalReturned,
@@ -3551,6 +3574,15 @@ export function buildManagerDashboard(user, data = seedData) {
 
       return String(right.createdAt ?? "").localeCompare(String(left.createdAt ?? ""));
     });
+  const userQuestions = (data.userQuestions ?? [])
+    .map((question) => ({
+      ...question,
+      participantName: participantMap.get(question.participantId)?.name ?? question.participantName,
+      userEmail: userMap.get(question.participantId)?.email ?? question.userEmail,
+      category: participantMap.get(question.participantId)?.category ?? question.category,
+      needsResponse: question.status === "open"
+    }))
+    .sort(sortUserQuestions);
   const allocationRequests = (data.userAllocationRequests ?? [])
     .map((request) => ({
       ...request,
@@ -3963,6 +3995,7 @@ export function buildManagerDashboard(user, data = seedData) {
       capitalAccounts,
       capitalDeposits,
       capitalPayouts,
+      userQuestions,
       allocationRequests,
       projectPooledRequests,
       investorPools,

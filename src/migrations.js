@@ -31,7 +31,8 @@ const REQUIRED_TABLES = [
   "user_capital_deposits",
   "user_allocation_requests",
   "investor_questionnaires",
-  "payment_webhook_events"
+  "payment_webhook_events",
+  "user_questions"
 ];
 
 function listMigrationFiles() {

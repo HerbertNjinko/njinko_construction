@@ -39,7 +39,9 @@ import {
   sendPasswordResetNotification,
   sendPoolCommitmentNotification,
   sendPoolVoteAlertNotification,
-  sendProjectAllocationNotification
+  sendProjectAllocationNotification,
+  sendUserQuestionAnsweredNotification,
+  sendUserQuestionSubmittedAlertNotification
 } from "./notifications.js";
 import { pool, queryAll, queryOne, withTransaction } from "./postgres.js";
 
@@ -1397,6 +1399,30 @@ function mapUserAccountPayoutRow(row) {
   };
 }
 
+function mapUserQuestionRow(row) {
+  if (!row) {
+    return null;
+  }
+
+  return {
+    id: row.id,
+    userId: row.userId,
+    participantId: row.participantId,
+    participantName: row.participantName ?? "",
+    userEmail: row.userEmail ?? "",
+    category: row.category ?? "",
+    subject: row.subject ?? "",
+    questionText: row.questionText ?? "",
+    status: row.status ?? "open",
+    responseText: row.responseText ?? "",
+    respondedByUserId: row.respondedByUserId ?? null,
+    respondedByName: row.respondedByName ?? "",
+    respondedAt: row.respondedAt ?? null,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt
+  };
+}
+
 function mapAllocationRequestRow(row) {
   if (!row) {
     return null;
@@ -2429,6 +2455,34 @@ export async function getAppDataSnapshot({ skipAutomation = false } = {}) {
       ORDER BY user_account_payouts.created_at DESC, user_account_payouts.id
     `
   )).map((row) => mapUserAccountPayoutRow(row));
+  const userQuestions = (await queryAll(
+    `
+      SELECT
+        user_questions.id AS id,
+        user_questions.user_id AS "userId",
+        user_questions.participant_id AS "participantId",
+        participants.name AS "participantName",
+        participants.category AS category,
+        users.email AS "userEmail",
+        user_questions.subject AS subject,
+        user_questions.question_text AS "questionText",
+        user_questions.status AS status,
+        user_questions.response_text AS "responseText",
+        user_questions.responded_by_user_id AS "respondedByUserId",
+        responded_by_participants.name AS "respondedByName",
+        user_questions.responded_at AS "respondedAt",
+        user_questions.created_at AS "createdAt",
+        user_questions.updated_at AS "updatedAt"
+      FROM user_questions
+      JOIN participants ON participants.id = user_questions.participant_id
+      JOIN users ON users.id = user_questions.user_id
+      LEFT JOIN users AS responded_by_users
+        ON responded_by_users.id = user_questions.responded_by_user_id
+      LEFT JOIN participants AS responded_by_participants
+        ON responded_by_participants.id = responded_by_users.participant_id
+      ORDER BY user_questions.created_at DESC, user_questions.id
+    `
+  )).map((row) => mapUserQuestionRow(row));
   const userAllocationRequests = (await queryAll(
     `
       SELECT
@@ -2950,6 +3004,7 @@ export async function getAppDataSnapshot({ skipAutomation = false } = {}) {
     userLegalAcknowledgements,
     userCapitalDeposits,
     userAccountPayouts,
+    userQuestions,
     userAllocationRequests,
     investorQuestionnaires,
     deals,
@@ -6210,6 +6265,47 @@ async function getUserAccountPayoutById(payoutId, executor = pool) {
   return mapUserAccountPayoutRow(row);
 }
 
+async function getUserQuestionById(questionId, executor = pool) {
+  const normalizedQuestionId = String(questionId ?? "").trim();
+
+  if (!normalizedQuestionId) {
+    return null;
+  }
+
+  const row = await queryOne(
+    `
+      SELECT
+        user_questions.id AS id,
+        user_questions.user_id AS "userId",
+        user_questions.participant_id AS "participantId",
+        participants.name AS "participantName",
+        participants.category AS category,
+        users.email AS "userEmail",
+        user_questions.subject AS subject,
+        user_questions.question_text AS "questionText",
+        user_questions.status AS status,
+        user_questions.response_text AS "responseText",
+        user_questions.responded_by_user_id AS "respondedByUserId",
+        responded_by_participants.name AS "respondedByName",
+        user_questions.responded_at AS "respondedAt",
+        user_questions.created_at AS "createdAt",
+        user_questions.updated_at AS "updatedAt"
+      FROM user_questions
+      JOIN participants ON participants.id = user_questions.participant_id
+      JOIN users ON users.id = user_questions.user_id
+      LEFT JOIN users AS responded_by_users
+        ON responded_by_users.id = user_questions.responded_by_user_id
+      LEFT JOIN participants AS responded_by_participants
+        ON responded_by_participants.id = responded_by_users.participant_id
+      WHERE user_questions.id = $1
+    `,
+    [normalizedQuestionId],
+    executor
+  );
+
+  return mapUserQuestionRow(row);
+}
+
 async function getCapitalAccountParticipant(participantId, executor = pool) {
   return queryOne(
     `
@@ -8907,6 +9003,201 @@ export async function submitAllocationRequest(userId, input) {
 
   return {
     allocationRequest
+  };
+}
+
+function normalizeUserQuestionInput(input) {
+  const subject = normalizeRequiredTextInput(input?.subject, "Question subject", {
+    minLength: 3
+  });
+  const questionText = normalizeRequiredTextInput(input?.questionText ?? input?.question, "Question", {
+    minLength: 5
+  });
+
+  if (subject.length > 120) {
+    throw new Error("Question subject must be 120 characters or fewer.");
+  }
+
+  if (questionText.length > 4000) {
+    throw new Error("Question must be 4,000 characters or fewer.");
+  }
+
+  return {
+    subject,
+    questionText
+  };
+}
+
+function normalizeUserQuestionResponseInput(input) {
+  const responseText = normalizeRequiredTextInput(
+    input?.responseText ?? input?.response,
+    "Response",
+    { minLength: 5 }
+  );
+
+  if (responseText.length > 4000) {
+    throw new Error("Response must be 4,000 characters or fewer.");
+  }
+
+  return {
+    responseText
+  };
+}
+
+async function notifyManagersAboutUserQuestion(question) {
+  const managerRecipients = await getActiveManagerRecipients();
+
+  return Promise.all(
+    managerRecipients.map(async (managerRecipient) => {
+      try {
+        return await sendUserQuestionSubmittedAlertNotification({
+          userId: managerRecipient.userId,
+          participantId: managerRecipient.participantId,
+          managerName: managerRecipient.fullName,
+          email: managerRecipient.email,
+          investorName: question.participantName,
+          investorEmail: question.userEmail,
+          subject: question.subject,
+          questionText: question.questionText,
+          submittedAt: question.createdAt
+        });
+      } catch (error) {
+        return {
+          status: "failed",
+          provider: "notification_error",
+          localPath: null,
+          errorMessage: error.message,
+          recipientEmail: managerRecipient.email
+        };
+      }
+    })
+  );
+}
+
+async function notifyUserAboutQuestionResponse(question) {
+  if (!question?.userEmail) {
+    return [];
+  }
+
+  try {
+    return [
+      await sendUserQuestionAnsweredNotification({
+        userId: question.userId,
+        participantId: question.participantId,
+        fullName: question.participantName,
+        email: question.userEmail,
+        subject: question.subject,
+        questionText: question.questionText,
+        responseText: question.responseText,
+        respondedAt: question.respondedAt
+      })
+    ];
+  } catch (error) {
+    return [
+      {
+        status: "failed",
+        provider: "notification_error",
+        localPath: null,
+        errorMessage: error.message,
+        recipientEmail: question.userEmail
+      }
+    ];
+  }
+}
+
+export async function submitUserQuestion(userId, input) {
+  const user = await getUserAccountById(String(userId ?? "").trim());
+
+  if (!user || user.role === "manager") {
+    throw new Error("Only investor, pooled-member, and contractor accounts can submit questions.");
+  }
+
+  const questionInput = normalizeUserQuestionInput(input);
+  const timestamp = nowTimestamp();
+  const questionId = createId("user-question");
+
+  await pool.query(
+    `
+      INSERT INTO user_questions (
+        id,
+        user_id,
+        participant_id,
+        subject,
+        question_text,
+        status,
+        response_text,
+        responded_by_user_id,
+        responded_at,
+        created_at,
+        updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, 'open', NULL, NULL, NULL, $6, $6)
+    `,
+    [
+      questionId,
+      user.id,
+      user.participantId,
+      questionInput.subject,
+      questionInput.questionText,
+      timestamp
+    ]
+  );
+
+  const question = await getUserQuestionById(questionId);
+  const notifications = await notifyManagersAboutUserQuestion(question);
+
+  return {
+    question: {
+      ...question,
+      notifications
+    }
+  };
+}
+
+export async function respondToUserQuestion(questionId, userId, input) {
+  const manager = await getUserById(userId);
+
+  if (!manager || manager.role !== "manager") {
+    throw new Error("Only managers can respond to user questions.");
+  }
+
+  const normalizedQuestionId = String(questionId ?? "").trim();
+
+  if (!normalizedQuestionId) {
+    throw new Error("A valid question is required.");
+  }
+
+  const existingQuestion = await getUserQuestionById(normalizedQuestionId);
+
+  if (!existingQuestion) {
+    throw new Error("Question not found.");
+  }
+
+  const response = normalizeUserQuestionResponseInput(input);
+  const timestamp = nowTimestamp();
+
+  await pool.query(
+    `
+      UPDATE user_questions
+      SET
+        status = 'answered',
+        response_text = $1,
+        responded_by_user_id = $2,
+        responded_at = $3,
+        updated_at = $3
+      WHERE id = $4
+    `,
+    [response.responseText, manager.id, timestamp, normalizedQuestionId]
+  );
+
+  const question = await getUserQuestionById(normalizedQuestionId);
+  const notifications = await notifyUserAboutQuestionResponse(question);
+
+  return {
+    question: {
+      ...question,
+      notifications
+    }
   };
 }
 

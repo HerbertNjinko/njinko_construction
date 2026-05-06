@@ -1,6 +1,7 @@
 import {
   ALLOCATION_PAGE_SIZE,
   DEFAULT_MANAGER_PAGE,
+  DEFAULT_USER_SECTION,
   SESSION_ACTIVITY_THROTTLE_MS,
   SESSION_HEARTBEAT_INTERVAL_MS,
   SESSION_IDLE_MESSAGE,
@@ -13,11 +14,11 @@ import {
   createInitialUserFilters,
   sessionRuntime,
   state
-} from "./state.js?v=20260504-frontend-17";
+} from "./state.js?v=20260504-frontend-21";
 import {
   clearAuthFeedback,
   clearMessages
-} from "./helpers.js?v=20260504-frontend-17";
+} from "./helpers.js?v=20260504-frontend-21";
 import {
   applyAllocationFilters,
   getAllocationFilterOptions,
@@ -27,8 +28,8 @@ import {
   getInvestorIssueFilterOptions,
   getInvestorProjectFilterOptions,
   getUserFilterOptions
-} from "./data.js?v=20260504-frontend-17";
-import { render } from "./renderers.js?v=20260504-frontend-17";
+} from "./data.js?v=20260504-frontend-21";
+import { render } from "./renderers.js?v=20260504-frontend-21";
 
 export async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -62,6 +63,7 @@ export function resetDashboardState() {
   state.calculator = null;
   state.calculatorSelectionId = null;
   state.managerPage = DEFAULT_MANAGER_PAGE;
+  state.userSection = DEFAULT_USER_SECTION;
   state.adminDealId = null;
   state.dealEditorDrafts = {};
   state.rollupDealFilter = "";

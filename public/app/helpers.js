@@ -1,4 +1,4 @@
-import { RESET_TOKEN_PARAM, createInitialMessages, state } from "./state.js?v=20260504-frontend-17";
+import { RESET_TOKEN_PARAM, createInitialMessages, state } from "./state.js?v=20260504-frontend-21";
 
 const currency = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -137,9 +137,11 @@ export function renderCollapsibleSection({
   message = "",
   panelClass = "panel",
   headerActions = "",
-  bodyClass = ""
+  bodyClass = "",
+  showToggle = true,
+  forceExpanded = false
 }) {
-  const collapsed = isSectionCollapsed(sectionId);
+  const collapsed = forceExpanded ? false : isSectionCollapsed(sectionId);
 
   return `
     <section class="${escapeHtml(panelClass)} collapsible-section ${
@@ -152,7 +154,7 @@ export function renderCollapsibleSection({
         </div>
         <div class="section-tools">
           ${headerActions}
-          ${renderSectionToggle(sectionId)}
+          ${showToggle ? renderSectionToggle(sectionId) : ""}
         </div>
       </div>
       ${message}

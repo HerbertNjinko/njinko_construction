@@ -45,6 +45,7 @@ import {
   markUserNotificationsRead,
   markUserLogin,
   requestPasswordReset,
+  respondToUserQuestion,
   reviewAllocationRequest,
   reviewEarlyWithdrawalRequest,
   reviewCapitalDeposit,
@@ -59,6 +60,7 @@ import {
   submitIdentityReview,
   submitAllocationRequest,
   submitDwollaAchDepositRequest,
+  submitUserQuestion,
   submitUnallocatedAccountPayout,
   submitRequiredLegalAcknowledgements,
   updateUserCategory,
@@ -1040,6 +1042,9 @@ const server = createServer(async (request, response) => {
     const adminEarlyWithdrawalMatch = url.pathname.match(
       /^\/api\/admin\/deals\/([^/]+)\/withdrawal-requests\/([^/]+)$/
     );
+    const adminQuestionResponseMatch = url.pathname.match(
+      /^\/api\/admin\/questions\/([^/]+)\/response$/
+    );
     const distributionElectionMatch = url.pathname.match(
       /^\/api\/deals\/([^/]+)\/distribution-election$/
     );
@@ -1825,6 +1830,30 @@ const server = createServer(async (request, response) => {
       return;
     }
 
+    if (method === "POST" && url.pathname === "/api/questions") {
+      const user = await requireUnlockedUser(request, response);
+
+      if (!user) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const result = await submitUserQuestion(user.id, body);
+        sendJson(response, 201, result);
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
     if (method === "POST" && url.pathname === "/api/admin/users") {
       const manager = await requireManager(request, response);
 
@@ -2172,6 +2201,34 @@ const server = createServer(async (request, response) => {
           }
         );
         sendJson(response, 200, { election });
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "PUT" && adminQuestionResponseMatch) {
+      const manager = await requireManager(request, response);
+
+      if (!manager) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const result = await respondToUserQuestion(
+          decodeURIComponent(adminQuestionResponseMatch[1]),
+          manager.id,
+          body
+        );
+        sendJson(response, 200, result);
       } catch (error) {
         sendJson(response, 400, { error: error.message });
       }

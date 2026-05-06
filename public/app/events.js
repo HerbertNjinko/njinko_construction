@@ -1,4 +1,4 @@
-import { state } from "./state.js?v=20260504-frontend-17";
+import { state } from "./state.js?v=20260504-frontend-21";
 import {
   clearAuthFeedback,
   clearMessages,
@@ -14,7 +14,7 @@ import {
   setMessage,
   titleCase,
   toggleSectionCollapsed
-} from "./helpers.js?v=20260504-frontend-17";
+} from "./helpers.js?v=20260504-frontend-21";
 import {
   applyArchivedProjectFilters,
   applyQuestionnaireFilters,
@@ -30,7 +30,7 @@ import {
   syncDealEditorField,
   updateCreateDealDraft,
   updateDealEditorDraft
-} from "./data.js?v=20260504-frontend-17";
+} from "./data.js?v=20260504-frontend-21";
 import {
   api,
   applyLoggedOutState,
@@ -38,8 +38,8 @@ import {
   loadSession,
   recordSessionActivity,
   refreshDashboard
-} from "./session.js?v=20260504-frontend-17";
-import { render } from "./renderers.js?v=20260504-frontend-17";
+} from "./session.js?v=20260504-frontend-21";
+import { render } from "./renderers.js?v=20260504-frontend-21";
 
 let listenersBound = false;
 let dwollaDropInRetryCount = 0;
@@ -818,6 +818,70 @@ export function setupEventListeners() {
         render();
       }
 
+      return;
+    }
+
+    if (event.target.id === "user-question-form") {
+      event.preventDefault();
+      const formData = new FormData(event.target);
+
+      try {
+        const result = await api("/api/questions", {
+          method: "POST",
+          body: JSON.stringify({
+            subject: formData.get("subject"),
+            questionText: formData.get("questionText")
+          })
+        });
+        await refreshDashboard();
+        setMessage(
+          "question",
+          "success",
+          `Question submitted. ${formatNotificationBatchSummary(
+            result.question?.notifications ?? []
+          )}`
+        );
+        event.target.reset();
+      } catch (error) {
+        setMessage("question", "error", error.message);
+      }
+
+      render();
+      return;
+    }
+
+    if (event.target.dataset.managerQuestionResponseForm === "true") {
+      event.preventDefault();
+      const formData = new FormData(event.target);
+      const questionId = String(event.target.dataset.questionId ?? "");
+
+      if (!questionId) {
+        setMessage("question", "error", "A valid user question is required.");
+        render();
+        return;
+      }
+
+      try {
+        const result = await api(`/api/admin/questions/${encodeURIComponent(questionId)}/response`, {
+          method: "PUT",
+          body: JSON.stringify({
+            responseText: formData.get("responseText")
+          })
+        });
+        await refreshDashboard();
+        setMessage(
+          "question",
+          "success",
+          `Response sent. ${formatNotificationBatchSummary(
+            result.question?.notifications ?? []
+          )}`
+        );
+        event.target.reset();
+      } catch (error) {
+        setMessage("question", "error", error.message);
+      }
+
+      render();
       return;
     }
 
@@ -1760,6 +1824,23 @@ export function setupEventListeners() {
       return;
     }
 
+    const userSectionButton = event.target.closest("[data-user-section]");
+
+    if (userSectionButton) {
+      const nextSection = String(userSectionButton.dataset.userSection ?? "").trim();
+
+      if (!nextSection) {
+        return;
+      }
+
+      state.userSection = nextSection;
+      state.accountDetailsOpen = nextSection === "account";
+      state.notificationPanelOpen = false;
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      render();
+      return;
+    }
+
     const notificationBellButton = event.target.closest("#notification-bell-button");
 
     if (notificationBellButton) {
@@ -1807,7 +1888,8 @@ export function setupEventListeners() {
     const accountDetailsButton = event.target.closest("#account-details-button");
 
     if (accountDetailsButton) {
-      state.accountDetailsOpen = !state.accountDetailsOpen;
+      state.userSection = "account";
+      state.accountDetailsOpen = true;
       state.notificationPanelOpen = false;
       render();
       return;

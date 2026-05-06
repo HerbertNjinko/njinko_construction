@@ -2,10 +2,11 @@ import {
   ALLOCATION_PAGE_SIZE,
   COMPANY_NAME,
   DEFAULT_MANAGER_PAGE,
+  DEFAULT_USER_SECTION,
   LOGIN_PAGE_TITLE,
   app,
   state
-} from "./state.js?v=20260504-frontend-17";
+} from "./state.js?v=20260504-frontend-21";
 import {
   breakdownItem,
   escapeHtml,
@@ -21,7 +22,7 @@ import {
   renderSectionToggle,
   summaryItem,
   titleCase
-} from "./helpers.js?v=20260504-frontend-17";
+} from "./helpers.js?v=20260504-frontend-21";
 import {
   applyAllocationFilters,
   applyArchivedProjectFilters,
@@ -44,7 +45,7 @@ import {
   getInvestorProjectFilterOptions,
   getManagerEditableDeal,
   getUserFilterOptions
-} from "./data.js?v=20260504-frontend-17";
+} from "./data.js?v=20260504-frontend-21";
 
 function renderLogin() {
   const errorMarkup = state.loginError
@@ -875,7 +876,7 @@ function formatCostVariance(amount, pct) {
     : `${amountLabel} · ${formatPercent(pct)}`;
 }
 
-function renderProfilePanel() {
+function renderProfilePanel({ forceExpanded = false, showToggle = true } = {}) {
   const { profile, viewer } = state.dashboard;
   const isManager = viewer.role === "manager";
   const dwolla = profile.dwolla ?? {};
@@ -906,6 +907,8 @@ function renderProfilePanel() {
       ? "Update your name, contact information, and addresses here."
       : "Update your contact information and payment instructions here. Deal-level positions remain read only.",
     message: renderMessage(state.messages.profile),
+    forceExpanded,
+    showToggle,
     body: `
       <div class="summary-grid">
         ${summaryItems.join("")}
@@ -1052,6 +1055,116 @@ function renderProfileDwollaBankDetails(dwolla = {}) {
       }
     </div>
   `;
+}
+
+function userQuestionStatusLabel(status) {
+  const labels = {
+    open: "Waiting for response",
+    answered: "Answered",
+    closed: "Closed"
+  };
+
+  return labels[status] ?? titleCase(status || "open");
+}
+
+function renderUserQuestionCard(question, { managerView = false } = {}) {
+  return `
+    <article class="distribution-review-card">
+      <div class="distribution-review-head">
+        <div>
+          <p class="eyebrow">${escapeHtml(formatDateTime(question.createdAt))}</p>
+          <h4>${escapeHtml(question.subject)}</h4>
+          <p class="deal-location">
+            ${escapeHtml(
+              managerView
+                ? `${question.participantName || "User"} · ${question.userEmail || "No email"}`
+                : userQuestionStatusLabel(question.status)
+            )}
+          </p>
+        </div>
+        <span class="review-status-pill ${question.status === "open" ? "pending" : "reviewed"}">
+          ${escapeHtml(userQuestionStatusLabel(question.status))}
+        </span>
+      </div>
+      <div class="distribution-review-body">
+        <div class="distribution-review-meta">
+          <p><strong>Question:</strong> ${escapeHtml(question.questionText)}</p>
+          ${
+            question.responseText
+              ? `
+                <p><strong>Response:</strong> ${escapeHtml(question.responseText)}</p>
+                <p><strong>Responded by:</strong> ${escapeHtml(
+                  [
+                    question.respondedByName || "Manager",
+                    question.respondedAt ? formatDateTime(question.respondedAt) : ""
+                  ]
+                    .filter(Boolean)
+                    .join(" · ")
+                )}</p>
+              `
+              : '<p><strong>Response:</strong> Waiting for manager response.</p>'
+          }
+        </div>
+        ${
+          managerView && question.status === "open"
+            ? `
+              <form
+                class="distribution-form"
+                data-manager-question-response-form="true"
+                data-question-id="${escapeHtml(question.id)}"
+              >
+                <label>
+                  Response
+                  <textarea
+                    name="responseText"
+                    rows="4"
+                    placeholder="Write a clear response for the user."
+                    required
+                  ></textarea>
+                </label>
+                <button class="button-primary" type="submit">Send response</button>
+              </form>
+            `
+            : ""
+        }
+      </div>
+    </article>
+  `;
+}
+
+function renderUserQuestionsPanel({ forceExpanded = false, showToggle = true } = {}) {
+  const questions = state.dashboard.questions ?? [];
+
+  return renderCollapsibleSection({
+    sectionId: "user-questions",
+    title: "Questions & Answers",
+    copy: "Submit questions to the manager and review responses here.",
+    message: renderMessage(state.messages.question),
+    forceExpanded,
+    showToggle,
+    body: `
+      <form id="user-question-form">
+        <div class="form-grid-2">
+          <label>
+            Subject
+            <input type="text" name="subject" maxlength="120" required />
+          </label>
+        </div>
+        <label>
+          Question
+          <textarea name="questionText" rows="4" maxlength="4000" required></textarea>
+        </label>
+        <button class="button-primary" type="submit">Submit question</button>
+      </form>
+      <div class="distribution-review-list">
+        ${
+          questions.length
+            ? questions.map((question) => renderUserQuestionCard(question)).join("")
+            : '<div class="empty-state">No questions submitted yet.</div>'
+        }
+      </div>
+    `
+  });
 }
 
 function renderIssueStatus(issue) {
@@ -1249,7 +1362,7 @@ function renderInvestorIssueCard(issue) {
   `;
 }
 
-function renderInvestorGovernancePanel() {
+function renderInvestorGovernancePanel({ forceExpanded = false, showToggle = true } = {}) {
   const issues = state.dashboard.governance?.issues ?? [];
   const filteredIssues = applyInvestorIssueFilters(issues);
   const filterOptions = getInvestorIssueFilterOptions(issues);
@@ -1260,6 +1373,8 @@ function renderInvestorGovernancePanel() {
     copy:
       "Your approval power is weighted by your invested percentage in each deal, and you can change your vote until the close date.",
     message: renderMessage(state.messages.vote),
+    forceExpanded,
+    showToggle,
     body: `
       <div class="table-toolbar">
         <div class="filter-grid filter-grid-2">
@@ -1393,7 +1508,11 @@ function renderCompanyResourceCard(resource, { showAdminActions = false } = {}) 
   `;
 }
 
-function renderCompanyLibraryPanel({ showAdminActions = false } = {}) {
+function renderCompanyLibraryPanel({
+  showAdminActions = false,
+  forceExpanded = false,
+  showToggle = true
+} = {}) {
   const resources = state.dashboard.companyResources ?? [];
   const balanceSheets = resources.filter(
     (resource) => resource.resourceType === "project_balance_sheet"
@@ -1408,6 +1527,8 @@ function renderCompanyLibraryPanel({ showAdminActions = false } = {}) {
     copy:
       "Published bylaws, announcements, and project balance sheets stay available here for review or download at any time.",
     message: showAdminActions ? renderMessage(state.messages.resource) : "",
+    forceExpanded,
+    showToggle,
     body: `
       <div class="metrics-grid">
         ${metricCard("Balance sheets", String(balanceSheets.length))}
@@ -2934,7 +3055,7 @@ function renderUnallocatedPayoutPanel(account) {
   `;
 }
 
-function renderUserCapitalAccountPanel() {
+function renderUserCapitalAccountPanel({ forceExpanded = false, showToggle = true } = {}) {
   const account = state.dashboard.capitalAccount ?? {};
   const deposits = account.deposits ?? [];
   const payouts = account.payouts ?? [];
@@ -2951,6 +3072,8 @@ function renderUserCapitalAccountPanel() {
         ? "Choose where to request placement of your approved deferred contractor amount."
         : "Choose where to request placement of approved account funds, or start an ACH transfer.",
     message: renderMessage(state.messages.capital),
+    forceExpanded,
+    showToggle,
     body: `
       <div class="metrics-grid">
         ${
@@ -3174,7 +3297,8 @@ function renderAccountActionStack(showAccountDetails = false) {
           class="button-secondary"
           id="account-details-button"
           type="button"
-          aria-expanded="${state.accountDetailsOpen ? "true" : "false"}"
+          data-user-section="account"
+          aria-current="${state.userSection === "account" ? "page" : "false"}"
         >
           Account Details
         </button>
@@ -3185,6 +3309,67 @@ function renderAccountActionStack(showAccountDetails = false) {
     <div class="account-action-stack">
       ${accountDetailsButton}
       <button class="button-secondary" id="logout-button" type="button">Log out</button>
+    </div>
+  `;
+}
+
+function getActiveUserSectionItem(items) {
+  return (
+    items.find((item) => item.id === state.userSection) ??
+    items.find((item) => item.id === DEFAULT_USER_SECTION) ??
+    items[0]
+  );
+}
+
+function renderUserSectionNavigation({ title, copy, items, activeSection }) {
+  const visibleItems = items.filter((item) => !item.hideFromMenu);
+
+  return `
+    <aside class="panel manager-nav-panel user-section-nav-panel">
+      <div class="section-head">
+        <div>
+          <p class="eyebrow">Menu</p>
+          <h3>${escapeHtml(title)}</h3>
+          <p class="section-copy">${escapeHtml(copy)}</p>
+        </div>
+      </div>
+      <div class="manager-nav-list user-section-nav-list" role="tablist" aria-label="${escapeHtml(
+        title
+      )}">
+        ${visibleItems
+          .map(
+            (item) => `
+              <button
+                class="manager-nav-button ${item.id === activeSection.id ? "active" : ""}"
+                type="button"
+                data-user-section="${escapeHtml(item.id)}"
+                role="tab"
+                aria-selected="${item.id === activeSection.id ? "true" : "false"}"
+              >
+                <span class="manager-nav-label">${escapeHtml(item.label)}</span>
+                <span class="manager-nav-copy">${escapeHtml(item.copy)}</span>
+              </button>
+            `
+          )
+          .join("")}
+      </div>
+    </aside>
+  `;
+}
+
+function renderUserSectionLayout({ title, copy, items }) {
+  const activeSection = getActiveUserSectionItem(items);
+
+  if (!activeSection) {
+    return "";
+  }
+
+  return `
+    <div class="manager-layout user-section-layout">
+      ${renderUserSectionNavigation({ title, copy, items, activeSection })}
+      <div class="manager-page-column user-section-column">
+        ${activeSection.render()}
+      </div>
     </div>
   `;
 }
@@ -3208,12 +3393,213 @@ function renderInvestorDashboard() {
     ...pooledDistributionProjects
   ];
   const canViewAccountDetails = ["investor", "pool_member", "contractor"].includes(viewer.category);
+  const isContractor = viewer.category === "contractor";
+  const sectionPanelOptions = { forceExpanded: true, showToggle: false };
+  const sectionItems = [
+    canViewAccountDetails
+      ? {
+          id: "account",
+          label: "Account Details",
+          hideFromMenu: true,
+          copy: isContractor
+            ? "Review deferred funds and submit project allocation requests."
+            : "Fund your account, request withdrawals, and place approved funds.",
+          render: () => renderUserCapitalAccountPanel(sectionPanelOptions)
+        }
+      : null,
+    {
+      id: "profile",
+      label: "Profile & Payout",
+      copy: "Update contact, payout, and ACH bank details.",
+      render: () => renderProfilePanel(sectionPanelOptions)
+    },
+    {
+      id: "portfolio",
+      label: "Portfolio",
+      copy: isContractor
+        ? "Review deferred contractor participation totals."
+        : "Review investment totals across linked projects.",
+      render: () =>
+        renderCollapsibleSection({
+          sectionId: "investor-portfolio",
+          title: "Personal Portfolio View",
+          copy:
+            "Totals across all deals tied to your login. Total returned reflects profit only, while total amount payout reflects cash actually pulled out.",
+          ...sectionPanelOptions,
+          body: `
+            <div class="metrics-grid">
+              ${metricCard("Total invested", formatCurrency(portfolio.totalInvested))}
+              ${metricCard("Total returned", formatCurrency(portfolio.totalReturned))}
+              ${metricCard("Total amount payout", formatCurrency(portfolio.totalAmountPayout))}
+              ${metricCard("Current active investments", String(portfolio.activeInvestments))}
+              ${metricCard("Accrued pref to date", formatCurrency(portfolio.currentPrefEarned))}
+              ${metricCard("Projected pref at exit", formatCurrency(portfolio.projectedPrefEarned))}
+            </div>
+            ${renderInvestorArchivedProjectHistory(archivedProjects)}
+          `
+        })
+    },
+    projectPoolGroups.length
+      ? {
+          id: "project-pools",
+          label: "Project Pools",
+          copy: "Review pooled requests tied to this account.",
+          render: () =>
+            renderCollapsibleSection({
+              sectionId: "investor-project-pools",
+              title: "Project Pool Groups",
+              copy:
+                "Pooled requests tied to your investor account. Manager-approved pool requests can vote, and passing pools fund as one project-facing position.",
+              message: renderMessage(state.messages.capital),
+              ...sectionPanelOptions,
+              body: `
+                <div class="distribution-review-list">
+                  ${projectPoolGroups.map((pool) => renderInvestorProjectPoolCard(pool)).join("")}
+                </div>
+              `
+            })
+        }
+      : null,
+    {
+      id: "distribution",
+      label: "Payout Elections",
+      copy: "Choose reinvestment or payout for sold-project proceeds.",
+      render: () =>
+        renderCollapsibleSection({
+          sectionId: "investor-distribution-elections",
+          title: "Reinvestment or Payout Elections",
+          copy:
+            "Sold-project proceeds are requested here and stay pending until the manager approves the rollover and schedules any cash payout.",
+          message: renderMessage(state.messages.distribution),
+          ...sectionPanelOptions,
+          body: `
+            <div class="distribution-review-list">
+              ${
+                distributionProjects.length
+                  ? distributionProjects
+                      .map((project) => renderInvestorDistributionElectionCard(project))
+                      .join("")
+                  : '<div class="empty-state">No sold projects currently require a reinvestment or payout election.</div>'
+              }
+            </div>
+          `
+        })
+    },
+    {
+      id: "withdrawals",
+      label: "Early Withdrawals",
+      copy: "Submit or review early withdrawal requests.",
+      render: () =>
+        renderCollapsibleSection({
+          sectionId: "investor-early-withdrawals",
+          title: "Early Withdrawal Requests",
+          copy:
+            "If you need to exit an active project before completion, submit the request here. The manager must approve or reject it, and any approved payout is reduced by the project penalty policy.",
+          message: renderMessage(state.messages.withdrawal),
+          ...sectionPanelOptions,
+          body: `
+            <div class="distribution-review-list">
+              ${
+                withdrawalRequests.length
+                  ? withdrawalRequests
+                      .map((project) => renderInvestorEarlyWithdrawalCard(project))
+                      .join("")
+                  : '<div class="empty-state">No active participant positions currently qualify for an early withdrawal request.</div>'
+              }
+            </div>
+          `
+        })
+    },
+    {
+      id: "governance",
+      label: "Voting",
+      copy: "Vote on major project issues.",
+      render: () => renderInvestorGovernancePanel(sectionPanelOptions)
+    },
+    {
+      id: "projects",
+      label: "Projects",
+      copy: "Open per-project performance and payout details.",
+      render: () =>
+        renderCollapsibleSection({
+          sectionId: "investor-project-breakdown",
+          title: "Per-Project Breakdown",
+          copy:
+            "Each deal shows your amount invested, ownership, returns breakdown, project status, and timeline.",
+          ...sectionPanelOptions,
+          body: `
+            <div class="table-toolbar">
+              <div class="filter-grid filter-grid-2">
+                <label>
+                  Project
+                  <select id="investor-project-filter-deal">
+                    <option value="">All projects</option>
+                    ${projectFilterOptions.deals
+                      .map(
+                        (deal) => `
+                          <option value="${escapeHtml(deal.id)}" ${
+                            deal.id === state.investorProjectFilters.dealId ? "selected" : ""
+                          }>
+                            ${escapeHtml(deal.name)}
+                          </option>
+                        `
+                      )
+                      .join("")}
+                  </select>
+                </label>
+                <label>
+                  Project status
+                  <select id="investor-project-filter-status">
+                    <option value="">All statuses</option>
+                    ${projectFilterOptions.statuses
+                      .map(
+                        (status) => `
+                          <option value="${escapeHtml(status)}" ${
+                            status === state.investorProjectFilters.status ? "selected" : ""
+                          }>
+                            ${escapeHtml(titleCase(status))}
+                          </option>
+                        `
+                      )
+                      .join("")}
+                  </select>
+                </label>
+              </div>
+              <span class="read-only-tag">
+                Showing ${escapeHtml(String(filteredProjects.length))} of ${escapeHtml(String(projects.length))}
+              </span>
+            </div>
+            <div class="deal-grid">
+              ${
+                filteredProjects.length
+                  ? filteredProjects.map((project) => renderInvestorProject(project)).join("")
+                  : projects.length
+                    ? '<div class="empty-state">No project breakdowns match the current project and status filters.</div>'
+                    : '<div class="empty-state">No positions are linked to this login.</div>'
+              }
+            </div>
+          `
+        })
+    },
+    {
+      id: "questions",
+      label: "Questions & Answers",
+      copy: "Submit questions and read manager responses.",
+      render: () => renderUserQuestionsPanel(sectionPanelOptions)
+    },
+    {
+      id: "library",
+      label: "Company Library",
+      copy: "Open company resources and project balance sheets.",
+      render: () => renderCompanyLibraryPanel(sectionPanelOptions)
+    }
+  ].filter(Boolean);
 
   return `
     <div class="shell">
       <section class="panel app-header">
         <div>
-          <p class="eyebrow">Investor View</p>
+          <p class="eyebrow">${escapeHtml(isContractor ? "Contractor View" : "Investor View")}</p>
           <h2>${escapeHtml(viewer.name)}</h2>
           <p class="meta-line">${escapeHtml(viewer.email)} · ${escapeHtml(
             titleCase(viewer.category)
@@ -3228,142 +3614,10 @@ function renderInvestorDashboard() {
         </div>
       </section>
 
-      ${canViewAccountDetails && state.accountDetailsOpen ? renderUserCapitalAccountPanel() : ""}
-      ${renderProfilePanel()}
-      ${renderCompanyLibraryPanel()}
-
-      ${renderCollapsibleSection({
-        sectionId: "investor-portfolio",
-        title: "Personal Portfolio View",
-        copy:
-          "Totals across all deals tied to your login. Total returned reflects profit only, while total amount payout reflects cash actually pulled out.",
-        body: `
-          <div class="metrics-grid">
-            ${metricCard("Total invested", formatCurrency(portfolio.totalInvested))}
-            ${metricCard("Total returned", formatCurrency(portfolio.totalReturned))}
-            ${metricCard("Total amount payout", formatCurrency(portfolio.totalAmountPayout))}
-            ${metricCard("Current active investments", String(portfolio.activeInvestments))}
-            ${metricCard("Accrued pref to date", formatCurrency(portfolio.currentPrefEarned))}
-            ${metricCard("Projected pref at exit", formatCurrency(portfolio.projectedPrefEarned))}
-          </div>
-          ${renderInvestorArchivedProjectHistory(archivedProjects)}
-        `
-      })}
-
-      ${
-        projectPoolGroups.length
-          ? renderCollapsibleSection({
-              sectionId: "investor-project-pools",
-              title: "Project Pool Groups",
-              copy:
-                "Pooled requests tied to your investor account. Manager-approved pool requests can vote, and passing pools fund as one project-facing position.",
-              message: renderMessage(state.messages.capital),
-              body: `
-                <div class="distribution-review-list">
-                  ${projectPoolGroups.map((pool) => renderInvestorProjectPoolCard(pool)).join("")}
-                </div>
-              `
-            })
-          : ""
-      }
-
-      ${renderCollapsibleSection({
-        sectionId: "investor-distribution-elections",
-        title: "Reinvestment or Payout Elections",
-        copy:
-          "Sold-project proceeds are requested here and stay pending until the manager approves the rollover and schedules any cash payout.",
-        message: renderMessage(state.messages.distribution),
-        body: `
-          <div class="distribution-review-list">
-            ${
-              distributionProjects.length
-                ? distributionProjects
-                    .map((project) => renderInvestorDistributionElectionCard(project))
-                    .join("")
-                : '<div class="empty-state">No sold projects currently require a reinvestment or payout election.</div>'
-            }
-          </div>
-        `
-      })}
-
-      ${renderCollapsibleSection({
-        sectionId: "investor-early-withdrawals",
-        title: "Early Withdrawal Requests",
-        copy:
-          "If you need to exit an active project before completion, submit the request here. The manager must approve or reject it, and any approved payout is reduced by the project penalty policy.",
-        message: renderMessage(state.messages.withdrawal),
-        body: `
-          <div class="distribution-review-list">
-            ${
-              withdrawalRequests.length
-                ? withdrawalRequests
-                    .map((project) => renderInvestorEarlyWithdrawalCard(project))
-                    .join("")
-                : '<div class="empty-state">No active participant positions currently qualify for an early withdrawal request.</div>'
-            }
-          </div>
-        `
-      })}
-
-      ${renderInvestorGovernancePanel()}
-
-      ${renderCollapsibleSection({
-        sectionId: "investor-project-breakdown",
-        title: "Per-Project Breakdown",
-        copy:
-          "Each deal shows your amount invested, ownership, returns breakdown, project status, and timeline.",
-        body: `
-          <div class="table-toolbar">
-            <div class="filter-grid filter-grid-2">
-              <label>
-                Project
-                <select id="investor-project-filter-deal">
-                  <option value="">All projects</option>
-                  ${projectFilterOptions.deals
-                    .map(
-                      (deal) => `
-                        <option value="${escapeHtml(deal.id)}" ${
-                          deal.id === state.investorProjectFilters.dealId ? "selected" : ""
-                        }>
-                          ${escapeHtml(deal.name)}
-                        </option>
-                      `
-                    )
-                    .join("")}
-                </select>
-              </label>
-              <label>
-                Project status
-                <select id="investor-project-filter-status">
-                  <option value="">All statuses</option>
-                  ${projectFilterOptions.statuses
-                    .map(
-                      (status) => `
-                        <option value="${escapeHtml(status)}" ${
-                          status === state.investorProjectFilters.status ? "selected" : ""
-                        }>
-                          ${escapeHtml(titleCase(status))}
-                        </option>
-                      `
-                    )
-                    .join("")}
-                </select>
-              </label>
-            </div>
-            <span class="read-only-tag">
-              Showing ${escapeHtml(String(filteredProjects.length))} of ${escapeHtml(String(projects.length))}
-            </span>
-          </div>
-          <div class="deal-grid">
-            ${
-              filteredProjects.length
-                ? filteredProjects.map((project) => renderInvestorProject(project)).join("")
-                : projects.length
-                  ? '<div class="empty-state">No project breakdowns match the current project and status filters.</div>'
-                  : '<div class="empty-state">No positions are linked to this login.</div>'
-            }
-          </div>
-        `
+      ${renderUserSectionLayout({
+        title: isContractor ? "Contractor Sections" : "Investor Sections",
+        copy: "Choose one section to open. This keeps the portal shorter on phones.",
+        items: sectionItems
       })}
     </div>
   `;
@@ -3647,6 +3901,168 @@ function renderPoolMemberDashboard() {
     ),
     ...pooledDistributionProjects
   ];
+  const sectionPanelOptions = { forceExpanded: true, showToggle: false };
+  const sectionItems = [
+    {
+      id: "account",
+      label: "Account Details",
+      hideFromMenu: true,
+      copy: "Fund your account, request withdrawals, and place approved funds.",
+      render: () => renderUserCapitalAccountPanel(sectionPanelOptions)
+    },
+    {
+      id: "profile",
+      label: "Profile & Payout",
+      copy: "Update contact, payout, and ACH bank details.",
+      render: () => renderProfilePanel(sectionPanelOptions)
+    },
+    {
+      id: "joint-overview",
+      label: "Joint Overview",
+      copy: "Review totals for pooled capital groups.",
+      render: () =>
+        renderCollapsibleSection({
+          sectionId: "pool-member-joint-overview",
+          title: "Joint Portfolio Overview",
+          copy:
+            "These totals reflect the pooled capital groups you belong to before splitting your individual share.",
+          ...sectionPanelOptions,
+          body: `
+            <div class="metrics-grid">
+              ${metricCard("My committed capital", formatCurrency(poolPortfolio.totalCommitted))}
+              ${metricCard("Joint capital deployed", formatCurrency(poolPortfolio.jointCapitalDeployed))}
+              ${metricCard("Active pooled positions", String(poolPortfolio.activePools))}
+              ${metricCard("Pending pooled groups", String(poolPortfolio.pendingPools))}
+            </div>
+          `
+        })
+    },
+    {
+      id: "portfolio",
+      label: "Personal Portfolio",
+      copy: "Review your pro-rata pooled portfolio totals.",
+      render: () =>
+        renderCollapsibleSection({
+          sectionId: "pool-member-personal-portfolio",
+          title: "Personal Portfolio View",
+          copy:
+            "Your pro-rata totals across every pooled capital group tied to this login. Total returned reflects profit only, while total amount payout reflects cash already distributed to the pooled position and attributable to you.",
+          ...sectionPanelOptions,
+          body: `
+            <div class="metrics-grid">
+              ${metricCard("Total invested", formatCurrency(poolPortfolio.totalInvested))}
+              ${metricCard("Total returned", formatCurrency(poolPortfolio.totalReturned))}
+              ${metricCard("Total amount payout", formatCurrency(poolPortfolio.totalAmountPayout))}
+              ${metricCard("Accrued pref to date", formatCurrency(poolPortfolio.currentPrefEarned))}
+              ${metricCard("Projected pref at exit", formatCurrency(poolPortfolio.projectedPrefEarned))}
+            </div>
+            ${renderInvestorArchivedProjectHistory(archivedProjects)}
+          `
+        })
+    },
+    {
+      id: "voting",
+      label: "Project Voting",
+      copy: "Vote on pooled capital project placement.",
+      render: () =>
+        renderCollapsibleSection({
+          sectionId: "pool-member-voting",
+          title: "Project Voting",
+          copy:
+            "Once a pooled capital group reaches the minimum target, members can vote on which open project should receive the capital. Your weight follows your contribution percentage.",
+          message: renderMessage(state.messages.pool),
+          ...sectionPanelOptions,
+          body: `
+            <div class="distribution-review-list">
+              ${
+                votingPools.length
+                  ? votingPools.map((pool) => renderPoolMemberVotingCard(pool)).join("")
+                  : '<div class="empty-state">No pooled capital groups are currently waiting on a project vote.</div>'
+              }
+            </div>
+          `
+        })
+    },
+    {
+      id: "distribution",
+      label: "Payout Elections",
+      copy: "Choose payout or rollover for sold pooled positions.",
+      render: () =>
+        renderCollapsibleSection({
+          sectionId: "pool-member-distribution-elections",
+          title: "Reinvestment or Payout Elections",
+          copy:
+            "Once a pooled project has sold, request a cash payout or choose to roll your pro-rata share into the next project as a direct investor.",
+          message: renderMessage(state.messages.distribution),
+          ...sectionPanelOptions,
+          body: `
+            <div class="distribution-review-list">
+              ${
+                distributionProjects.length
+                  ? distributionProjects
+                      .map((project) => renderInvestorDistributionElectionCard(project))
+                      .join("")
+                  : '<div class="empty-state">No sold pooled positions currently require a reinvestment or payout election.</div>'
+              }
+            </div>
+          `
+        })
+    },
+    directProjects.length
+      ? {
+          id: "direct-projects",
+          label: "Direct Projects",
+          copy: "Review direct project positions outside pooled groups.",
+          render: () =>
+            renderCollapsibleSection({
+              sectionId: "pool-member-direct-projects",
+              title: "Direct Project Breakdown",
+              copy:
+                "Project positions approved from your own account funds are shown separately from pooled capital groups.",
+              ...sectionPanelOptions,
+              body: `
+                <div class="deal-grid">
+                  ${directProjects.map((project) => renderInvestorProject(project)).join("")}
+                </div>
+              `
+            })
+        }
+      : null,
+    {
+      id: "pooled-projects",
+      label: "Pooled Projects",
+      copy: "Review each pooled group and project position.",
+      render: () =>
+        renderCollapsibleSection({
+          sectionId: "pool-member-projects",
+          title: "Pooled Project Breakdown",
+          copy:
+            "Each pooled capital group shows the shared project position alongside your personal slice of the invested capital, projected returns, and payout activity.",
+          ...sectionPanelOptions,
+          body: `
+            <div class="deal-grid">
+              ${
+                pools.length
+                  ? pools.map((pool) => renderPoolMemberProjectCard(pool)).join("")
+                  : '<div class="empty-state">No pooled capital groups are linked to this login yet.</div>'
+              }
+            </div>
+          `
+        })
+    },
+    {
+      id: "questions",
+      label: "Questions & Answers",
+      copy: "Submit questions and read manager responses.",
+      render: () => renderUserQuestionsPanel(sectionPanelOptions)
+    },
+    {
+      id: "library",
+      label: "Company Library",
+      copy: "Open company resources and project balance sheets.",
+      render: () => renderCompanyLibraryPanel(sectionPanelOptions)
+    }
+  ].filter(Boolean);
 
   return `
     <div class="shell">
@@ -3665,108 +4081,10 @@ function renderPoolMemberDashboard() {
         </div>
       </section>
 
-      ${state.accountDetailsOpen ? renderUserCapitalAccountPanel() : ""}
-      ${renderProfilePanel()}
-      ${renderCompanyLibraryPanel()}
-
-      ${renderCollapsibleSection({
-        sectionId: "pool-member-joint-overview",
-        title: "Joint Portfolio Overview",
-        copy:
-          "These totals reflect the pooled capital groups you belong to before splitting your individual share.",
-        body: `
-          <div class="metrics-grid">
-            ${metricCard("My committed capital", formatCurrency(poolPortfolio.totalCommitted))}
-            ${metricCard("Joint capital deployed", formatCurrency(poolPortfolio.jointCapitalDeployed))}
-            ${metricCard("Active pooled positions", String(poolPortfolio.activePools))}
-            ${metricCard("Pending pooled groups", String(poolPortfolio.pendingPools))}
-          </div>
-        `
-      })}
-
-      ${renderCollapsibleSection({
-        sectionId: "pool-member-personal-portfolio",
-        title: "Personal Portfolio View",
-        copy:
-          "Your pro-rata totals across every pooled capital group tied to this login. Total returned reflects profit only, while total amount payout reflects cash already distributed to the pooled position and attributable to you.",
-        body: `
-          <div class="metrics-grid">
-            ${metricCard("Total invested", formatCurrency(poolPortfolio.totalInvested))}
-            ${metricCard("Total returned", formatCurrency(poolPortfolio.totalReturned))}
-            ${metricCard("Total amount payout", formatCurrency(poolPortfolio.totalAmountPayout))}
-            ${metricCard("Accrued pref to date", formatCurrency(poolPortfolio.currentPrefEarned))}
-            ${metricCard("Projected pref at exit", formatCurrency(poolPortfolio.projectedPrefEarned))}
-          </div>
-          ${renderInvestorArchivedProjectHistory(archivedProjects)}
-        `
-      })}
-
-      ${renderCollapsibleSection({
-        sectionId: "pool-member-voting",
-        title: "Project Voting",
-        copy:
-          "Once a pooled capital group reaches the minimum target, members can vote on which open project should receive the capital. Your weight follows your contribution percentage.",
-        message: renderMessage(state.messages.pool),
-        body: `
-          <div class="distribution-review-list">
-            ${
-              votingPools.length
-                ? votingPools.map((pool) => renderPoolMemberVotingCard(pool)).join("")
-                : '<div class="empty-state">No pooled capital groups are currently waiting on a project vote.</div>'
-            }
-          </div>
-        `
-      })}
-
-      ${renderCollapsibleSection({
-        sectionId: "pool-member-distribution-elections",
-        title: "Reinvestment or Payout Elections",
-        copy:
-          "Once a pooled project has sold, request a cash payout or choose to roll your pro-rata share into the next project as a direct investor.",
-        message: renderMessage(state.messages.distribution),
-        body: `
-          <div class="distribution-review-list">
-            ${
-              distributionProjects.length
-                ? distributionProjects
-                    .map((project) => renderInvestorDistributionElectionCard(project))
-                    .join("")
-                : '<div class="empty-state">No sold pooled positions currently require a reinvestment or payout election.</div>'
-            }
-          </div>
-        `
-      })}
-
-      ${
-        directProjects.length
-          ? renderCollapsibleSection({
-              sectionId: "pool-member-direct-projects",
-              title: "Direct Project Breakdown",
-              copy:
-                "Project positions approved from your own account funds are shown separately from pooled capital groups.",
-              body: `
-                <div class="deal-grid">
-                  ${directProjects.map((project) => renderInvestorProject(project)).join("")}
-                </div>
-              `
-            })
-          : ""
-      }
-
-      ${renderCollapsibleSection({
-        sectionId: "pool-member-projects",
-        title: "Pooled Project Breakdown",
-        copy:
-          "Each pooled capital group shows the shared project position alongside your personal slice of the invested capital, projected returns, and payout activity.",
-        body: `
-          <div class="deal-grid">
-            ${
-              pools.length
-                ? pools.map((pool) => renderPoolMemberProjectCard(pool)).join("")
-                : '<div class="empty-state">No pooled capital groups are linked to this login yet.</div>'
-            }
-          </div>
-        `
+      ${renderUserSectionLayout({
+        title: "Pooled Member Sections",
+        copy: "Choose one section to open. This keeps the portal shorter on phones.",
+        items: sectionItems
       })}
     </div>
   `;
@@ -7171,6 +7489,9 @@ function getManagerReviewAlertCounts() {
   const pendingAllocations = (admin.allocationRequests ?? []).filter(
     (request) => request.needsReview
   ).length;
+  const pendingQuestions = (admin.userQuestions ?? []).filter(
+    (question) => question.needsResponse
+  ).length;
   const readyPools = (admin.investorPools ?? []).filter((pool) => pool.canFund).length;
   const readyProjectPools = (admin.projectPooledRequests ?? []).filter(
     (bucket) => bucket.canManagerFund
@@ -7181,6 +7502,7 @@ function getManagerReviewAlertCounts() {
     pendingDistributions,
     pendingWithdrawals,
     pendingAllocations,
+    pendingQuestions,
     readyPools,
     readyProjectPools,
     total:
@@ -7188,6 +7510,7 @@ function getManagerReviewAlertCounts() {
       pendingDistributions +
       pendingWithdrawals +
       pendingAllocations +
+      pendingQuestions +
       readyPools +
       readyProjectPools
   };
@@ -7206,7 +7529,7 @@ function renderManagerReviewAlertPanel() {
         <p class="eyebrow">Manager Inbox</p>
         <h3>${escapeHtml(String(counts.total))} item${counts.total === 1 ? "" : "s"} need review</h3>
         <p class="section-copy">
-          Pending account approvals, allocation requests, distribution elections, early withdrawal requests, and ready pool funding actions are waiting for manager action.
+          Pending account approvals, allocation requests, user questions, distribution elections, early withdrawal requests, and ready pool funding actions are waiting for manager action.
         </p>
       </div>
       <div class="button-row">
@@ -7222,6 +7545,13 @@ function renderManagerReviewAlertPanel() {
             ? `<button class="button-secondary manager-alert-button" type="button" data-manager-page="allocations">! ${escapeHtml(
                 String(counts.pendingAllocations)
               )} allocation${counts.pendingAllocations === 1 ? "" : "s"}</button>`
+            : ""
+        }
+        ${
+          counts.pendingQuestions
+            ? `<button class="button-secondary manager-alert-button" type="button" data-manager-page="questions">! ${escapeHtml(
+                String(counts.pendingQuestions)
+              )} question${counts.pendingQuestions === 1 ? "" : "s"}</button>`
             : ""
         }
         ${
@@ -7321,6 +7651,10 @@ function renderNotificationPanel(notificationCenter) {
                 <span>Withdrawal reviews</span>
                 <strong>${escapeHtml(String(managerCounts.pendingWithdrawals))}</strong>
               </button>
+              <button class="notification-summary-item" type="button" data-manager-page="questions">
+                <span>User questions</span>
+                <strong>${escapeHtml(String(managerCounts.pendingQuestions))}</strong>
+              </button>
               <button class="notification-summary-item" type="button" data-manager-page="pooled-investors">
                 <span>Pool funding</span>
                 <strong>${escapeHtml(String(managerCounts.readyPools))}</strong>
@@ -7367,6 +7701,11 @@ const MANAGER_PAGE_ITEMS = [
     id: "pending-approvals",
     label: "Pending Approvals",
     copy: "Approve user identity submissions waiting for manager review."
+  },
+  {
+    id: "questions",
+    label: "Q&A",
+    copy: "Respond to investor questions submitted from the portal."
   },
   {
     id: "project-admin",
@@ -7501,6 +7840,35 @@ function renderManagerOverviewPage(overview) {
     })}
     ${renderProfilePanel()}
   `;
+}
+
+function renderManagerQuestionsPage() {
+  const questions = state.dashboard.admin.userQuestions ?? [];
+  const openQuestions = questions.filter((question) => question.status === "open");
+  const answeredQuestions = questions.filter((question) => question.status === "answered");
+
+  return renderCollapsibleSection({
+    sectionId: "manager-user-questions",
+    title: "User Questions",
+    copy: "Review investor questions and send responses back to their portal.",
+    message: renderMessage(state.messages.question),
+    body: `
+      <div class="metrics-grid">
+        ${metricCard("Waiting for response", String(openQuestions.length))}
+        ${metricCard("Answered", String(answeredQuestions.length))}
+        ${metricCard("Total questions", String(questions.length))}
+      </div>
+      <div class="distribution-review-list">
+        ${
+          questions.length
+            ? questions
+                .map((question) => renderUserQuestionCard(question, { managerView: true }))
+                .join("")
+            : '<div class="empty-state">No user questions have been submitted yet.</div>'
+        }
+      </div>
+    `
+  });
 }
 
 function renderManagerProjectAdminPage() {
@@ -8014,6 +8382,8 @@ function renderManagerPageContent(page, { overview, deals }) {
       return renderManagerOverviewPage(overview);
     case "pending-approvals":
       return renderPendingUserApprovalsPage();
+    case "questions":
+      return renderManagerQuestionsPage();
     case "project-admin":
       return renderManagerProjectAdminPage();
     case "archived-projects":

@@ -748,6 +748,10 @@ button:disabled {
   gap: 0.75rem;
 }
 
+.section-tools:empty {
+  display: none;
+}
+
 .section-toggle-button {
   min-width: 7rem;
   justify-content: center;
@@ -1607,7 +1611,15 @@ td {
   }
 
   .manager-nav-list {
-    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    display: flex;
+    overflow-x: auto;
+    padding-bottom: 0.25rem;
+    scroll-snap-type: x proximity;
+  }
+
+  .manager-nav-button {
+    min-width: min(82vw, 240px);
+    scroll-snap-align: start;
   }
 }
 

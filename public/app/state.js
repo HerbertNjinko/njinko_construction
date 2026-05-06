@@ -7,6 +7,7 @@ export const COMPANY_NAME = "Njinko Development Group LLC";
 export const LOGIN_PAGE_TITLE = "Investor and Manager Access Portal";
 export const RESET_TOKEN_PARAM = "resetToken";
 export const DEFAULT_MANAGER_PAGE = "overview";
+export const DEFAULT_USER_SECTION = "account";
 
 function getPasswordResetTokenFromLocation() {
   const params = new URLSearchParams(window.location.search);
@@ -73,6 +74,7 @@ export function createInitialMessages() {
     withdrawal: null,
     resource: null,
     capital: null,
+    question: null,
     directory: null,
     questionnaire: null,
     legal: null,
@@ -88,6 +90,7 @@ export const state = {
   calculator: null,
   calculatorSelectionId: null,
   managerPage: DEFAULT_MANAGER_PAGE,
+  userSection: DEFAULT_USER_SECTION,
   adminDealId: null,
   createDealDraft: null,
   dealEditorDrafts: {},
