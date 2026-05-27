@@ -54,5 +54,5 @@ The app runs on `http://localhost:3000`.
 
 - Seed data lives in [`src/data.js`](/home/herbertabingwa/njinko_construction/src/data.js) and loads on first database initialization.
 - Database access is implemented in [`src/database.js`](/home/herbertabingwa/njinko_construction/src/database.js).
-- The app remains dependency-free and uses Node's built-in HTTP server plus Node 22's built-in SQLite module.
+- The app uses Node's built-in HTTP server and the `better-sqlite3` package for SQLite compatibility with Node 18+.
 - This is still a prototype, not production-grade auth, authorization, or accounting infrastructure.

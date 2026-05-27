@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID, scryptSync } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import Database from "better-sqlite3";
 
 import { seedData } from "./data.js";
 
@@ -11,7 +11,7 @@ const SCHEMA_PATH = join(DATA_DIR, "schema.sql");
 
 mkdirSync(DATA_DIR, { recursive: true });
 
-export const db = new DatabaseSync(DATABASE_PATH);
+export const db = new Database(DATABASE_PATH);
 db.exec("PRAGMA foreign_keys = ON;");
 db.exec(readFileSync(SCHEMA_PATH, "utf8"));
 
