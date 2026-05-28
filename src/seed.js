@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { closeDatabasePool } from "./postgres.js";
 import { seedDatabase } from "./database.js";
 

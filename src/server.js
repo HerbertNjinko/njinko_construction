@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { createServer } from "node:http";
 import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { extname, isAbsolute, relative, resolve } from "node:path";
@@ -96,15 +97,15 @@ const securityHeaders = {
   "Content-Security-Policy": [
     "default-src 'self'",
     "base-uri 'self'",
-    "connect-src 'self' https://api.dwolla.com https://api-sandbox.dwolla.com",
+    "connect-src 'self' https://api.dwolla.com https://api-sandbox.dwolla.com https://static.cloudflareinsights.com",
     "font-src 'self'",
     "form-action 'self'",
     "frame-src 'self' https://*.dwolla.com",
     "frame-ancestors 'none'",
     "img-src 'self' data:",
     "object-src 'none'",
-    "script-src 'self' https://cdn.dwolla.com",
-    "style-src 'self' 'unsafe-inline'"
+    "script-src 'self' https://cdn.dwolla.com https://static.cloudflareinsights.com 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline' data:"
   ].join("; "),
   "Cross-Origin-Resource-Policy": "same-origin",
   "Permissions-Policy": "camera=(), geolocation=(), microphone=(), payment=()",

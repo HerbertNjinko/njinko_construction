@@ -4,12 +4,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node --env-file-if-exists=.env src/server.js",
-    "dev": "node --env-file-if-exists=.env --watch src/server.js",
-    "migrate": "node --env-file-if-exists=.env src/migrate.js",
-    "seed": "node --env-file-if-exists=.env src/seed.js"
+    "start": "node -r dotenv/config src/server.js",
+    "dev": "node -r dotenv/config --watch src/server.js",
+    "migrate": "node -r dotenv/config src/migrate.js",
+    "seed": "node -r dotenv/config src/seed.js"
   },
   "dependencies": {
+    "dotenv": "^16.3.1",
     "nodemailer": "^8.0.5",
     "pg": "^8.20.0"
   }
