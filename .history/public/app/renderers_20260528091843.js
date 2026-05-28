@@ -2981,7 +2981,6 @@ function renderDwollaAchPanel(account) {
                     </label>
                     <button class="button-primary" type="submit">Start ACH transfer</button>
                   </form>
-                  ${renderDwollaCustomerUpgradeDropIn(dwolla)}
                 `
                 : `
                   ${
