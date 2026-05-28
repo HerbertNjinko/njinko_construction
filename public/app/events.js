@@ -1,4 +1,4 @@
-import { state } from "./state.js?v=20260504-frontend-21";
+import { state } from "./state.js?v=20260504-frontend-24";
 import {
   clearAuthFeedback,
   clearMessages,
@@ -14,7 +14,7 @@ import {
   setMessage,
   titleCase,
   toggleSectionCollapsed
-} from "./helpers.js?v=20260504-frontend-21";
+} from "./helpers.js?v=20260504-frontend-24";
 import {
   applyArchivedProjectFilters,
   applyQuestionnaireFilters,
@@ -30,7 +30,7 @@ import {
   syncDealEditorField,
   updateCreateDealDraft,
   updateDealEditorDraft
-} from "./data.js?v=20260504-frontend-21";
+} from "./data.js?v=20260504-frontend-24";
 import {
   api,
   applyLoggedOutState,
@@ -38,8 +38,8 @@ import {
   loadSession,
   recordSessionActivity,
   refreshDashboard
-} from "./session.js?v=20260504-frontend-21";
-import { render } from "./renderers.js?v=20260504-frontend-21";
+} from "./session.js?v=20260504-frontend-24";
+import { render } from "./renderers.js?v=20260504-frontend-24";
 
 let listenersBound = false;
 let dwollaDropInRetryCount = 0;
@@ -481,7 +481,7 @@ export function setupEventListeners() {
           })
         });
         clearMessages();
-        await loadSession();
+        await refreshDwollaUiState();
       } catch (error) {
         state.loading = false;
         state.loginError = error.message;
@@ -1422,6 +1422,52 @@ export function setupEventListeners() {
                   startedCount === 1 ? "" : "s"
                 }.`
               : "Dwolla ACH bank account verified."
+        );
+        event.target.reset();
+      } catch (error) {
+        setMessage(messageKey, "error", error.message);
+      }
+
+      render();
+      return;
+    }
+
+    if (event.target.dataset.dwollaCustomerVerificationForm === "true") {
+      event.preventDefault();
+      const formData = new FormData(event.target);
+      const messageKey = getDwollaMessageKey();
+
+      try {
+        const result = await api("/api/payments/dwolla/customer/verify", {
+          method: "POST",
+          body: JSON.stringify({
+            firstName: formData.get("firstName"),
+            lastName: formData.get("lastName"),
+            email: formData.get("email"),
+            address1: formData.get("address1"),
+            address2: formData.get("address2"),
+            city: formData.get("city"),
+            state: formData.get("state"),
+            postalCode: formData.get("postalCode"),
+            dateOfBirth: formData.get("dateOfBirth"),
+            ssn: formData.get("ssn")
+          })
+        });
+        await refreshDwollaUiState();
+
+        const startedCount = result.startedDeposits?.length ?? 0;
+        const failedCount = result.failedDeposits?.length ?? 0;
+        const customerStatus = titleCase(result.customer?.customerStatus || "submitted");
+        setMessage(
+          messageKey,
+          failedCount ? "error" : "success",
+          failedCount
+            ? `Dwolla identity verification updated to ${customerStatus}, but the pending transfer could not be started. Contact the manager.`
+            : startedCount
+              ? `Dwolla identity verification updated to ${customerStatus}. Started ${startedCount} pending ACH transfer${
+                  startedCount === 1 ? "" : "s"
+                }.`
+              : `Dwolla identity verification updated to ${customerStatus}.`
         );
         event.target.reset();
       } catch (error) {

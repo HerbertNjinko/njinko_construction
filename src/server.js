@@ -1,4 +1,3 @@
-import "dotenv/config";
 import { createServer } from "node:http";
 import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { extname, isAbsolute, relative, resolve } from "node:path";
@@ -39,6 +38,7 @@ import {
   createDwollaClientTokenForUser,
   createDwollaFundingSourceForUser,
   ensureDwollaCustomerForUser,
+  updateDwollaVerifiedCustomerForUser,
   getUserByEmail,
   getUserById,
   getUserAccountFundingSummary,
@@ -1671,6 +1671,36 @@ const server = createServer(async (request, response) => {
 
       try {
         const result = await createDwollaClientTokenForUser(user.id, body);
+        sendJson(response, 200, result);
+      } catch (error) {
+        sendJson(response, 400, { error: error.message });
+      }
+
+      return;
+    }
+
+    if (method === "POST" && url.pathname === "/api/payments/dwolla/customer/verify") {
+      const user = await requireDwollaSetupUser(
+        request,
+        response,
+        "completing Dwolla identity verification"
+      );
+
+      if (!user) {
+        return;
+      }
+
+      const body = await readJsonBody(request);
+
+      if (!body) {
+        sendJson(response, 400, { error: "A valid request body is required." });
+        return;
+      }
+
+      try {
+        const result = await updateDwollaVerifiedCustomerForUser(user.id, body, {
+          ipAddress: getClientAddress(request)
+        });
         sendJson(response, 200, result);
       } catch (error) {
         sendJson(response, 400, { error: error.message });

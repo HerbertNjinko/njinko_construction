@@ -6,7 +6,7 @@ import {
   LOGIN_PAGE_TITLE,
   app,
   state
-} from "./state.js?v=20260504-frontend-21";
+} from "./state.js?v=20260504-frontend-24";
 import {
   breakdownItem,
   escapeHtml,
@@ -22,7 +22,7 @@ import {
   renderSectionToggle,
   summaryItem,
   titleCase
-} from "./helpers.js?v=20260504-frontend-21";
+} from "./helpers.js?v=20260504-frontend-24";
 import {
   applyAllocationFilters,
   applyArchivedProjectFilters,
@@ -45,7 +45,9 @@ import {
   getInvestorProjectFilterOptions,
   getManagerEditableDeal,
   getUserFilterOptions
-} from "./data.js?v=20260504-frontend-21";
+} from "./data.js?v=20260504-frontend-24";
+
+const DWOLLA_UNVERIFIED_WEEKLY_LIMIT = 5000;
 
 function renderLogin() {
   const errorMarkup = state.loginError
@@ -341,46 +343,86 @@ function renderDwollaFundingSourceDropIn(dwolla) {
   `;
 }
 
-function renderDwollaMicroDepositDropIn(dwolla) {
-  if (!dwolla?.customerId || !dwolla?.fundingSourceId) {
-    return "";
-  }
+function getDwollaCustomerPrefill() {
+  const nameParts = String(state.session?.name ?? state.dashboard?.viewer?.name ?? "")
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
 
-  return `
-    <div class="dwolla-dropin-shell" data-dwolla-dropin="true">
-      <div>
-        <p class="eyebrow">Dwolla Guided Verification</p>
-        <h4>Verify ACH bank</h4>
-      </div>
-      <dwolla-micro-deposits-verify
-        customerId="${escapeHtml(dwolla.customerId)}"
-        fundingSourceId="${escapeHtml(dwolla.fundingSourceId)}"
-      ></dwolla-micro-deposits-verify>
-    </div>
-  `;
+  return {
+    firstName: nameParts[0] ?? "",
+    lastName: nameParts.length > 1 ? nameParts.at(-1) : "",
+    email: state.session?.email ?? state.dashboard?.viewer?.email ?? ""
+  };
 }
 
-function renderDwollaCustomerUpgradeDropIn(dwolla) {
-  if (!dwolla?.customerId || dwolla.customerStatus === "verified") {
+function renderDwollaCustomerUpgradeDropIn(dwolla, { requiredAmount = 0 } = {}) {
+  const amount = Number(requiredAmount ?? 0);
+
+  if (
+    !dwolla?.customerId ||
+    dwolla.customerStatus === "verified" ||
+    amount <= DWOLLA_UNVERIFIED_WEEKLY_LIMIT
+  ) {
     return "";
   }
 
-  const dwollaConfig = getDwollaConfig();
+  const prefill = getDwollaCustomerPrefill();
 
   return `
-    <div class="dwolla-dropin-shell" data-dwolla-dropin="true">
+    <div class="dwolla-fallback-form dwolla-customer-verification-form">
       <div>
         <p class="eyebrow">Dwolla Identity Verification</p>
         <h4>Increase ACH transfer limit</h4>
         <p class="section-copy">
-          Dwolla limits unverified customers to $5,000 per week. Complete this verification for larger ACH funding.
+          Dwolla limits unverified customers to $5,000 per week. Complete this form to request a verified Dwolla customer profile for larger ACH funding.
         </p>
       </div>
-      <dwolla-customer-update
-        customerId="${escapeHtml(dwolla.customerId)}"
-        terms="${escapeHtml(dwollaConfig.termsUrl || window.location.origin)}"
-        privacy="${escapeHtml(dwollaConfig.privacyUrl || window.location.origin)}"
-      ></dwolla-customer-update>
+      <form data-dwolla-customer-verification-form="true">
+        <div class="form-grid-2">
+          <label>
+            First name
+            <input type="text" name="firstName" value="${inputValue(prefill.firstName)}" minlength="2" required />
+          </label>
+          <label>
+            Last name
+            <input type="text" name="lastName" value="${inputValue(prefill.lastName)}" minlength="2" required />
+          </label>
+          <label>
+            Email
+            <input type="email" name="email" value="${inputValue(prefill.email)}" required />
+          </label>
+          <label>
+            Date of birth
+            <input type="date" name="dateOfBirth" required />
+          </label>
+          <label>
+            Address 1
+            <input type="text" name="address1" autocomplete="address-line1" required />
+          </label>
+          <label>
+            Address 2
+            <input type="text" name="address2" autocomplete="address-line2" />
+          </label>
+          <label>
+            City
+            <input type="text" name="city" autocomplete="address-level2" required />
+          </label>
+          <label>
+            State
+            <input type="text" name="state" maxlength="2" autocomplete="address-level1" placeholder="NC" required />
+          </label>
+          <label>
+            ZIP code
+            <input type="text" name="postalCode" inputmode="numeric" autocomplete="postal-code" required />
+          </label>
+          <label>
+            SSN last 4
+            <input type="password" name="ssn" inputmode="numeric" maxlength="4" autocomplete="off" required />
+          </label>
+        </div>
+        <button class="button-primary" type="submit">Submit Dwolla verification</button>
+      </form>
     </div>
   `;
 }
@@ -419,6 +461,7 @@ function renderPendingReviewAchPanel() {
   const approvedAmount = Number(accountFunding.approvedAmount ?? 0);
   const pendingAmount = Number(accountFunding.pendingAmount ?? 0);
   const targetAmount = Number(accountFunding.targetAmount ?? 0);
+  const customerUpgradeAmount = Math.max(targetAmount, pendingAmount);
   const hasProcessedRequiredFunds =
     targetAmount > 0 ? approvedAmount >= targetAmount : approvedAmount > 0;
   const fundingStatus = hasProcessedRequiredFunds
@@ -454,14 +497,12 @@ function renderPendingReviewAchPanel() {
         ${summaryItem("Linked bank", bankLabel || "No bank selected")}
         ${summaryItem("Funding status", fundingStatus)}
       </div>
-      ${renderDwollaCustomerUpgradeDropIn(dwolla)}
       ${
         hasFundingSource && !isVerified
           ? `
             <p class="helper-copy">
               Enter the two micro-deposit amounts that Dwolla posted to your bank account.
             </p>
-            ${renderDwollaMicroDepositDropIn(dwolla)}
             ${renderDwollaFallbackForm("Manual Verification", renderDwollaMicroDepositVerificationForm())}
           `
           : isVerified && pendingAmount > 0 && approvedAmount <= 0
@@ -490,6 +531,7 @@ function renderPendingReviewAchPanel() {
               ${renderDwollaFallbackForm("Manual Bank Link", renderDwollaManualBankLinkForm())}
             `
       }
+      ${renderDwollaCustomerUpgradeDropIn(dwolla, { requiredAmount: customerUpgradeAmount })}
     </div>
   `;
 }
@@ -2914,7 +2956,17 @@ function renderDwollaAchPanel(account) {
               ${summaryItem("Bank status", titleCase(dwolla.fundingSourceStatus || "Not linked"))}
               ${summaryItem("Linked bank", bankLabel || "No bank selected")}
             </div>
-            ${renderDwollaCustomerUpgradeDropIn(dwolla)}
+            ${
+              dwolla.customerStatus === "verified"
+                ? ""
+                : `
+                  <p class="helper-copy">
+                    Unverified Dwolla customers can fund up to ${formatCurrency(
+                      DWOLLA_UNVERIFIED_WEEKLY_LIMIT
+                    )} per week after bank verification. Larger ACH transfers require Dwolla identity verification.
+                  </p>
+                `
+            }
             ${
               hasVerifiedFundingSource
                 ? `
@@ -2943,7 +2995,6 @@ function renderDwollaAchPanel(account) {
                         <p class="helper-copy">
                           Enter the two Dwolla micro-deposit amounts from your bank statement before ACH deposits can be started.
                         </p>
-                        ${renderDwollaMicroDepositDropIn(dwolla)}
                         ${renderDwollaFallbackForm("Manual Verification", renderDwollaMicroDepositVerificationForm())}
                       `
                       : `

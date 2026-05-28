@@ -1247,8 +1247,7 @@ td {
   font-size: 1rem;
 }
 
-.dwolla-dropin-shell dwolla-funding-source-create,
-.dwolla-dropin-shell dwolla-micro-deposits-verify {
+.dwolla-dropin-shell dwolla-funding-source-create {
   display: block;
 }
 

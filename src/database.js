@@ -15,6 +15,7 @@ import {
   initiateDwollaPayoutTransfer,
   listDwollaFundingSources,
   retrieveDwollaResource,
+  updateDwollaCustomer,
   verifyDwollaMicroDeposits,
   verifyDwollaWebhookSignature
 } from "./dwolla.js";
@@ -6429,6 +6430,62 @@ function normalizeDwollaMicroDepositAmount(value, fieldLabel) {
   return amount;
 }
 
+function normalizeDwollaCustomerState(value) {
+  const stateCode = String(value ?? "").trim().toUpperCase();
+
+  if (!/^[A-Z]{2}$/.test(stateCode)) {
+    throw new Error("State must be a 2-letter U.S. state code.");
+  }
+
+  return stateCode;
+}
+
+function normalizeDwollaPostalCode(value) {
+  const postalCode = String(value ?? "").trim();
+
+  if (!/^\d{5}(?:-\d{4})?$/.test(postalCode)) {
+    throw new Error("Postal code must be a valid U.S. ZIP code.");
+  }
+
+  return postalCode;
+}
+
+function normalizeDwollaSsnLastFour(value) {
+  const ssn = String(value ?? "").replace(/\D/g, "");
+
+  if (!/^\d{4}$/.test(ssn)) {
+    throw new Error("SSN must be the last 4 digits.");
+  }
+
+  return ssn;
+}
+
+function normalizeDwollaCustomerVerificationInput(input, user) {
+  const email = normalizeEmail(input?.email ?? user?.email);
+
+  if (!email.includes("@")) {
+    throw new Error("Email must be valid.");
+  }
+
+  return {
+    firstName: normalizeRequiredTextInput(input?.firstName ?? user?.firstName, "First name", {
+      minLength: 2
+    }),
+    lastName: normalizeRequiredTextInput(input?.lastName ?? user?.lastName, "Last name", {
+      minLength: 2
+    }),
+    email,
+    type: "personal",
+    address1: normalizeRequiredTextInput(input?.address1, "Address 1", { minLength: 3 }),
+    address2: normalizeOptionalText(input?.address2),
+    city: normalizeRequiredTextInput(input?.city, "City", { minLength: 2 }),
+    state: normalizeDwollaCustomerState(input?.state),
+    postalCode: normalizeDwollaPostalCode(input?.postalCode),
+    dateOfBirth: normalizeRequiredDateInput(input?.dateOfBirth, "Date of birth"),
+    ssn: normalizeDwollaSsnLastFour(input?.ssn)
+  };
+}
+
 function getDwollaKnownSendLimitForUser(user) {
   return user?.dwollaCustomerStatus === "verified"
     ? DWOLLA_VERIFIED_DEFAULT_TRANSFER_LIMIT
@@ -6456,6 +6513,30 @@ function assertDwollaTransferAmountWithinKnownLimit(user, amount) {
       "en-US"
     )} per week. Complete Dwolla identity verification before funding a larger amount.`
   );
+}
+
+function getDwollaAchTransferChunks(user, amount) {
+  const normalizedAmount = roundNumber(Number(amount ?? 0));
+  const limit = getDwollaKnownSendLimitForUser(user);
+
+  if (normalizedAmount <= limit) {
+    return [normalizedAmount];
+  }
+
+  if (user?.dwollaCustomerStatus !== "verified") {
+    assertDwollaTransferAmountWithinKnownLimit(user, normalizedAmount);
+  }
+
+  const chunks = [];
+  let remaining = normalizedAmount;
+
+  while (remaining > 0.001) {
+    const chunkAmount = roundNumber(Math.min(limit, remaining));
+    chunks.push(chunkAmount);
+    remaining = roundNumber(remaining - chunkAmount);
+  }
+
+  return chunks;
 }
 
 async function assertUserCanReceiveDwollaPayout(targetUser, {
@@ -6702,6 +6783,65 @@ export async function createDwollaClientTokenForUser(userId, input) {
   });
 
   return token;
+}
+
+export async function updateDwollaVerifiedCustomerForUser(userId, input, { ipAddress = "" } = {}) {
+  assertDwollaConfigured();
+  let user = await getUserAccountById(String(userId ?? "").trim());
+
+  if (!user || user.role === "manager") {
+    throw new Error("Only investor accounts can complete Dwolla identity verification.");
+  }
+
+  if (!["investor", "pool_member"].includes(user.category)) {
+    throw new Error("Dwolla identity verification is available for investor funding accounts.");
+  }
+
+  if (!user.dwollaCustomerUrl) {
+    throw new Error("Set up your Dwolla ACH profile before completing Dwolla identity verification.");
+  }
+
+  if (user.dwollaCustomerStatus === "verified") {
+    return {
+      customer: {
+        customerId: user.dwollaCustomerId,
+        customerUrl: user.dwollaCustomerUrl,
+        customerStatus: user.dwollaCustomerStatus
+      },
+      startedDeposits: [],
+      failedDeposits: []
+    };
+  }
+
+  const body = {
+    ...normalizeDwollaCustomerVerificationInput(input, user),
+    ipAddress
+  };
+
+  if (!body.address2) {
+    delete body.address2;
+  }
+
+  await updateDwollaCustomer(user.dwollaCustomerUrl, body);
+  const customer = normalizeDwollaCustomer(
+    await retrieveDwollaResource(user.dwollaCustomerUrl),
+    user.dwollaCustomerUrl
+  );
+  await updateDwollaCustomerForUser(user.id, customer);
+  user = await getUserAccountById(user.id);
+
+  const pendingTransferResult =
+    user.dwollaCustomerStatus === "verified" && user.dwollaFundingSourceStatus === "verified"
+      ? await startPendingDwollaAchDepositIntentsForUser(user.id)
+      : {
+          startedDeposits: [],
+          failedDeposits: []
+        };
+
+  return {
+    customer,
+    ...pendingTransferResult
+  };
 }
 
 export async function refreshDwollaFundingSourcesForUser(userId) {
@@ -7002,7 +7142,8 @@ export async function getUserAccountFundingSummary(userId) {
       SELECT
         COALESCE(SUM(CASE WHEN status = 'approved' THEN amount ELSE 0 END), 0)::float AS "approvedAmount",
         COALESCE(SUM(CASE WHEN status = 'pending' THEN amount ELSE 0 END), 0)::float AS "pendingAmount",
-        COALESCE(SUM(CASE WHEN status = 'rejected' THEN amount ELSE 0 END), 0)::float AS "rejectedAmount"
+        COALESCE(SUM(CASE WHEN status = 'rejected' THEN amount ELSE 0 END), 0)::float AS "rejectedAmount",
+        COALESCE(SUM(CASE WHEN status IN ('approved', 'pending') THEN amount ELSE 0 END), 0)::float AS "activeFundingAmount"
       FROM user_capital_deposits
       WHERE user_id = $1
         AND payment_method = 'dwolla_ach'
@@ -7038,7 +7179,9 @@ export async function getUserAccountFundingSummary(userId) {
     approvedAmount: roundNumber(totals?.approvedAmount ?? 0),
     pendingAmount: roundNumber(totals?.pendingAmount ?? 0),
     rejectedAmount: roundNumber(totals?.rejectedAmount ?? 0),
-    targetAmount: roundNumber(target?.targetAmount ?? 0),
+    targetAmount: roundNumber(
+      Math.max(Number(target?.targetAmount ?? 0), Number(totals?.activeFundingAmount ?? 0))
+    ),
     latestStatus: latest?.status ?? "",
     latestProviderTransferStatus: latest?.providerTransferStatus ?? ""
   };
@@ -7607,8 +7750,10 @@ async function startPendingDwollaAchDepositIntentsForUser(userId) {
     `
       SELECT
         id,
+        participant_id AS "participantId",
         amount::float AS amount,
-        notes
+        notes,
+        submitted_by_user_id AS "submittedByUserId"
       FROM user_capital_deposits
       WHERE user_id = $1
         AND status = 'pending'
@@ -7625,39 +7770,129 @@ async function startPendingDwollaAchDepositIntentsForUser(userId) {
     const timestamp = nowTimestamp();
 
     try {
-      assertDwollaTransferAmountWithinKnownLimit(user, pendingDeposit.amount);
+      const transferAmounts = getDwollaAchTransferChunks(user, pendingDeposit.amount);
+      const transferDeposits = [
+        {
+          id: pendingDeposit.id,
+          amount: transferAmounts[0],
+          notes: pendingDeposit.notes
+        }
+      ];
 
-      const transfer = await initiateDwollaAchTransfer({
-        depositId: pendingDeposit.id,
-        sourceFundingSourceUrl: user.dwollaFundingSourceUrl,
-        amount: Number(pendingDeposit.amount ?? 0),
-        notes: pendingDeposit.notes
-      });
+      if (transferAmounts.length > 1) {
+        await pool.query(
+          `
+            UPDATE user_capital_deposits
+            SET
+              amount = $1,
+              provider_failure_reason = NULL,
+              manager_notes = $2,
+              updated_at = $3
+            WHERE id = $4
+          `,
+          [
+            transferAmounts[0],
+            `ACH transfer split into ${transferAmounts.length} Dwolla transfers because verified customers are limited to ${formatCurrencyForError(
+              DWOLLA_VERIFIED_DEFAULT_TRANSFER_LIMIT
+            )} per transfer.`,
+            timestamp,
+            pendingDeposit.id
+          ]
+        );
 
-      await pool.query(
-        `
-          UPDATE user_capital_deposits
-          SET
-            provider_name = 'dwolla',
-            provider_transfer_id = $1,
-            provider_transfer_url = $2,
-            provider_transfer_status = $3,
-            provider_failure_reason = NULL,
-            manager_notes = $4,
-            updated_at = $5
-          WHERE id = $6
-        `,
-        [
-          transfer.transferId,
-          transfer.transferUrl,
-          transfer.transferStatus,
-          "Dwolla ACH transfer initiated after bank verification. Funds become available after Dwolla reports the transfer as processed.",
-          timestamp,
-          pendingDeposit.id
-        ]
-      );
+        for (const amount of transferAmounts.slice(1)) {
+          const splitDepositId = createId("capital-deposit");
 
-      startedDeposits.push(await getCapitalDepositById(pendingDeposit.id));
+          await pool.query(
+            `
+              INSERT INTO user_capital_deposits (
+                id,
+                user_id,
+                participant_id,
+                amount,
+                status,
+                proof_file_name,
+                proof_file_mime_type,
+                proof_file_data_url,
+                payment_method,
+                provider_name,
+                provider_transfer_id,
+                provider_transfer_url,
+                provider_transfer_status,
+                provider_correlation_id,
+                notes,
+                manager_notes,
+                submitted_by_user_id,
+                reviewed_by_user_id,
+                reviewed_at,
+                created_at,
+                updated_at
+              )
+              VALUES (
+                $1, $2, $3, $4, 'pending', NULL, NULL, NULL,
+                'dwolla_ach', 'dwolla', NULL, NULL, 'pending', $1,
+                $5, $6, $7, NULL, NULL, $8, $8
+              )
+            `,
+            [
+              splitDepositId,
+              user.id,
+              pendingDeposit.participantId ?? user.participantId,
+              amount,
+              pendingDeposit.notes,
+              `ACH transfer split from ${pendingDeposit.id} because verified customers are limited to ${formatCurrencyForError(
+                DWOLLA_VERIFIED_DEFAULT_TRANSFER_LIMIT
+              )} per transfer.`,
+              pendingDeposit.submittedByUserId ?? user.id,
+              timestamp
+            ]
+          );
+
+          transferDeposits.push({
+            id: splitDepositId,
+            amount,
+            notes: pendingDeposit.notes
+          });
+        }
+      }
+
+      for (const transferDeposit of transferDeposits) {
+        const transfer = await initiateDwollaAchTransfer({
+          depositId: transferDeposit.id,
+          sourceFundingSourceUrl: user.dwollaFundingSourceUrl,
+          amount: Number(transferDeposit.amount ?? 0),
+          notes: transferDeposit.notes
+        });
+
+        await pool.query(
+          `
+            UPDATE user_capital_deposits
+            SET
+              provider_name = 'dwolla',
+              provider_transfer_id = $1,
+              provider_transfer_url = $2,
+              provider_transfer_status = $3,
+              provider_failure_reason = NULL,
+              manager_notes = $4,
+              updated_at = $5
+            WHERE id = $6
+          `,
+          [
+            transfer.transferId,
+            transfer.transferUrl,
+            transfer.transferStatus,
+            transferAmounts.length > 1
+              ? `Dwolla ACH transfer initiated as part of a ${formatCurrencyForError(
+                  pendingDeposit.amount
+                )} split transfer. Funds become available after Dwolla reports the transfer as processed.`
+              : "Dwolla ACH transfer initiated after bank verification. Funds become available after Dwolla reports the transfer as processed.",
+            nowTimestamp(),
+            transferDeposit.id
+          ]
+        );
+
+        startedDeposits.push(await getCapitalDepositById(transferDeposit.id));
+      }
     } catch (error) {
       await pool.query(
         `

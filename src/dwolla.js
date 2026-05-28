@@ -309,6 +309,17 @@ export async function retrieveDwollaResource(resourceUrl) {
   return response.body;
 }
 
+export async function updateDwollaCustomer(customerUrl, body) {
+  const response = await dwollaRequest(customerUrl, {
+    method: "POST",
+    body,
+    accept: DWOLLA_HAL_CONTENT_TYPE,
+    contentType: DWOLLA_JSON_CONTENT_TYPE
+  });
+
+  return response.body;
+}
+
 export async function listDwollaFundingSources(customerUrl) {
   const response = await dwollaRequest(`${String(customerUrl).replace(/\/+$/, "")}/funding-sources`);
 
